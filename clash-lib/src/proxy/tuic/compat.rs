@@ -1,13 +1,18 @@
+//! Sink/Stream adapters between Clash UDP packets and Wind's TUIC UDP stream.
 use std::{
     pin::Pin,
     task::{Context, Poll},
 };
 
 use futures::{Sink, SinkExt, Stream};
+use wind_core::udp::UdpPacket as WindUdpPacket;
 
-use crate::{common::errors::new_io_error, proxy::datagram::UdpPacket};
+use crate::{
+    common::errors::new_io_error,
+    proxy::{datagram::UdpPacket, tuic::types::SocketAdderTrans},
+};
 
-use super::TuicDatagramOutbound;
+use super::{TuicDatagramOutbound, types::from_target};
 
 impl Sink<UdpPacket> for TuicDatagramOutbound {
     type Error = std::io::Error;
@@ -25,8 +30,13 @@ impl Sink<UdpPacket> for TuicDatagramOutbound {
         mut self: Pin<&mut Self>,
         item: UdpPacket,
     ) -> Result<(), Self::Error> {
+        let packet = WindUdpPacket {
+            source: None,
+            target: item.dst_addr.into_tuic(),
+            payload: item.data.into(),
+        };
         self.send_tx
-            .start_send_unpin(item)
+            .start_send_unpin(packet)
             .map_err(|v| new_io_error(format!("{v:?}")))
     }
 
@@ -56,6 +66,15 @@ impl Stream for TuicDatagramOutbound {
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Option<Self::Item>> {
-        self.recv_rx.poll_recv(cx)
+        let local_addr = self.local_addr.clone();
+        self.recv_rx.poll_recv(cx).map(|opt| {
+            opt.map(|packet| {
+                UdpPacket::new(
+                    packet.payload.to_vec(),
+                    from_target(packet.target),
+                    local_addr,
+                )
+            })
+        })
     }
 }

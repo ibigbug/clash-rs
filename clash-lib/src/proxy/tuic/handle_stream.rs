@@ -1,109 +1,51 @@
-use super::types::TuicConnection;
-use crate::proxy::tuic::types::UdpRelayMode;
-use anyhow::anyhow;
-use bytes::Bytes;
-use register_count::Register;
-use std::sync::{Arc, atomic::Ordering};
-use tuic_core::quinn::{RecvStream, SendStream, Task, VarInt};
+//! Clash stream adapter for a Wind TUIC TCP stream.
+use std::{
+    io,
+    pin::Pin,
+    task::{Context, Poll},
+};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use wind_quic::quinn::{QuinnRecv, QuinnSend};
 
-impl TuicConnection {
-    pub async fn accept_uni_stream(&self) -> anyhow::Result<(RecvStream, Register)> {
-        let max = self.max_concurrent_uni_streams.load(Ordering::Relaxed);
+/// A connected TUIC TCP stream returned by `TuicOutbound::connect_tcp`.
+///
+/// The joined QUIC halves keep the connection alive on their own; the Wind
+/// outbound is owned by the handler for the connection's lifetime.
+pub struct TuicTcpStream {
+    pub io: tokio::io::Join<QuinnRecv, QuinnSend>,
+}
 
-        if self.remote_uni_stream_cnt.count() as u32 == max {
-            self.max_concurrent_uni_streams
-                .store(max * 2, Ordering::Relaxed);
+impl crate::proxy::ProxyStream for TuicTcpStream {}
 
-            self.conn
-                .set_max_concurrent_uni_streams(VarInt::from(max * 2));
-        }
-
-        let recv = self.conn.accept_uni().await?;
-        let reg = self.remote_uni_stream_cnt.reg();
-        Ok((recv, reg))
+impl AsyncRead for TuicTcpStream {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.io).poll_read(cx, buf)
+    }
+}
+impl AsyncWrite for TuicTcpStream {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.io).poll_write(cx, buf)
     }
 
-    pub async fn accept_bi_stream(
-        &self,
-    ) -> anyhow::Result<(SendStream, RecvStream, Register)> {
-        let max = self.max_concurrent_bi_streams.load(Ordering::Relaxed);
-
-        if self.remote_bi_stream_cnt.count() as u32 == max {
-            self.max_concurrent_bi_streams
-                .store(max * 2, Ordering::Relaxed);
-
-            self.conn
-                .set_max_concurrent_bi_streams(VarInt::from(max * 2));
-        }
-
-        let (send, recv) = self.conn.accept_bi().await?;
-        let reg = self.remote_bi_stream_cnt.reg();
-        Ok((send, recv, reg))
+    fn poll_flush(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.io).poll_flush(cx)
     }
 
-    pub async fn accept_datagram(&self) -> anyhow::Result<Bytes> {
-        Ok(self.conn.read_datagram().await?)
-    }
-
-    pub async fn handle_uni_stream(
-        self: Arc<Self>,
-        recv: RecvStream,
-        _reg: Register,
-    ) {
-        tracing::debug!("[relay] incoming unidirectional stream");
-
-        let res = match self.inner.accept_uni_stream(recv).await {
-            Err(err) => Err(anyhow!(err)),
-            Ok(Task::Packet(pkt)) => match self.udp_relay_mode {
-                UdpRelayMode::Quic => {
-                    self.incoming_udp(pkt).await;
-                    Ok(())
-                }
-                UdpRelayMode::Native => Err(anyhow!("wrong packet source")),
-            },
-            _ => unreachable!(), // already filtered in `tuic_quinn`
-        };
-
-        if let Err(err) = res {
-            tracing::warn!("[relay] incoming unidirectional stream error: {err}");
-        }
-    }
-
-    pub async fn handle_bi_stream(
-        self: Arc<Self>,
-        send: SendStream,
-        recv: RecvStream,
-        _reg: Register,
-    ) {
-        tracing::debug!("[relay] incoming bidirectional stream");
-
-        let err = match self.inner.accept_bi_stream(send, recv).await {
-            Err(err) => anyhow!(err),
-            _ => anyhow!("A client shouldn't receive bi stream"),
-        };
-
-        tracing::warn!("[relay] incoming bidirectional stream error: {err}");
-    }
-
-    pub async fn handle_datagram(self: Arc<Self>, dg: Bytes) {
-        tracing::debug!("[relay] incoming datagram");
-
-        let res = match self.inner.accept_datagram(dg) {
-            Err(err) => Err(anyhow!(err)),
-            Ok(Task::Packet(pkt)) => match self.udp_relay_mode {
-                UdpRelayMode::Native => {
-                    self.incoming_udp(pkt).await;
-                    Ok(())
-                }
-                UdpRelayMode::Quic => Err(anyhow!("wrong packet source")),
-            },
-            _ => Err(anyhow!(
-                "Datagram shouldn't receive any data expect UDP packet"
-            )),
-        };
-
-        if let Err(err) = res {
-            tracing::warn!("[relay] incoming datagram error: {err}");
-        }
+    fn poll_shutdown(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.io).poll_shutdown(cx)
     }
 }

@@ -1,207 +1,22 @@
-use crate::{
-    app::{dns::ThreadSafeDNSResolver, net::DEFAULT_OUTBOUND_INTERFACE},
-    proxy::{datagram::UdpPacket, utils::new_udp_socket},
-    session::SocksAddr as ClashSocksAddr,
-};
+//! Clash address/configuration adapters for Wind's TUIC protocol.
 use anyhow::{Result, anyhow};
-use register_count::Counter;
-use std::{
-    collections::HashMap,
-    net::{IpAddr, SocketAddr},
-    sync::{Arc, atomic::AtomicU32},
-    time::Duration,
+use std::net::{IpAddr, SocketAddr};
+use wind_core::types::TargetAddr;
+use wind_tuic::quinn::{
+    CongestionControl as WindCongestionControl, UdpRelayMode as WindUdpRelayMode,
 };
-use tokio::sync::RwLock as AsyncRwLock;
-use tracing::debug;
-use tuic_core::quinn::{
-    Connection as InnerConnection, Endpoint as QuinnEndpoint, QuinnConnection,
-    ZeroRttAccepted,
-};
-use uuid::Uuid;
 
-pub struct TuicEndpoint {
-    pub ep: QuinnEndpoint,
-    pub server: ServerAddr,
-    pub uuid: Uuid,
-    pub password: Arc<[u8]>,
-    pub udp_relay_mode: UdpRelayMode,
-    pub zero_rtt_handshake: bool,
-    pub heartbeat: Duration,
-    pub gc_interval: Duration,
-    pub gc_lifetime: Duration,
-}
-impl TuicEndpoint {
-    pub async fn connect(
-        &self,
-        resolver: &ThreadSafeDNSResolver,
-        rebind: bool,
-    ) -> Result<Arc<TuicConnection>> {
-        let remote_addr = self.server.resolve(resolver).await?;
-        let connect_to = async {
-            // if client and server don't match each other or forced to rebind,
-            // then rebind local socket
-            if rebind {
-                debug!("rebinding endpoint UDP socket");
+use crate::{app::dns::ThreadSafeDNSResolver, session::SocksAddr};
 
-                let socket = {
-                    let iface = DEFAULT_OUTBOUND_INTERFACE.read().await;
-                    new_udp_socket(
-                        None,
-                        iface.as_ref(),
-                        #[cfg(target_os = "linux")]
-                        None,
-                        Some(remote_addr),
-                    )
-                    .await?
-                };
-
-                debug!("rebound endpoint UDP socket to {}", socket.local_addr()?);
-
-                self.ep.rebind(socket.into_std()?).map_err(|err| {
-                    anyhow!("failed to rebind endpoint UDP socket {}", err)
-                })?;
-            }
-
-            tracing::trace!(
-                "connecting to {} {} from {}",
-                remote_addr,
-                self.server.server_name(),
-                self.ep.local_addr().unwrap()
-            );
-
-            let conn = self.ep.connect(remote_addr, self.server.server_name())?;
-            let (conn, zero_rtt_accepted) = if self.zero_rtt_handshake {
-                match conn.into_0rtt() {
-                    Ok((conn, zero_rtt_accepted)) => (conn, Some(zero_rtt_accepted)),
-                    Err(conn) => (conn.await?, None),
-                }
-            } else {
-                (conn.await?, None)
-            };
-
-            anyhow::Ok((conn, zero_rtt_accepted))
-        };
-
-        let (conn, zero_rtt_accepted) = connect_to.await?;
-        Ok(TuicConnection::new(
-            conn,
-            zero_rtt_accepted,
-            self.udp_relay_mode,
-            self.uuid,
-            self.password.clone(),
-            self.heartbeat,
-            self.gc_interval,
-            self.gc_lifetime,
-        ))
-    }
-}
-
-#[derive(Clone)]
-pub struct TuicConnection {
-    pub conn: QuinnConnection,
-    pub inner: InnerConnection<tuic_core::quinn::side::Client>,
-    pub uuid: Uuid,
-    pub password: Arc<[u8]>,
-    pub remote_uni_stream_cnt: Counter,
-    pub remote_bi_stream_cnt: Counter,
-    pub max_concurrent_uni_streams: Arc<AtomicU32>,
-    pub max_concurrent_bi_streams: Arc<AtomicU32>,
-    pub udp_relay_mode: UdpRelayMode,
-    pub udp_sessions: Arc<AsyncRwLock<HashMap<u16, UdpSession>>>,
-}
-
-pub struct UdpSession {
-    pub incoming: tokio::sync::mpsc::Sender<UdpPacket>,
-    pub local_addr: ClashSocksAddr,
-}
-
-impl TuicConnection {
-    pub fn check_open(&self) -> Result<()> {
-        self.conn
-            .close_reason()
-            .map_or(Ok(()), |err| Err(err.into()))
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn new(
-        conn: QuinnConnection,
-        zero_rtt_accepted: Option<ZeroRttAccepted>,
-        udp_relay_mode: UdpRelayMode,
-        uuid: Uuid,
-        password: Arc<[u8]>,
-        heartbeat: Duration,
-        gc_interval: Duration,
-        gc_lifetime: Duration,
-    ) -> Arc<Self> {
-        let conn = Self {
-            conn: conn.clone(),
-            inner: InnerConnection::<tuic_core::quinn::side::Client>::new(conn),
-            uuid,
-            password,
-            udp_relay_mode,
-            remote_uni_stream_cnt: Counter::new(),
-            remote_bi_stream_cnt: Counter::new(),
-            // TODO: seems tuic dynamically adjust the size of max concurrent
-            // streams, is it necessary to configure the stream size?
-            max_concurrent_uni_streams: Arc::new(AtomicU32::new(512)),
-            max_concurrent_bi_streams: Arc::new(AtomicU32::new(512)),
-            udp_sessions: Arc::new(AsyncRwLock::new(HashMap::new())),
-        };
-        let conn = Arc::new(conn);
-        tokio::spawn(conn.clone().init(
-            zero_rtt_accepted,
-            heartbeat,
-            gc_interval,
-            gc_lifetime,
-        ));
-
-        conn
-    }
-
-    async fn init(
-        self: Arc<Self>,
-        zero_rtt_accepted: Option<ZeroRttAccepted>,
-        heartbeat: Duration,
-        gc_interval: Duration,
-        gc_lifetime: Duration,
-    ) {
-        tracing::info!("connection established");
-
-        // TODO check the cancellation safety of tuic_auth
-        tokio::spawn(self.clone().tuic_auth(zero_rtt_accepted));
-        tokio::spawn(self.clone().cyclical_tasks(
-            heartbeat,
-            gc_interval,
-            gc_lifetime,
-        ));
-
-        let err = loop {
-            tokio::select! {
-                res = self.accept_uni_stream() => match res {
-                    Ok((recv, reg)) => tokio::spawn(self.clone().handle_uni_stream(recv, reg)),
-                    Err(err) => break err,
-                },
-                res = self.accept_bi_stream() => match res {
-                    Ok((send, recv, reg)) => tokio::spawn(self.clone().handle_bi_stream(send, recv, reg)),
-                    Err(err) => break err,
-                },
-                res = self.accept_datagram() => match res {
-                    Ok(dg) => tokio::spawn(self.clone().handle_datagram(dg)),
-                    Err(err) => break err,
-                },
-            };
-        };
-
-        tracing::warn!("connection error: {err:?}");
-    }
-}
-
+/// The configured TUIC server address, resolved to a socket address just
+/// before the Wind outbound is built.
 pub struct ServerAddr {
     domain: String,
     port: u16,
     ip: Option<IpAddr>,
     sni: Option<String>,
 }
+
 impl ServerAddr {
     pub fn new(
         domain: String,
@@ -217,24 +32,32 @@ impl ServerAddr {
         }
     }
 
-    #[inline]
     pub fn server_name(&self) -> &str {
-        self.sni.as_ref().unwrap_or(&self.domain)
+        self.sni.as_deref().unwrap_or(&self.domain)
     }
 
     pub async fn resolve(
         &self,
         resolver: &ThreadSafeDNSResolver,
     ) -> Result<SocketAddr> {
-        if let Some(ip) = self.ip {
-            Ok(SocketAddr::from((ip, self.port)))
+        let ip = if let Some(ip) = self.ip {
+            ip
+        } else if let Ok(ip) = self
+            .domain
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .parse()
+        {
+            ip
         } else {
-            let ip = resolver
-                .resolve(self.domain.as_str(), false)
+            resolver
+                .resolve(&self.domain, false)
                 .await?
-                .ok_or(anyhow!("Resolve failed: unknown hostname"))?;
-            Ok(SocketAddr::from((ip, self.port)))
-        }
+                .ok_or_else(|| {
+                    anyhow!("TUIC server resolution returned no address")
+                })?
+        };
+        Ok(SocketAddr::new(ip, self.port))
     }
 }
 
@@ -253,6 +76,14 @@ impl From<&str> for UdpRelayMode {
         } else {
             // TODO logging
             Self::Quic
+        }
+    }
+}
+impl From<UdpRelayMode> for WindUdpRelayMode {
+    fn from(mode: UdpRelayMode) -> Self {
+        match mode {
+            UdpRelayMode::Native => Self::Native,
+            UdpRelayMode::Quic => Self::Quic,
         }
     }
 }
@@ -286,19 +117,38 @@ impl From<&str> for CongestionControl {
         }
     }
 }
+impl From<CongestionControl> for WindCongestionControl {
+    fn from(cc: CongestionControl) -> Self {
+        match cc {
+            CongestionControl::Cubic => Self::Cubic,
+            CongestionControl::NewReno => Self::NewReno,
+            CongestionControl::Bbr => Self::Bbr,
+            CongestionControl::Bbr3 => Self::Bbr3,
+        }
+    }
+}
 
 pub trait SocketAdderTrans {
-    fn into_tuic(self) -> tuic_core::Address;
+    fn into_tuic(self) -> TargetAddr;
 }
-impl SocketAdderTrans for crate::session::SocksAddr {
-    #[inline]
-    fn into_tuic(self) -> tuic_core::Address {
-        use crate::session::SocksAddr;
+impl SocketAdderTrans for SocksAddr {
+    fn into_tuic(self) -> TargetAddr {
         match self {
-            SocksAddr::Ip(addr) => tuic_core::Address::SocketAddress(addr),
-            SocksAddr::Domain(domain, port) => {
-                tuic_core::Address::DomainAddress(domain, port)
+            SocksAddr::Ip(SocketAddr::V4(addr)) => {
+                TargetAddr::IPv4(*addr.ip(), addr.port())
             }
+            SocksAddr::Ip(SocketAddr::V6(addr)) => {
+                TargetAddr::IPv6(*addr.ip(), addr.port())
+            }
+            SocksAddr::Domain(domain, port) => TargetAddr::Domain(domain, port),
         }
+    }
+}
+
+pub fn from_target(addr: TargetAddr) -> SocksAddr {
+    match addr {
+        TargetAddr::IPv4(ip, port) => SocksAddr::Ip((ip, port).into()),
+        TargetAddr::IPv6(ip, port) => SocksAddr::Ip((ip, port).into()),
+        TargetAddr::Domain(domain, port) => SocksAddr::Domain(domain, port),
     }
 }
