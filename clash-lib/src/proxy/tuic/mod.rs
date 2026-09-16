@@ -19,7 +19,9 @@ use wind_core::{
     udp::{UdpPacket as WindUdpPacket, UdpStream as WindUdpStream},
 };
 use wind_quinn::VarInt;
-use wind_tuic::quinn::outbound::{ReconnectConfig, TuicOutbound, TuicOutboundOpts};
+use wind_tuic::quinn::outbound::{
+    ReconnectConfig, TuicOutbound, TuicOutboundOpts, UdpSocketFactory,
+};
 
 use uuid::Uuid;
 
@@ -32,7 +34,9 @@ use crate::{
         },
         dns::ThreadSafeDNSResolver,
     },
-    proxy::{DialWithConnector, tuic::types::ServerAddr},
+    proxy::{
+        DialWithConnector, tuic::types::ServerAddr, utils::new_udp_socket_sync,
+    },
     session::Session,
 };
 
@@ -208,6 +212,7 @@ impl Handler {
         opts: HandlerOptions,
         ctx: Arc<AppContext>,
         resolver: ThreadSafeDNSResolver,
+        sess: &Session,
     ) -> Result<Arc<TuicOutbound>> {
         anyhow::ensure!(
             !opts.heartbeat_interval.is_zero(),
@@ -240,6 +245,26 @@ impl Handler {
         );
         let peer_addr = server.resolve(&resolver).await?;
 
+        // Preserve Clash's outbound socket policy: bind the QUIC UDP socket to
+        // the selected interface and/or set the Linux routing mark, so policy
+        // routing and TUN setups don't leak the TUIC connection out the wrong
+        // egress (or route it back through the tunnel).
+        let socket_factory: UdpSocketFactory = {
+            let iface = sess.iface.clone();
+            #[cfg(target_os = "linux")]
+            let so_mark = sess.so_mark;
+            Arc::new(move |peer: std::net::SocketAddr| {
+                new_udp_socket_sync(
+                    None,
+                    iface.as_ref(),
+                    #[cfg(target_os = "linux")]
+                    so_mark,
+                    Some(peer),
+                )
+                .and_then(tokio::net::UdpSocket::into_std)
+            })
+        };
+
         let wind_opts = TuicOutboundOpts {
             peer_addr,
             sni: server.server_name().to_owned(),
@@ -270,6 +295,7 @@ impl Handler {
             stream_receive_window: Some(opts.receive_window.into_inner()),
             max_idle_time: Some(opts.idle_timeout),
             udp_relay_mode: opts.udp_relay_mode.into(),
+            socket_factory: Some(socket_factory),
         };
 
         let outbound = tokio::time::timeout(
@@ -288,14 +314,19 @@ impl Handler {
 
     async fn get_outbound(
         &self,
+        sess: &Session,
         resolver: &ThreadSafeDNSResolver,
     ) -> Result<Arc<TuicOutbound>> {
+        // The endpoint is built once and shared, so the first session's
+        // interface / routing mark wins; these are process-wide settings in
+        // practice (`interface-name` / `routing-mark`).
         self.outbound
             .get_or_try_init(|| {
                 Self::init_outbound(
                     self.opts.clone(),
                     self.ctx.clone(),
                     resolver.clone(),
+                    sess,
                 )
             })
             .await
@@ -307,7 +338,7 @@ impl Handler {
         sess: &Session,
         resolver: ThreadSafeDNSResolver,
     ) -> Result<BoxedInstrumentedStream> {
-        let outbound = self.get_outbound(&resolver).await?;
+        let outbound = self.get_outbound(sess, &resolver).await?;
         let dest = sess.destination.clone().into_tuic();
         let io = tokio::time::timeout(
             self.opts.request_timeout,
@@ -326,7 +357,7 @@ impl Handler {
         sess: &Session,
         resolver: ThreadSafeDNSResolver,
     ) -> Result<BoxedInstrumentedDatagram> {
-        let outbound = self.get_outbound(&resolver).await?;
+        let outbound = self.get_outbound(sess, &resolver).await?;
         let quic_udp = TuicDatagramOutbound::new(outbound, self.ctx.clone(), sess)?;
         let s = InstrumentedDatagramWrapper::new(quic_udp);
         s.append_to_chain(self.name()).await;
