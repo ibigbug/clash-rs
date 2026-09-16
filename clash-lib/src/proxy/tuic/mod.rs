@@ -20,7 +20,7 @@ use wind_core::{
 };
 use wind_quinn::VarInt;
 use wind_tuic::quinn::outbound::{
-    ReconnectConfig, TuicOutbound, TuicOutboundOpts, UdpSocketFactory,
+    PeerResolver, ReconnectConfig, TuicOutbound, TuicOutboundOpts, UdpSocketFactory,
 };
 
 use uuid::Uuid;
@@ -245,6 +245,21 @@ impl Handler {
         );
         let peer_addr = server.resolve(&resolver).await?;
 
+        // Re-resolve the server before each Wind reconnect so DNS rotation and
+        // failover are followed instead of pinning the address resolved above.
+        // An explicit `ip` override still short-circuits inside `resolve`.
+        let peer_resolver: PeerResolver = {
+            let server = server.clone();
+            let resolver = resolver.clone();
+            Arc::new(move || {
+                let server = server.clone();
+                let resolver = resolver.clone();
+                Box::pin(async move {
+                    server.resolve(&resolver).await.map_err(|e| e.to_string())
+                })
+            })
+        };
+
         // Preserve Clash's outbound socket policy: bind the QUIC UDP socket to
         // the selected interface and/or set the Linux routing mark, so policy
         // routing and TUN setups don't leak the TUIC connection out the wrong
@@ -267,6 +282,7 @@ impl Handler {
 
         let wind_opts = TuicOutboundOpts {
             peer_addr,
+            peer_resolver: Some(peer_resolver),
             sni: server.server_name().to_owned(),
             auth: (
                 opts.uuid,

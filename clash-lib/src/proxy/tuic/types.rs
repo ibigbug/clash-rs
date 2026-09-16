@@ -10,6 +10,7 @@ use crate::{app::dns::ThreadSafeDNSResolver, session::SocksAddr};
 
 /// The configured TUIC server address, resolved to a socket address just
 /// before the Wind outbound is built.
+#[derive(Clone)]
 pub struct ServerAddr {
     domain: String,
     port: u16,
