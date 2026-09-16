@@ -905,6 +905,115 @@ mod tests {
 
         Ok(())
     }
+
+    /// A dropped QUIC connection must end the existing UDP association instead
+    /// of silently blackholing it: the datagram stream closes so the caller
+    /// can recreate the association on the reconnected link.
+    #[tokio::test]
+    #[cfg_attr(
+        qemu_emulated,
+        ignore = "QUIC under qemu-user (cross test) is unreliable"
+    )]
+    async fn test_tuic_udp_association_ends_on_reconnect() -> anyhow::Result<()> {
+        use crate::proxy::datagram::UdpPacket;
+
+        crate::tests::initialize();
+        let server = TuicServerProcess::start().await?;
+        let echo = spawn_udp_echo("127.0.0.1:0").await?;
+
+        let handler = Arc::new(Handler::new(gen_options(server.port())?));
+        handler
+            .register_connector(GLOBAL_DIRECT_CONNECTOR.clone())
+            .await;
+
+        let session = Session {
+            network: crate::session::Network::Udp,
+            typ: crate::session::Type::Socks5,
+            source: "127.0.0.1:54321".parse()?,
+            destination: ClashSocksAddr::Ip(echo),
+            resolved_ip: None,
+            so_mark: None,
+            iface: None,
+            country: None,
+            asn: None,
+            traffic_stats: None,
+            inbound_user: None,
+        };
+
+        let mut datagram = handler
+            .connect_datagram(&session, Arc::new(NoopResolver))
+            .await?;
+
+        datagram
+            .send(UdpPacket {
+                data: b"hello-udp".to_vec(),
+                dst_addr: ClashSocksAddr::Ip(echo),
+                ..Default::default()
+            })
+            .await?;
+        let reply = tokio::time::timeout(Duration::from_secs(4), datagram.next())
+            .await
+            .expect("UDP reply timed out")
+            .expect("UDP session ended before the reply");
+        assert_eq!(reply.data, b"hello-udp");
+
+        // Force the connection down; the supervisor reconnects with the
+        // default 500ms backoff.
+        let outbound = handler
+            .outbound
+            .get()
+            .expect("outbound must be initialized")
+            .clone();
+        outbound
+            .connection
+            .load_full()
+            .inner()
+            .close(0u32.into(), b"test reconnect");
+
+        // The association must end rather than keep accepting sends.
+        match tokio::time::timeout(Duration::from_secs(4), datagram.next()).await {
+            Ok(None) => {}
+            other => panic!(
+                "expected the UDP association stream to end after reconnect, got \
+                 {other:?}"
+            ),
+        }
+
+        // Wait for the reconnect supervisor to swap in a fresh connection.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while outbound
+            .connection
+            .load_full()
+            .inner()
+            .close_reason()
+            .is_some()
+        {
+            anyhow::ensure!(
+                std::time::Instant::now() < deadline,
+                "TUIC client did not reconnect within 10s"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        // A fresh association on the reconnected link must still work.
+        let mut datagram = handler
+            .connect_datagram(&session, Arc::new(NoopResolver))
+            .await?;
+        datagram
+            .send(UdpPacket {
+                data: b"after-reconnect".to_vec(),
+                dst_addr: ClashSocksAddr::Ip(echo),
+                ..Default::default()
+            })
+            .await?;
+        let reply = tokio::time::timeout(Duration::from_secs(4), datagram.next())
+            .await
+            .expect("UDP reply after reconnect timed out")
+            .expect("UDP session ended before the reply after reconnect");
+        assert_eq!(reply.data, b"after-reconnect");
+
+        Ok(())
+    }
 }
 
 #[cfg(all(test, docker_test, throughput_test))]
