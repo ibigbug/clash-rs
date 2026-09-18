@@ -694,20 +694,19 @@ mod tests {
 
         let mut tmp = tempfile::NamedTempFile::new()?;
         tmp.write_all(HYSTERIA_SERVER_CONFIG.as_bytes())?;
+        let (_, path) = tmp.keep()?;
 
-        let result = DockerTestRunnerBuilder::new()
+        DockerTestRunnerBuilder::new()
             .image(IMAGE_HYSTERIA)
             .mounts(&[
-                (tmp.path().to_str().unwrap(), "/config.json"),
+                (path.to_str().unwrap(), "/config.json"),
                 (cert.to_str().unwrap(), "/home/ubuntu/my.crt"),
                 (key.to_str().unwrap(), "/home/ubuntu/my.key"),
             ])
-            .cmd(&["server"])
+            .cmd(&["server", "-c", "/config.json"])
             .host_port(host_port, 10002)
             .build()
-            .await;
-        drop(tmp);
-        result
+            .await
     }
 
     #[tokio::test]
@@ -830,19 +829,19 @@ mod e2e {
 
         let mut tmp = tempfile::NamedTempFile::new()?;
         tmp.write_all(server_config.as_bytes())?;
+        let (_, path) = tmp.keep()?;
 
         let runner = DockerTestRunnerBuilder::new()
             .image(IMAGE_HYSTERIA)
-            .cmd(&["server"])
+            .cmd(&["server", "-c", "/config.json"])
             .no_port()
             .mounts(&[
-                (tmp.path().to_str().unwrap(), "/config.json"),
+                (path.to_str().unwrap(), "/config.json"),
                 (cert.to_str().unwrap(), "/home/ubuntu/my.crt"),
                 (key.to_str().unwrap(), "/home/ubuntu/my.key"),
             ])
             .build()
             .await?;
-        drop(tmp);
         Ok(runner)
     }
 
