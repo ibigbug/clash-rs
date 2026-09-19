@@ -1095,34 +1095,32 @@ mod tests {
             false,
         );
 
-        let mut config = Config::default();
-        config.enable = true;
-        config.ipv6 = false;
-
-        // Set up proxy server nameserver
-        config.proxy_server_nameserver = Some(vec![NameServer {
-            net: DNSNetMode::Udp,
-            host: url::Host::Ipv4("8.8.8.8".parse().unwrap()),
-            port: 53,
-            interface: None,
-            proxy: None,
-        }]);
-
-        config.default_nameserver = vec![NameServer {
-            net: DNSNetMode::Udp,
-            host: url::Host::Ipv4("114.114.114.114".parse().unwrap()),
-            port: 53,
-            interface: None,
-            proxy: None,
-        }];
-
-        config.nameserver = vec![NameServer {
-            net: DNSNetMode::Udp,
-            host: url::Host::Ipv4("223.5.5.5".parse().unwrap()),
-            port: 53,
-            interface: None,
-            proxy: None,
-        }];
+        let config = Config {
+            enable: true,
+            ipv6: false,
+            proxy_server_nameserver: Some(vec![NameServer {
+                net: DNSNetMode::Udp,
+                host: url::Host::Ipv4("8.8.8.8".parse().unwrap()),
+                port: 53,
+                interface: None,
+                proxy: None,
+            }]),
+            default_nameserver: vec![NameServer {
+                net: DNSNetMode::Udp,
+                host: url::Host::Ipv4("114.114.114.114".parse().unwrap()),
+                port: 53,
+                interface: None,
+                proxy: None,
+            }],
+            nameserver: vec![NameServer {
+                net: DNSNetMode::Udp,
+                host: url::Host::Ipv4("223.5.5.5".parse().unwrap()),
+                port: 53,
+                interface: None,
+                proxy: None,
+            }],
+            ..Default::default()
+        };
 
         let resolver = EnhancedResolver::new(
             config,
@@ -1158,28 +1156,26 @@ mod tests {
             false,
         );
 
-        let mut config = Config::default();
-        config.enable = true;
-        config.ipv6 = false;
-
-        // No proxy server nameserver configured
-        config.proxy_server_nameserver = None;
-
-        config.default_nameserver = vec![NameServer {
-            net: DNSNetMode::Udp,
-            host: url::Host::Ipv4("114.114.114.114".parse().unwrap()),
-            port: 53,
-            interface: None,
-            proxy: None,
-        }];
-
-        config.nameserver = vec![NameServer {
-            net: DNSNetMode::Udp,
-            host: url::Host::Ipv4("223.5.5.5".parse().unwrap()),
-            port: 53,
-            interface: None,
-            proxy: None,
-        }];
+        let config = Config {
+            enable: true,
+            ipv6: false,
+            proxy_server_nameserver: None,
+            default_nameserver: vec![NameServer {
+                net: DNSNetMode::Udp,
+                host: url::Host::Ipv4("114.114.114.114".parse().unwrap()),
+                port: 53,
+                interface: None,
+                proxy: None,
+            }],
+            nameserver: vec![NameServer {
+                net: DNSNetMode::Udp,
+                host: url::Host::Ipv4("223.5.5.5".parse().unwrap()),
+                port: 53,
+                interface: None,
+                proxy: None,
+            }],
+            ..Default::default()
+        };
 
         let resolver = EnhancedResolver::new(
             config,
@@ -1242,24 +1238,26 @@ mod tests {
             interface: None,
             proxy: None,
         };
-        let mut config = Config::default();
-        config.enable = true;
-        config.ipv6 = false;
-        config.proxy_server_nameserver = Some(vec![ns.clone()]);
-        config.default_nameserver = vec![NameServer {
-            net: DNSNetMode::Udp,
-            host: url::Host::Ipv4("114.114.114.114".parse().unwrap()),
-            port: 53,
-            interface: None,
-            proxy: None,
-        }];
-        config.nameserver = vec![NameServer {
-            net: DNSNetMode::Udp,
-            host: url::Host::Ipv4("223.5.5.5".parse().unwrap()),
-            port: 53,
-            interface: None,
-            proxy: None,
-        }];
+        let config = Config {
+            enable: true,
+            ipv6: false,
+            proxy_server_nameserver: Some(vec![ns.clone()]),
+            default_nameserver: vec![NameServer {
+                net: DNSNetMode::Udp,
+                host: url::Host::Ipv4("114.114.114.114".parse().unwrap()),
+                port: 53,
+                interface: None,
+                proxy: None,
+            }],
+            nameserver: vec![NameServer {
+                net: DNSNetMode::Udp,
+                host: url::Host::Ipv4("223.5.5.5".parse().unwrap()),
+                port: 53,
+                interface: None,
+                proxy: None,
+            }],
+            ..Default::default()
+        };
         (config, ns)
     }
 
@@ -1363,14 +1361,17 @@ mod tests {
             proxy: None,
         };
 
-        let mut config = Config::default();
-        config.enable = true;
-        config.default_nameserver = vec![ns_main.clone()];
-        config.nameserver = vec![ns_main];
-        config.fallback = vec![]; // No fallback
-        config
-            .nameserver_policy
-            .insert("policy.example.com".to_string(), ns_policy);
+        let mut nameserver_policy = HashMap::new();
+        nameserver_policy.insert("policy.example.com".to_string(), ns_policy);
+
+        let config = Config {
+            enable: true,
+            default_nameserver: vec![ns_main.clone()],
+            nameserver: vec![ns_main],
+            fallback: vec![],
+            nameserver_policy,
+            ..Default::default()
+        };
 
         let resolver = EnhancedResolver::new(
             config,

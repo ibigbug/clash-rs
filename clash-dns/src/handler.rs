@@ -515,7 +515,7 @@ mod tests {
                 .await;
 
         assert!(listener.is_some());
-        let _: JoinHandle<anyhow::Result<()>> = tokio::spawn(async move {
+        let _handle: JoinHandle<anyhow::Result<()>> = tokio::spawn(async move {
             listener.unwrap().await?;
             Ok(())
         });
@@ -556,7 +556,7 @@ mod tests {
         );
 
         let stream = stream_future.await.inspect_err(|e| {
-            assert!(false, "Failed to connect to DoT server: {}", e);
+            panic!("Failed to connect to DoT server: {}", e);
         })?;
         let (mut client, bg) = Client::<TokioRuntimeProvider>::with_timeout(
             stream,

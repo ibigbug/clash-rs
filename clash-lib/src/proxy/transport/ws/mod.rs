@@ -125,6 +125,7 @@ mod tests {
     };
 
     #[tokio::test]
+    #[allow(clippy::result_large_err)]
     async fn websocket_request_target_is_encoded_without_normalization() {
         let client = Client::new(
             "example.com".to_owned(),

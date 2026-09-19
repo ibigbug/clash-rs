@@ -414,6 +414,8 @@ impl TuicDatagramOutbound {
     }
 }
 
+impl crate::proxy::ProxyStream for tuic_core::quinn::Connect {}
+
 #[cfg(test)]
 pub(crate) mod test_utils;
 
@@ -1039,5 +1041,3 @@ rules:
             .await
     }
 }
-
-impl crate::proxy::ProxyStream for tuic_core::quinn::Connect {}

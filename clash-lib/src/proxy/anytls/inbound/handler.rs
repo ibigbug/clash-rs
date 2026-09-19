@@ -650,9 +650,7 @@ mod tests {
         let client_task = tokio::spawn(async move {
             // Build a rustls client config that trusts our self-signed cert.
             let mut root_store = rustls::RootCertStore::empty();
-            root_store
-                .add(rustls::pki_types::CertificateDer::from(cert_der))
-                .unwrap();
+            root_store.add(cert_der).unwrap();
             let tls_config = rustls::ClientConfig::builder()
                 .with_root_certificates(root_store)
                 .with_no_client_auth();
@@ -666,10 +664,9 @@ mod tests {
                 .await
                 .unwrap();
 
-            let settings = format!(
-                "v=2\nclient=clash-rs-test\\
+            let settings = "v=2\nclient=clash-rs-test\\
                  npadding-md5=47edb1f4ed8a99480bf416d178311f10"
-            );
+                .to_string();
             let dest =
                 SocksAddr::try_from((expected_host.to_owned(), expected_port))
                     .unwrap();
@@ -912,9 +909,7 @@ mod tests {
         // Client task: connect via TLS, send AnyTLS handshake with magic host.
         let client_task = tokio::spawn(async move {
             let mut root_store = rustls::RootCertStore::empty();
-            root_store
-                .add(rustls::pki_types::CertificateDer::from(cert_der))
-                .unwrap();
+            root_store.add(cert_der).unwrap();
             let tls_config = rustls::ClientConfig::builder()
                 .with_root_certificates(root_store)
                 .with_no_client_auth();

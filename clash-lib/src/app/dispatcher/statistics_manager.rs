@@ -482,10 +482,10 @@ impl Manager {
 
         tokio::spawn(async move {
             let mut connections = connections.lock().await;
-            if let Some((_, close_notify_opt)) = connections.get_mut(&id) {
-                if let Some(close_notify) = close_notify_opt.take() {
-                    let _ = close_notify.send(());
-                }
+            if let Some((_, close_notify_opt)) = connections.get_mut(&id)
+                && let Some(close_notify) = close_notify_opt.take()
+            {
+                let _ = close_notify.send(());
             }
         });
     }
