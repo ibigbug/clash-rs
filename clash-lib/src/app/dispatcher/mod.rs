@@ -4,7 +4,8 @@ mod tracked;
 
 pub use dispatcher_impl::Dispatcher;
 pub use statistics_manager::{
-    ClosedFlowInfo, Manager as StatisticsManager, set_closed_flows_cap,
+    ClosedFlowInfo, DEFAULT_CLOSED_FLOWS_CAP, Manager as StatisticsManager,
+    MemLimitMode, set_closed_flows_cap,
 };
 pub use tracked::{
     BoxedInstrumentedDatagram, BoxedInstrumentedStream, InstrumentedDatagram,

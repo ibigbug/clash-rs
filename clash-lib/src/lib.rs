@@ -429,6 +429,10 @@ impl RuntimeComponents {
         self.tun_runner.shutdown();
         self.dns_listener.shutdown();
         self.inbound_manager.shutdown();
+        let stats = self.statistics_manager.clone();
+        tokio::spawn(async move {
+            stats.stop().await;
+        });
     }
 }
 
@@ -658,6 +662,12 @@ async fn create_components(
 
     let statistics_manager = StatisticsManager::new();
 
+    // Inject the DNS resolver so statistics_manager can clear DNS caches
+    // under memory pressure (see check_memory_pressure).
+    statistics_manager
+        .set_dns_resolver(dns_resolver.clone())
+        .await;
+
     debug!("initializing dispatcher");
     let dispatcher = Arc::new(Dispatcher::new(
         outbound_manager.clone(),
@@ -668,11 +678,12 @@ async fn create_components(
         config.experimental.as_ref().and_then(|e| e.tcp_buffer_size),
     ));
 
-    if let Some(ref exp) = config.experimental
-        && let Some(cap) = exp.closed_flows_cap
-    {
-        crate::app::dispatcher::set_closed_flows_cap(cap);
-    }
+    let closed_flows_cap = config
+        .experimental
+        .as_ref()
+        .and_then(|e| e.closed_flows_cap)
+        .unwrap_or(crate::app::dispatcher::DEFAULT_CLOSED_FLOWS_CAP);
+    crate::app::dispatcher::set_closed_flows_cap(closed_flows_cap);
 
     debug!("initializing authenticator");
     let authenticator = Arc::new(auth::PlainAuthenticator::new(config.users));

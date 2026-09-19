@@ -13,6 +13,85 @@ use tikv_jemallocator::Jemalloc;
 #[global_allocator]
 static GLOBAL: Jemalloc = Jemalloc;
 
+/// Tune jemalloc for low-memory environments (e.g. routers with 128MB RAM).
+///
+/// **On-demand activation**: only called when the user has opted into memory
+/// limiting via `CLASH_RS_MEM_LIMIT_MB`.  Users who don't set the limit keep
+/// jemalloc's defaults (10s decay) for maximum throughput.
+///
+/// Sets short decay times so freed pages are returned to the OS quickly,
+/// instead of being cached indefinitely.  This trades a small amount of
+/// CPU (more frequent madvise calls) for significantly lower RSS after
+/// traffic bursts.
+///
+/// Override at runtime with `MALLOC_CONF=dirty_decay_ms:5000,...`.
+#[cfg(all(feature = "jemallocator", not(feature = "dhat-heap")))]
+fn tune_jemalloc() {
+    // If MALLOC_CONF is explicitly provided by the user, honor it and avoid
+    // overriding.
+    if std::env::var("MALLOC_CONF").is_ok() {
+        return;
+    }
+
+    // Only tune when the user has explicitly enabled memory limiting.
+    // Otherwise keep jemalloc defaults (10s decay) for max throughput.
+    let enabled = match std::env::var("CLASH_RS_MEM_LIMIT_MB") {
+        Ok(val) => {
+            let val = val.trim();
+            let num_str = if let Some(rest) = val.strip_suffix(":hard") {
+                rest
+            } else if let Some(rest) = val.strip_suffix(":soft") {
+                rest
+            } else {
+                val
+            };
+            match num_str.parse::<u64>() {
+                Ok(mb) => mb > 0,
+                Err(_) => false,
+            }
+        }
+        Err(_) => false,
+    };
+    if !enabled {
+        return;
+    }
+
+    // dirty_decay_ms: how long dirty pages are kept before being purged.
+    // Shorter = faster RSS reclamation, slightly more CPU.
+    //
+    // tikv-jemalloc-ctl 0.7's `opt` module doesn't expose dirty_decay_ms /
+    // muzzy_decay_ms (they are read-only startup options).  We use the raw
+    // mallctl API to set per-arena decay values at runtime.
+    //
+    // IMPORTANT: raw::write requires null-terminated name strings (validated
+    // by `validate_name` which asserts `*name.last() == b'\0'`).  We append
+    // `\0` to every key.  The value type must match jemalloc's `ssize_t`:
+    // on 64-bit it's i64, on 32-bit (e.g. armv7-musl) it's i32.  Using `isize`
+    // matches the platform's native ssize_t size automatically.
+    use tikv_jemalloc_ctl::raw;
+    let decay_ms: isize = 1000;
+
+    // Update decay for already-existing arenas.
+    // (Setting `arenas.dirty_decay_ms` only affects FUTURE arenas created
+    // after this call, and is read-only in some jemalloc builds — so we
+    // iterate existing arenas directly.  New arenas are rare in a long-running
+    // proxy, and they inherit a reasonable default.)
+    let narenas = tikv_jemalloc_ctl::arenas::narenas::read().unwrap_or(0);
+    for i in 0..narenas {
+        // Use CString-style null-terminated bytes; format! + push('\0') avoids
+        // allocating a CString and keeps the lifetime local to the call.
+        let dirty_key = format!("arena.{}.dirty_decay_ms\0", i);
+        let muzzy_key = format!("arena.{}.muzzy_decay_ms\0", i);
+        unsafe {
+            let _ = raw::write(dirty_key.as_bytes(), decay_ms);
+            let _ = raw::write(muzzy_key.as_bytes(), decay_ms);
+        }
+    }
+}
+
+#[cfg(not(all(feature = "jemallocator", not(feature = "dhat-heap"))))]
+fn tune_jemalloc() {}
+
 extern crate clash_lib as clash;
 
 use clap::Parser;
@@ -105,6 +184,10 @@ fn env_truthy(name: &str) -> bool {
 fn main() -> anyhow::Result<()> {
     #[cfg(feature = "dhat-heap")]
     let _profiler = dhat::Profiler::new_heap();
+
+    // Tune jemalloc early so all subsequent allocations benefit from short
+    // decay times (faster RSS reclamation on low-memory devices).
+    tune_jemalloc();
 
     // Those arguments are for compatibility with `mihomo`
     // Technically, I do not think `mihomo` is a modern/standard POSIX Cli

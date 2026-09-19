@@ -284,6 +284,8 @@ impl PlainProxyAPIResponse for Handler {
     }
 }
 
+impl crate::proxy::ProxyStream for ::tailscale::netstack::TcpStream {}
+
 #[cfg(test)]
 mod tests {
     use super::{Handler, HandlerOptions};
@@ -492,5 +494,3 @@ mod tests {
         );
     }
 }
-
-impl crate::proxy::ProxyStream for ::tailscale::netstack::TcpStream {}

@@ -225,6 +225,8 @@ pub(crate) fn build_addon_bytes(flow: &str) -> Vec<u8> {
     buf
 }
 
+impl crate::proxy::ProxyStream for VlessStream {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -304,5 +306,3 @@ mod tests {
         assert!(result.is_err());
     }
 }
-
-impl crate::proxy::ProxyStream for VlessStream {}

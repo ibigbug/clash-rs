@@ -31,7 +31,7 @@ bench = ["clash-lib/bench"]
 dashboard = ["clash-lib/dashboard"]
 dhat-heap = ["dep:dhat"]
 telemetry = ["clash-lib/telemetry"]
-jemallocator = ["dep:tikv-jemallocator"]
+jemallocator = ["dep:tikv-jemallocator", "dep:tikv-jemalloc-ctl"]
 
 aws-lc-rs = ["dep:aws-lc-rs", "clash-lib/aws-lc-rs"]
 ring = ["clash-lib/ring"]
@@ -44,6 +44,7 @@ clash-lib = { path = "../clash-lib", default-features = false }
 
 dhat = { version = "0.3", optional = true }
 tikv-jemallocator = { version = "0.7", optional = true }
+tikv-jemalloc-ctl = { version = "0.7", optional = true }
 
 sentry = { version = "0.48", default-features = false, features = ["backtrace", "contexts", "panic", "reqwest", "rustls"] }
 human-panic = "2.0"

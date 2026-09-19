@@ -76,6 +76,38 @@ impl Device for NetstackDevice {
     }
 }
 
+pub struct RxTokenImpl {
+    packet: Packet,
+}
+
+impl RxToken for RxTokenImpl {
+    fn consume<R, F>(self, f: F) -> R
+    where
+        F: FnOnce(&[u8]) -> R,
+    {
+        f(self.packet.data())
+    }
+}
+
+pub struct TxTokenImpl<'a> {
+    tx_sender: mpsc::Permit<'a, Packet>,
+}
+
+impl<'a> TxToken for TxTokenImpl<'a> {
+    fn consume<R, F>(self, len: usize, f: F) -> R
+    where
+        F: FnOnce(&mut [u8]) -> R,
+    {
+        let mut buffer = vec![0u8; len];
+        let result = f(&mut buffer);
+
+        let packet = Packet::new(buffer);
+        self.tx_sender.send(packet);
+
+        result
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -133,37 +165,5 @@ mod tests {
             "BUG: inbound ACK was silently dropped when tx channel was full; \
              smoltcp will never advance its send window → download stalls to 0"
         );
-    }
-}
-
-pub struct RxTokenImpl {
-    packet: Packet,
-}
-
-impl RxToken for RxTokenImpl {
-    fn consume<R, F>(self, f: F) -> R
-    where
-        F: FnOnce(&[u8]) -> R,
-    {
-        f(self.packet.data())
-    }
-}
-
-pub struct TxTokenImpl<'a> {
-    tx_sender: mpsc::Permit<'a, Packet>,
-}
-
-impl<'a> TxToken for TxTokenImpl<'a> {
-    fn consume<R, F>(self, len: usize, f: F) -> R
-    where
-        F: FnOnce(&mut [u8]) -> R,
-    {
-        let mut buffer = vec![0u8; len];
-        let result = f(&mut buffer);
-
-        let packet = Packet::new(buffer);
-        self.tx_sender.send(packet);
-
-        result
     }
 }

@@ -83,6 +83,11 @@ pub trait ClashResolver: Sync + Send {
     fn set_ipv6(&self, enable: bool);
 
     fn kind(&self) -> ResolverKind;
+
+    /// Clear all in-memory caches (DNS response cache, reverse lookup cache).
+    /// Called under memory pressure to free RSS.  Default no-op for resolvers
+    /// that don't cache (e.g. SystemResolver).
+    async fn clear_cache(&self) {}
 }
 
 /// Returns the IP address if `host` is a valid IP literal, otherwise `None`.

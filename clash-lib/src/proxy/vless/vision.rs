@@ -376,6 +376,8 @@ impl AsyncWrite for VisionStream {
     }
 }
 
+impl crate::proxy::ProxyStream for VisionStream {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -688,5 +690,3 @@ mod tests {
         assert_eq!(out, expected);
     }
 }
-
-impl crate::proxy::ProxyStream for VisionStream {}

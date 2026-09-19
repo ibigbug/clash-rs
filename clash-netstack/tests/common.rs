@@ -169,10 +169,10 @@ pub fn build_tcp_ack(seq: u32, ack: u32, window: u16) -> Bytes {
     buf.put_u16(0x0000); // checksum placeholder
     buf.put_u16(0x0000); // urgent pointer
     // checksums
-    let tcp_sum = tcp_udp_checksum(src_ip, dst_ip, 6, &buf[tcp_start..].to_vec());
+    let tcp_sum = tcp_udp_checksum(src_ip, dst_ip, 6, &buf[tcp_start..]);
     let chk_pos = tcp_start + 16;
     buf[chk_pos..chk_pos + 2].copy_from_slice(&tcp_sum.to_be_bytes());
-    let ip_sum = ipv4_checksum(&buf[..20].to_vec());
+    let ip_sum = ipv4_checksum(&buf[..20]);
     buf[10..12].copy_from_slice(&ip_sum.to_be_bytes());
     buf.freeze()
 }
@@ -203,10 +203,10 @@ pub fn build_tcp_syn_packet_with_port(src_port: u16) -> Bytes {
     buf.put_u16(0x7210);
     buf.put_u16(0x0000); // TCP checksum placeholder
     buf.put_u16(0x0000); // urgent
-    let tcp_sum = tcp_udp_checksum(src_ip, dst_ip, 6, &buf[tcp_start..].to_vec());
+    let tcp_sum = tcp_udp_checksum(src_ip, dst_ip, 6, &buf[tcp_start..]);
     let chk_pos = tcp_start + 16;
     buf[chk_pos..chk_pos + 2].copy_from_slice(&tcp_sum.to_be_bytes());
-    let ip_sum = ipv4_checksum(&buf[..20].to_vec());
+    let ip_sum = ipv4_checksum(&buf[..20]);
     buf[10..12].copy_from_slice(&ip_sum.to_be_bytes());
     buf.freeze()
 }
