@@ -1,6 +1,6 @@
 <p align="center">
   <a href="https://github.com/Watfaq/clash-rs">
-    <img width="200" src="https://github.com/Watfaq/clash-rs/assets/543405/76122ef1-eac8-478a-8ba4-ca5e54f8e272">
+    <img width="200" src="https://github.com/ibigbug/clash-rs/assets/543405/76122ef1-eac8-478a-8ba4-ca5e54f8e272">
   </a>
 </p>
 
