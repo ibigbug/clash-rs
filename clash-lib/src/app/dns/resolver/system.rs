@@ -57,6 +57,9 @@ impl ClashResolver for SystemResolver {
         host: &str,
         _: bool,
     ) -> anyhow::Result<Option<std::net::Ipv4Addr>> {
+        if let Some(std::net::IpAddr::V4(ip)) = parse_ip_literal(host) {
+            return Ok(Some(ip));
+        }
         let response = tokio::net::lookup_host(format!("{host}:0"))
             .await?
             .filter_map(|ip| match ip.ip() {
@@ -74,6 +77,9 @@ impl ClashResolver for SystemResolver {
     ) -> anyhow::Result<Option<std::net::Ipv6Addr>> {
         if !self.ipv6() {
             return Err(Error::DNSError("ipv6 disabled".into()).into());
+        }
+        if let Some(std::net::IpAddr::V6(ip)) = parse_ip_literal(host) {
+            return Ok(Some(ip));
         }
         let response = tokio::net::lookup_host(format!("{host}:0"))
             .await?

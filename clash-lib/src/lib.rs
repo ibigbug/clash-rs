@@ -685,6 +685,13 @@ async fn create_components(
         .unwrap_or(crate::app::dispatcher::DEFAULT_CLOSED_FLOWS_CAP);
     crate::app::dispatcher::set_closed_flows_cap(closed_flows_cap);
 
+    // Set AnyTLS buffer sizes from experimental config
+    if let Some(ref exp) = config.experimental {
+        let duplex = exp.anytls_duplex_buffer_size.unwrap_or(16 * 1024);
+        let relay = exp.anytls_relay_buffer_size.unwrap_or(4 * 1024);
+        crate::proxy::anytls::set_buffer_config(duplex, relay);
+    }
+
     debug!("initializing authenticator");
     let authenticator = Arc::new(auth::PlainAuthenticator::new(config.users));
 

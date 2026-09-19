@@ -58,25 +58,35 @@ pub fn strategy_rr() -> StrategyFn {
     let mut index = 0;
     Box::new(move |proxies: Vec<AnyOutboundHandler>, _: &Session| {
         let len = proxies.len();
+        if len == 0 {
+            return Box::pin(futures::future::err(std::io::Error::other(
+                "no proxy found",
+            )));
+        }
         index = (index + 1) % len;
         Box::pin(futures::future::ok(proxies[index].clone()))
     })
 }
 
 pub fn strategy_consistent_hashring() -> StrategyFn {
-    let max_retry = 5;
     Box::new(move |proxies, sess| {
+        if proxies.is_empty() {
+            return Box::pin(futures::future::err(std::io::Error::other(
+                "no proxy found",
+            )));
+        }
         let key = murmur3_32(&mut Cursor::new(get_key(sess)), 0).unwrap() as u64;
         let buckets = proxies.len() as i32;
-        for _ in 0..max_retry {
-            let index = jump_hash(key, buckets);
-            if let Some(proxy) = proxies.get(index as usize) {
-                return Box::pin(futures::future::ok(proxy.clone()));
-            }
+        // jump_hash with buckets > 0 always returns a valid index in [0,
+        // buckets) so a single call suffices; no retry needed.
+        let index = jump_hash(key, buckets);
+        if let Some(proxy) = proxies.get(index as usize) {
+            Box::pin(futures::future::ok(proxy.clone()))
+        } else {
+            Box::pin(futures::future::err(std::io::Error::other(
+                "no proxy found",
+            )))
         }
-        Box::pin(futures::future::err(std::io::Error::other(
-            "no proxy found",
-        )))
     })
 }
 

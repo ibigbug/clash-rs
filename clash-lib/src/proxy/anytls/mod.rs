@@ -48,6 +48,34 @@ const STREAM_ID: u32 = 1;
 /// newline), matching how anytls-go serialises a single-entry scheme.
 const CLIENT_PADDING_SCHEME_MD5: &str = "47edb1f4ed8a99480bf416d178311f10";
 
+/// Default duplex buffer size (16KB). Can be overridden via
+/// `experimental.anytls-duplex-buffer-size` in config.
+const DEFAULT_DUPLEX_BUFFER_SIZE: usize = 16 * 1024;
+/// Default relay buffer size (4KB). Can be overridden via
+/// `experimental.anytls-relay-buffer-size` in config.
+const DEFAULT_RELAY_BUFFER_SIZE: usize = 4 * 1024;
+
+/// Global buffer size configuration. Uses AtomicUsize so it can be
+/// updated on config reload (unlike OnceLock which is set-once).
+static DUPLEX_BUFFER_SIZE: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(DEFAULT_DUPLEX_BUFFER_SIZE);
+static RELAY_BUFFER_SIZE_CONFIG: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(DEFAULT_RELAY_BUFFER_SIZE);
+
+/// Set the global AnyTLS buffer sizes. Called during config loading.
+pub fn set_buffer_config(duplex: usize, relay: usize) {
+    DUPLEX_BUFFER_SIZE.store(duplex, std::sync::atomic::Ordering::Release);
+    RELAY_BUFFER_SIZE_CONFIG.store(relay, std::sync::atomic::Ordering::Release);
+}
+
+pub(crate) fn duplex_buffer_size() -> usize {
+    DUPLEX_BUFFER_SIZE.load(std::sync::atomic::Ordering::Acquire)
+}
+
+pub(crate) fn relay_buffer_size() -> usize {
+    RELAY_BUFFER_SIZE_CONFIG.load(std::sync::atomic::Ordering::Acquire)
+}
+
 pub struct HandlerOptions {
     pub name: String,
     pub common_opts: HandlerCommonOptions,
@@ -76,8 +104,6 @@ impl std::fmt::Debug for Handler {
 }
 
 impl Handler {
-    const DUPLEX_BUFFER_SIZE: usize = 64 * 1024;
-    const RELAY_BUFFER_SIZE: usize = 16 * 1024;
     const UDP_OVER_TCP_V2_MAGIC_ADDR: &str = "sp.v2.udp-over-tcp.arpa";
 
     pub fn new(opts: HandlerOptions) -> Self {
@@ -141,7 +167,7 @@ impl Handler {
         stream.flush().await?;
 
         let (mut remote_read, mut remote_write) = tokio::io::split(stream);
-        let (app_stream, relay_stream) = tokio::io::duplex(Self::DUPLEX_BUFFER_SIZE);
+        let (app_stream, relay_stream) = tokio::io::duplex(duplex_buffer_size());
         let (mut relay_read, mut relay_write) = tokio::io::split(relay_stream);
         let name_a = self.opts.name.clone();
         let name_b = self.opts.name.clone();
@@ -151,7 +177,7 @@ impl Handler {
         let cancel_b = cancel;
 
         tokio::spawn(async move {
-            let mut buf = vec![0u8; Self::RELAY_BUFFER_SIZE];
+            let mut buf = vec![0u8; relay_buffer_size()];
             loop {
                 tokio::select! {
                     biased;
@@ -292,21 +318,32 @@ impl Handler {
             ));
         }
 
-        writer.write_u8(command).await?;
-        writer.write_u32(stream_id).await?;
-        writer.write_u16(data.len() as u16).await?;
+        // Build the entire frame in a single buffer to minimize syscalls.
+        // Frame format: [cmd:1B][stream_id:4B][len:2B][data:NB]
+        // This reduces 4 write syscalls to 1, which is critical for
+        // high-throughput scenarios on resource-constrained devices.
+        let mut buf = BytesMut::with_capacity(7 + data.len());
+        buf.put_u8(command);
+        buf.put_u32(stream_id);
+        buf.put_u16(data.len() as u16);
         if !data.is_empty() {
-            writer.write_all(data).await?;
+            buf.put_slice(data);
         }
-        Ok(())
+        writer.write_all(&buf).await
     }
 
     async fn read_frame(
         reader: &mut (impl AsyncRead + Unpin),
     ) -> io::Result<(u8, u32, Vec<u8>)> {
-        let command = reader.read_u8().await?;
-        let stream_id = reader.read_u32().await?;
-        let data_len = reader.read_u16().await? as usize;
+        // Read the 7-byte header in one syscall instead of 3 separate
+        // reads (read_u8 + read_u32 + read_u16). This halves the number
+        // of read syscalls per frame, improving latency on slow links.
+        let mut header = [0u8; 7];
+        reader.read_exact(&mut header).await?;
+        let command = header[0];
+        let stream_id =
+            u32::from_be_bytes([header[1], header[2], header[3], header[4]]);
+        let data_len = u16::from_be_bytes([header[5], header[6]]) as usize;
         let mut data = vec![0u8; data_len];
         if data_len > 0 {
             reader.read_exact(&mut data).await?;
