@@ -157,7 +157,7 @@ async fn get_proxy_delay(
         }
     } else {
         let result = outbound_manager
-            .url_test(&vec![proxy], &q.url, timeout)
+            .url_test(&vec![proxy], &q.url, timeout, true)
             .await;
         match result.first().expect("there must be at least one proxy") {
             Ok(latency) => *latency,

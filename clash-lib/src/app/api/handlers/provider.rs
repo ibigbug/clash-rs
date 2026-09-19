@@ -193,7 +193,7 @@ async fn get_proxy_delay(
     let timeout = Duration::from_millis(q.timeout.into());
     let n = proxy.name().to_owned();
     let result = outbound_manager
-        .url_test(&vec![proxy], &q.url, timeout)
+        .url_test(&vec![proxy], &q.url, timeout, true)
         .await;
     match result.first().unwrap() {
         Ok((actual, overall)) => {

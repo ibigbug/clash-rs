@@ -55,4 +55,8 @@ pub trait GroupProxyAPIResponse: OutboundHandler {
     fn icon(&self) -> Option<String> {
         None
     }
+
+    /// 手动测速后强制切换到最低延迟节点 (忽略 tolerance)
+    /// 默认空实现, 仅 url-test group 覆盖
+    fn force_fastest(&self) {}
 }

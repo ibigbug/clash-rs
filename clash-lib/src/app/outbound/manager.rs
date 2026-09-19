@@ -248,15 +248,23 @@ impl OutboundManager {
         );
     }
 
-    /// a wrapper of proxy_manager.url_test so that proxy_manager is not exposed
+    /// a wrapper of proxy_manager.url_test so that proxy_manager is not
+    /// exposed.
+    ///
+    /// `force` is forwarded to [`ProxyManager::check`]: `true` for manual
+    /// user-triggered latency tests (bypass backoff, test every node),
+    /// `false` for automatic health checks (honour backoff for dead nodes).
     pub async fn url_test(
         &self,
         outbounds: &Vec<AnyOutboundHandler>,
         url: &str,
         timeout: Duration,
+        force: bool,
     ) -> Vec<std::io::Result<(Duration, Duration)>> {
         let proxy_manager = self.proxy_manager.clone();
-        proxy_manager.check(outbounds, url, Some(timeout)).await
+        proxy_manager
+            .check(outbounds, url, Some(timeout), force)
+            .await
     }
 
     pub fn get_proxy_providers(&self) -> HashMap<String, ArcProxyProvider> {
@@ -270,10 +278,23 @@ impl OutboundManager {
         &self,
         handlers: &HashMap<String, AnyOutboundHandler>,
     ) -> Result<(), Error> {
+        // Merge the passed-in handler map with every proxy provider's
+        // handlers.  Healthcheck / url_test hold Arc clones of provider
+        // handlers; if a provider handler declares a `connect-via` /
+        // `dialer-proxy` connector it MUST be registered here too, otherwise
+        // delay tests silently fall back to a direct connection that may be
+        // RST-blocked upstream (e.g. AnyTLS on a filtered port).
+        let mut all_handlers = handlers.clone();
+        for provider in self.proxy_providers.values() {
+            for proxy in provider.proxies().await {
+                all_handlers.entry(proxy.name().to_owned()).or_insert(proxy);
+            }
+        }
+
         let mut connectors = HashMap::new();
-        for handler in handlers.values() {
+        for handler in all_handlers.values() {
             if let Some(connector_name) = handler.support_dialer() {
-                let outbound = handlers
+                let outbound = all_handlers
                     .get(connector_name)
                     .ok_or(Error::InvalidConfig(format!(
                         "connector {connector_name} not found"
@@ -712,7 +733,19 @@ impl OutboundManager {
                         proxy_manager.clone(),
                     );
 
-                    handlers.insert(proto.name.clone(), Arc::new(url_test));
+                    // url-test 也注册 selector_control, 支持手动锁定节点
+                    // (PUT /proxies/AUTO {"name":"JP01"} 会锁定到JP01,
+                    // 不自动切换) url_test_arc 同时实现
+                    // OutboundHandler 和 SelectorControl
+                    let url_test_arc: Arc<urltest::Handler> = Arc::new(url_test);
+                    handlers.insert(
+                        proto.name.clone(),
+                        url_test_arc.clone() as AnyOutboundHandler,
+                    );
+                    selector_control.insert(
+                        proto.name.clone(),
+                        url_test_arc.clone() as ThreadSafeSelectorControl,
+                    );
                 }
                 OutboundGroupProtocol::Fallback(proto) => {
                     let providers = build_group_providers(
@@ -879,23 +912,25 @@ impl OutboundManager {
     ) -> Result<(), Error> {
         let proxy_manager = &self.proxy_manager;
         let provider_registry = &mut self.proxy_providers;
-        fn make_proxy_set_provider(
-            name: &str,
-            vehicle: ThreadSafeProviderVehicle,
-            interval_secs: u64,
-            hc: HealthCheck,
-        ) -> Result<ArcProxyProvider, Error> {
-            ProxySetProvider::new(
-                name.to_owned(),
-                Duration::from_secs(interval_secs),
-                vehicle,
-                hc,
-            )
-            .map(|p| Arc::new(p) as ArcProxyProvider)
-            .map_err(|x| {
-                Error::InvalidConfig(format!("invalid provider config: {x}"))
-            })
-        }
+        let registry = self.registry.clone();
+        let make_proxy_set_provider =
+            move |name: &str,
+                  vehicle: ThreadSafeProviderVehicle,
+                  interval_secs: u64,
+                  hc: HealthCheck|
+                  -> Result<ArcProxyProvider, Error> {
+                ProxySetProvider::new(
+                    name.to_owned(),
+                    Duration::from_secs(interval_secs),
+                    vehicle,
+                    hc,
+                    Some(registry.clone()),
+                )
+                .map(|p| Arc::new(p) as ArcProxyProvider)
+                .map_err(|x| {
+                    Error::InvalidConfig(format!("invalid provider config: {x}"))
+                })
+            };
 
         for (name, provider) in proxy_providers.into_iter() {
             let (vehicle, interval_secs, health_check) = match provider {

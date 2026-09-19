@@ -35,13 +35,26 @@ pub async fn group_url_test(
         .as_ref()
         .and_then(|active| members.iter().position(|p| p.name() == active.name()));
 
+    // clone proxy 以便 url_test 之后仍能通过 group 借用调用 force_fastest
+    // (proxy 是 Arc<dyn OutboundHandler>, clone 仅增加引用计数, 廉价)
+    let proxy_for_test = proxy.clone();
+
+    // 先执行测速, 更新 proxy_manager 中的延迟数据
+    // force_fastest 必须在 url_test 完成后才调用, 否则测速期间并发的
+    // connect_stream 调用会消费 force_switch 标志, 但此时延迟数据还是旧的,
+    // 导致切换到旧数据中的"最快"节点而非刚测出的最快节点
     let results = outbound_manager
         .url_test(
-            &[vec![proxy], members].concat(),
+            &[vec![proxy_for_test], members].concat(),
             latency_test_url.as_deref().unwrap_or(fallback_url),
             timeout,
+            true,
         )
         .await;
+
+    // 测速已完成, 延迟数据已更新到 proxy_manager, 现在设置 force_switch
+    // 下次 fastest() 调用时将忽略 tolerance, 直接选择最低延迟节点
+    group.force_fastest();
 
     // if found active proxy, return the latency of the active proxy, otherwise
     // return the latency of the first proxy (which is the latency of the
