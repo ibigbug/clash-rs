@@ -13,7 +13,7 @@ use crate::{
 use anyhow::Context;
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
-use futures::{FutureExt, StreamExt, stream::FuturesOrdered};
+use futures::{FutureExt, StreamExt, stream::FuturesUnordered};
 use http_body_util::Empty;
 use hyper::Request;
 use hyper_util::rt::TokioIo;
@@ -257,7 +257,7 @@ impl ProxyManager {
             let url = url.to_owned();
             let manager = self.clone();
             let sem = sem.clone();
-            futs.push(tokio::spawn(async move {
+            futs.push(async move {
                 let _permit = sem.acquire().await.expect("semaphore closed");
                 let proxy_name = outbound.name().to_owned();
                 let result = manager
@@ -267,10 +267,10 @@ impl ProxyManager {
                         warn!("healthcheck {} -> {} failed: {}", proxy_name, url, e)
                     });
                 (proxy_name, result)
-            }));
+            });
         }
 
-        let futs: FuturesOrdered<_> = futs.into_iter().collect();
+        let futs: FuturesUnordered<_> = futs.into_iter().collect();
         let r: Vec<_> = futs.collect().await;
 
         // Build a map of tested results by proxy name
@@ -278,14 +278,23 @@ impl ProxyManager {
             String,
             std::io::Result<(Duration, Duration)>,
         > = HashMap::new();
-        for res in r {
-            match res {
-                Ok((name, result)) => {
-                    tested_results.insert(name, result);
-                }
-                Err(e) => {
-                    // JoinError — shouldn't normally happen
-                    warn!("healthcheck task join error: {}", e);
+        for (name, result) in r {
+            tested_results.insert(name, result);
+        }
+
+        // Track consecutive failures for exponential backoff:
+        // Only automatic healthcheck failures (!force) increment
+        // consecutive_failures. Successful tests (both automatic and
+        // forced) reset consecutive_failures to 0.
+        {
+            let mut state = self.proxy_state.write().await;
+            for (name, result) in &tested_results {
+                let entry = state.entry(name.clone()).or_default();
+                if result.is_ok() {
+                    entry.consecutive_failures = 0;
+                } else if !force {
+                    entry.consecutive_failures =
+                        entry.consecutive_failures.saturating_add(1);
                 }
             }
         }
@@ -307,6 +316,18 @@ impl ProxyManager {
 
     pub fn check_round(&self) -> u64 {
         self.check_round.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub async fn last_test_round_for<'a>(
+        &self,
+        names: impl IntoIterator<Item = &'a str>,
+    ) -> u64 {
+        let state = self.proxy_state.read().await;
+        names
+            .into_iter()
+            .filter_map(|name| state.get(name).map(|s| s.last_test_round))
+            .max()
+            .unwrap_or(0)
     }
 
     pub async fn alive(&self, name: &str) -> bool {
@@ -343,12 +364,9 @@ impl ProxyManager {
         let mut state = self.proxy_state.write().await;
         let entry = state.entry(name.to_owned()).or_default();
         entry.alive.store(alive, Ordering::Relaxed);
-        // Track consecutive failures for exponential backoff
+        // Reset consecutive failures on success
         if alive {
             entry.consecutive_failures = 0;
-        } else {
-            entry.consecutive_failures =
-                entry.consecutive_failures.saturating_add(1);
         }
         if let Some(ins) = history {
             entry.delay_history.push_back(ins);

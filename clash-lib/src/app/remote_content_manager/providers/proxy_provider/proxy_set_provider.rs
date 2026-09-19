@@ -98,11 +98,6 @@ impl ProxySetProvider {
                 let inner: Arc<tokio::sync::RwLock<Inner>> = inner_clone.clone();
                 let registry = registry.clone();
                 Box::pin(async move {
-                    {
-                        let mut inner = inner.write().await;
-                        debug!("updating {} proxies for: {}", n, input.len());
-                        inner.proxies.clone_from(&input);
-                    }
                     if let Some(ref registry) = registry {
                         let reg = registry.read().await;
                         let mut connectors: HashMap<
@@ -140,6 +135,11 @@ impl ProxySetProvider {
                                 }
                             }
                         }
+                    }
+                    {
+                        let mut inner = inner.write().await;
+                        debug!("updating {} proxies for: {}", n, input.len());
+                        inner.proxies.clone_from(&input);
                     }
                     hc.update(input).await;
                     tokio::spawn(async move {

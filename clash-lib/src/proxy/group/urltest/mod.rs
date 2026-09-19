@@ -210,6 +210,7 @@ impl Handler {
             {
                 self.fastest_proxy_index
                     .store(idx as u16, Ordering::Relaxed);
+                self.force_switch.swap(false, Ordering::Relaxed);
                 return Some(proxy.clone());
             } else {
                 *lock = None;
@@ -297,8 +298,10 @@ impl Handler {
         // --- 检测是否是新一轮 healthcheck ---
         // 流量高时不更新 last_seen_round, 等流量降低后再处理该轮次
         // (避免流量跳过导致自适应数据永久丢失)
-        let current_round = proxy_manager.check_round();
-        let is_new_round = if !traffic_skip {
+        let current_round = proxy_manager
+            .last_test_round_for(proxies.iter().map(|p| p.name()))
+            .await;
+        let is_new_round = if !traffic_skip && current_round > 0 {
             if let Ok(mut state) = self.adaptive_state.lock() {
                 if current_round != state.last_seen_round {
                     state.last_seen_round = current_round;

@@ -287,7 +287,7 @@ impl OutboundManager {
         let mut all_handlers = handlers.clone();
         for provider in self.proxy_providers.values() {
             for proxy in provider.proxies().await {
-                all_handlers.insert(proxy.name().to_owned(), proxy);
+                all_handlers.entry(proxy.name().to_owned()).or_insert(proxy);
             }
         }
 

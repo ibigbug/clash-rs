@@ -62,21 +62,21 @@ impl HealthCheck {
     }
 
     pub async fn kick_off(&self) {
-        let proxy_manager = self.proxy_manager.clone();
         let interval = self.interval;
         let lazy = self.lazy;
-        let proxies = self.inner.read().await.proxies.clone();
-        let url = self.url.clone();
-        let pm = proxy_manager.clone();
-        tokio::spawn(async move { pm.check(&proxies, &url, None, false).await });
-
         let inner = self.inner.clone();
         let proxy_manager = self.proxy_manager.clone();
         let url = self.url.clone();
         let stopped = self.stopped.clone();
         let task_handle = tokio::spawn(async move {
+            // Initial check under the cancellable task tree
+            let proxies = inner.read().await.proxies.clone();
+            proxy_manager.check(&proxies, &url, None, false).await;
+            inner.write().await.last_check = tokio::time::Instant::now();
+
             let mut ticker =
                 tokio::time::interval(tokio::time::Duration::from_secs(interval));
+            ticker.tick().await; // First tick completes immediately; consume it.
             loop {
                 tokio::select! {
                     _ = ticker.tick() => {
