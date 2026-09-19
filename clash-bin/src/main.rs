@@ -279,13 +279,9 @@ fn main() -> anyhow::Result<()> {
 
     let mut _guard = None;
     if cli.help_improve {
-        _guard = Some(sentry::init((
-            env!("SENTRY_DSN"),
-            sentry::ClientOptions {
-                release: sentry::release_name!(),
-                ..Default::default()
-            },
-        )));
+        let mut options = sentry::ClientOptions::default();
+        options.release = sentry::release_name!();
+        _guard = Some(sentry::init((env!("SENTRY_DSN"), options)));
     }
 
     let mut config = parse_config()?;
