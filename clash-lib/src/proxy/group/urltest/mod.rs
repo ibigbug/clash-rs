@@ -140,11 +140,10 @@ pub struct Handler {
     adaptive_state: Mutex<AdaptiveState>,
     /// 手动测速后强制切换标志 (API 调用 force_fastest() 设置)
     force_switch: AtomicBool,
-    /// 手动锁定节点索引 (用户通过 PUT /proxies/AUTO 手动选择节点时设置)
-    /// Some(idx) = 锁定到指定节点, fastest() 返回该节点不自动切换
+    /// 手动锁定节点名称 (用户通过 PUT /proxies/AUTO 手动选择节点时设置)
+    /// Some(name) = 锁定到指定节点名称, fastest() 返回该节点不自动切换
     /// None = 自动模式 (默认)
-    /// force_fastest() 会清除锁定, 恢复自动模式
-    manual_lock: Mutex<Option<usize>>,
+    manual_lock: Mutex<Option<String>>,
 }
 
 impl std::fmt::Debug for Handler {
@@ -200,15 +199,24 @@ impl Handler {
 
         // --- 检查手动锁定 (用户通过 PUT /proxies/AUTO 手动选择节点) ---
         // 锁定时: 返回锁定的节点, 不进行自动切换
-        // 解锁条件: force_fastest() (手动测速) 或 select(None) (API解锁)
-        if let Ok(lock) = self.manual_lock.lock() {
-            if let Some(idx) = *lock {
-                let safe_idx = std::cmp::min(idx, proxies.len() - 1);
-                let locked_proxy = proxies[safe_idx].clone();
-                // 更新 fastest_proxy_index 保持一致
+        // 若锁定的节点已被移除, 则清除锁定并恢复自动选择
+        if let Ok(mut lock) = self.manual_lock.lock()
+            && let Some(locked_name) = lock.clone()
+        {
+            if let Some((idx, proxy)) = proxies
+                .iter()
+                .enumerate()
+                .find(|(_, p)| p.name() == locked_name)
+            {
                 self.fastest_proxy_index
-                    .store(safe_idx as u16, Ordering::Relaxed);
-                return Some(locked_proxy);
+                    .store(idx as u16, Ordering::Relaxed);
+                return Some(proxy.clone());
+            } else {
+                *lock = None;
+                warn!(
+                    locked_name = locked_name,
+                    "manual_lock: node no longer exists, lock cleared"
+                );
             }
         }
 
@@ -336,12 +344,10 @@ impl Handler {
         // --- 发生切换时重置自适应状态 (无论是否 traffic_skip) ---
         // 修复: traffic_skip + 当前死亡时的 emergency 切换也需要重置, 否则
         // rounds_since_switch 不归零会导致后续过早降级 tolerance
-        if switched {
-            if let Ok(mut state) = self.adaptive_state.lock() {
-                state.rounds_since_switch = 0;
-                state.delay_diffs.clear();
-                state.current_tolerance = self.base_tolerance;
-            }
+        if switched && let Ok(mut state) = self.adaptive_state.lock() {
+            state.rounds_since_switch = 0;
+            state.delay_diffs.clear();
+            state.current_tolerance = self.base_tolerance;
         }
 
         // --- 记录自适应状态 (仅在新一轮 healthcheck 且非流量跳过时) ---
@@ -527,13 +533,6 @@ impl GroupProxyAPIResponse for Handler {
     /// 手动测速后设置强制切换标志
     /// 下次 fastest() 调用时将忽略 tolerance, 直接选择最低延迟节点
     fn force_fastest(&self) {
-        // 清除手动锁定, 恢复自动模式
-        if let Ok(mut lock) = self.manual_lock.lock() {
-            if lock.is_some() {
-                *lock = None;
-                warn!("force_fastest: manual lock cleared, resuming auto mode");
-            }
-        }
         self.force_switch.store(true, Ordering::Relaxed);
         warn!("force_fastest: flag set, will switch on next fastest() call");
     }
@@ -544,15 +543,31 @@ impl SelectorControl for Handler {
     /// 手动选择节点 (锁定到指定节点)
     /// PUT /proxies/AUTO {"name": "JP01"} 会调用此方法
     /// 锁定后 fastest() 将始终返回该节点, 不自动切换
-    /// 直到 force_fastest() (手动测速) 清除锁定
+    /// 传入空字符串 "" 或不存在的 "auto"/"default" 恢复自动模式
     async fn select(&self, name: &str) -> Result<(), Error> {
         let proxies = self.get_proxies(false).await;
-        if let Some(idx) = proxies.iter().position(|p| p.name() == name) {
+        if name.is_empty()
+            || (!proxies.iter().any(|p| p.name() == name)
+                && (name.eq_ignore_ascii_case("auto")
+                    || name.eq_ignore_ascii_case("default")))
+        {
             if let Ok(mut lock) = self.manual_lock.lock() {
-                *lock = Some(idx);
+                *lock = None;
+                warn!("manual_lock: cleared, resuming auto mode");
+                return Ok(());
+            } else {
+                return Err(Error::Operation("manual_lock poisoned".to_string()));
+            }
+        }
+
+        if let Some((idx, proxy)) =
+            proxies.iter().enumerate().find(|(_, p)| p.name() == name)
+        {
+            if let Ok(mut lock) = self.manual_lock.lock() {
+                *lock = Some(proxy.name().to_string());
                 self.fastest_proxy_index
                     .store(idx as u16, Ordering::Relaxed);
-                warn!(node = name, index = idx, "manual_lock: locked to node");
+                warn!(node = name, "manual_lock: locked to node");
                 Ok(())
             } else {
                 Err(Error::Operation("manual_lock poisoned".to_string()))
@@ -701,6 +716,54 @@ mod tests {
 
         // 手动测速触发强制切换 → 选 b (现在最快)
         handler.force_fastest();
+        assert_eq!(handler.get_active_proxy().await.unwrap().name(), "b");
+    }
+
+    #[tokio::test]
+    async fn test_manual_lock_by_name_and_unlock() {
+        use crate::proxy::group::selector::SelectorControl;
+
+        let proxies: Vec<AnyOutboundHandler> = vec![
+            Arc::new(NoopOutboundHandler { name: "a".into() }),
+            Arc::new(NoopOutboundHandler { name: "b".into() }),
+        ];
+        let mut provider = MockDummyProxyProvider::new();
+        provider.expect_proxies().returning({
+            let proxies = proxies.clone();
+            move || proxies.clone()
+        });
+
+        let proxy_manager = ProxyManager::new(Arc::new(NoopResolver), None);
+        // a=100ms, b=50ms -> b is faster
+        proxy_manager
+            .report_delay("a", true, Duration::from_millis(100))
+            .await;
+        proxy_manager
+            .report_delay("b", true, Duration::from_millis(50))
+            .await;
+        let handler = super::Handler::new(
+            super::HandlerOptions {
+                name: "url-test".to_owned(),
+                ..Default::default()
+            },
+            20,
+            vec![Arc::new(provider)],
+            proxy_manager.clone(),
+        );
+
+        // Initially b is chosen
+        assert_eq!(handler.get_active_proxy().await.unwrap().name(), "b");
+
+        // Manually lock to "a"
+        handler.select("a").await.unwrap();
+        assert_eq!(handler.get_active_proxy().await.unwrap().name(), "a");
+
+        // force_fastest() should NOT clear manual_lock
+        handler.force_fastest();
+        assert_eq!(handler.get_active_proxy().await.unwrap().name(), "a");
+
+        // Unlock by selecting empty string or "auto"
+        handler.select("").await.unwrap();
         assert_eq!(handler.get_active_proxy().await.unwrap().name(), "b");
     }
 }

@@ -97,6 +97,6 @@ impl ProxyProvider for PlainProvider {
     }
 
     async fn healthcheck(&self) {
-        self.hc.check(false).await;
+        self.hc.check(true).await;
     }
 }

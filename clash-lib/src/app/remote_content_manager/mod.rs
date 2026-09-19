@@ -1,13 +1,13 @@
 use super::dns::ThreadSafeDNSResolver;
 use crate::{
-    app::{dispatcher::InstrumentedStreamWrapper, net::DEFAULT_OUTBOUND_INTERFACE},
+    app::net::DEFAULT_OUTBOUND_INTERFACE,
     common::{
         errors::{IntoIoResultExt as _, new_io_error},
         timed_future::TimedFuture,
         tls::GLOBAL_ROOT_STORE,
         utils::serialize_duration,
     },
-    proxy::{AnyOutboundHandler, OutboundType, utils::new_tcp_stream},
+    proxy::{AnyOutboundHandler, OutboundType},
     session::Session,
 };
 use anyhow::Context;
@@ -108,8 +108,7 @@ struct ProxyState {
     /// Incremented on failure, reset to 0 on success.
     /// Used by `check()` to skip dead proxies: after 3+ consecutive
     /// failures, a proxy is tested only every `backoff_rounds` rounds
-    /// (default 12 ≈ 60min at 5min interval, configurable via
-    /// CLASH_RS_BACKOFF_ROUNDS env var).
+    /// (default 12 rounds, configurable via CLASH_RS_BACKOFF_ROUNDS env var).
     /// This minimizes the impact of permanently-dead nodes (e.g. AnyTLS
     /// servers that are down) while still detecting when they come back.
     consecutive_failures: u32,
@@ -129,15 +128,15 @@ pub struct ProxyManager {
     /// Incremented each time `check()` is called.
     check_round: Arc<AtomicU64>,
     /// Rounds to wait before re-testing a consistently-failing proxy (cf>=3).
-    /// Configurable via `CLASH_RS_BACKOFF_ROUNDS` env var (default 12 = ~60min
-    /// at 5min/round). A dead proxy is tested once every N rounds; if it
-    /// succeeds, `consecutive_failures` resets to 0 and normal per-round
-    /// testing resumes.
+    /// Configurable via `CLASH_RS_BACKOFF_ROUNDS` env var (default 12 rounds).
+    /// A dead proxy is tested once every N rounds; if it succeeds,
+    /// `consecutive_failures` resets to 0 and normal per-round testing resumes.
     backoff_rounds: u64,
-    /// Max concurrent healthcheck requests in `check()`.
+    /// Shared semaphore limiting concurrent healthcheck requests across all
+    /// groups and providers.
     /// Configurable via `CLASH_RS_HEALTHCHECK_CONCURRENCY` env var (default 8).
     /// Limits CPU/memory burst on low-RAM routers when many proxies are alive.
-    concurrency: usize,
+    check_semaphore: Arc<Semaphore>,
 }
 
 #[derive(Clone, Default)]
@@ -166,7 +165,7 @@ impl ProxyManager {
             fw_mark,
             check_round: Arc::new(AtomicU64::new(0)),
             backoff_rounds,
-            concurrency,
+            check_semaphore: Arc::new(Semaphore::new(concurrency)),
         }
     }
 
@@ -206,34 +205,32 @@ impl ProxyManager {
             let state = self.proxy_state.read().await;
             for outbound in outbounds {
                 let name = outbound.name();
-                if !force {
-                    if let Some(s) = state.get(name) {
-                        let cf = s.consecutive_failures;
-                        if cf >= 3 {
-                            // Fixed-interval backoff: test every
-                            // `backoff_rounds` rounds
-                            // (default 12 = ~60min at 5min/round, configurable
-                            // via
-                            // CLASH_RS_BACKOFF_ROUNDS env var). A
-                            // consistently-failing
-                            // proxy is re-tested once every N rounds; on
-                            // success it
-                            // is reactivated (consecutive_failures reset to 0).
-                            let backoff = self.backoff_rounds;
-                            if round - s.last_test_round < backoff {
-                                // Skip this proxy — it's in backoff
-                                skip_results.insert(
-                                    name.to_owned(),
-                                    Err(new_io_error(format!(
-                                        "healthcheck skipped (backoff: {} \
-                                         consecutive failures, next test in {} \
-                                         round(s))",
-                                        cf,
-                                        backoff - (round - s.last_test_round)
-                                    ))),
-                                );
-                                continue;
-                            }
+                if !force && let Some(s) = state.get(name) {
+                    let cf = s.consecutive_failures;
+                    if cf >= 3 {
+                        // Fixed-interval backoff: test every
+                        // `backoff_rounds` rounds
+                        // (default 12 = ~60min at 5min/round, configurable
+                        // via
+                        // CLASH_RS_BACKOFF_ROUNDS env var). A
+                        // consistently-failing
+                        // proxy is re-tested once every N rounds; on
+                        // success it
+                        // is reactivated (consecutive_failures reset to 0).
+                        let backoff = self.backoff_rounds;
+                        let elapsed = round.saturating_sub(s.last_test_round);
+                        if elapsed < backoff {
+                            // Skip this proxy — it's in backoff
+                            skip_results.insert(
+                                name.to_owned(),
+                                Err(new_io_error(format!(
+                                    "healthcheck skipped (backoff: {} consecutive \
+                                     failures, next test in {} round(s))",
+                                    cf,
+                                    backoff.saturating_sub(elapsed)
+                                ))),
+                            );
+                            continue;
                         }
                     }
                 }
@@ -254,7 +251,7 @@ impl ProxyManager {
         // Limit concurrency to avoid burst resource consumption on low-RAM
         // routers. Configurable via CLASH_RS_HEALTHCHECK_CONCURRENCY
         // env var (default 8).
-        let sem = Arc::new(Semaphore::new(self.concurrency));
+        let sem = self.check_semaphore.clone();
         for outbound in to_test {
             let outbound = outbound.clone();
             let url = url.to_owned();
@@ -928,107 +925,28 @@ impl ProxyManager {
                 ..Default::default()
             };
 
-            // Try the standard connect_stream first (through the node's
-            // tunnel). If the node's server port is RST-blocked by
-            // the ISP (e.g., SS port 52001), this will fail.  Fall
-            // back to a direct TCP connection through the
-            // transparent proxy (no fw_mark) — the iptables REDIRECT will route
-            // the traffic through the dispatcher, which selects PROXY group.
-            let (stream, connect_delay) = match tokio::time::timeout(
+            let (stream, connect_delay) = tokio::time::timeout(
                 timeout,
                 TimedFuture::new(
                     outbound.connect_stream(&sess, dns_resolver.clone()),
                 ),
             )
             .await
-            {
-                Ok((result, duration)) => match result {
-                    Ok(s) => (Ok(s), duration),
-                    Err(e) => {
-                        // connect_stream failed (likely RST/refused).
-                        // For google/gstatic tests, do NOT use the transparent
-                        // proxy fallback.  This lets
-                        // url-test correctly detect which nodes
-                        // can actually reach google (returning 200) vs which
-                        // are dead (failing), so the
-                        // AUTO group only auto-selects working nodes.
-                        if url.contains("google.com") || url.contains("gstatic.com")
-                        {
-                            return Err(e);
-                        }
-                        // Try through transparent proxy as a fallback (for
-                        // other tests).
+            .context("URL test timeout")
+            .into_io()?;
+
+            let stream = match stream {
+                Ok(s) => s,
+                Err(e) => {
+                    if matches!(outbound.proto(), OutboundType::Anytls) {
+                        let tcp_ms = connect_delay.as_millis();
                         debug!(
-                            "{} connect_stream failed ({e}), trying transparent \
-                             proxy fallback",
+                            "AnyTLS {} handshake failed ({e}, {tcp_ms}ms TCP)",
                             name
                         );
-                        // Resolve hostname to IP (async, non-blocking)
-                        let addr = tokio::net::lookup_host((host.as_str(), port))
-                            .await
-                            .map_err(|e| {
-                                new_io_error(format!(
-                                    "DNS lookup failed for {host}:{port}: {e}"
-                                ))
-                            })?
-                            .next()
-                            .ok_or(new_io_error(format!(
-                                "no IP found for {host}:{port}"
-                            )))?;
-                        let (fallback_result, _) = tokio::time::timeout(
-                            timeout,
-                            TimedFuture::new(Box::pin(new_tcp_stream(
-                                addr,
-                                DEFAULT_OUTBOUND_INTERFACE.read().await.as_ref(),
-                                #[cfg(target_os = "linux")]
-                                None, // no fw_mark -> transparent proxy catches it
-                            ))),
-                        )
-                        .await
-                        .context("URL test timeout (fallback)")
-                        .into_io()?;
-                        let fallback = fallback_result?;
-                        (
-                            Ok(Box::new(InstrumentedStreamWrapper::new(fallback))
-                                as Box<
-                                    dyn crate::app::dispatcher::InstrumentedStream,
-                                >),
-                            Duration::default(),
-                        )
                     }
-                },
-                Err(_) => {
-                    return Err(new_io_error("URL test timeout"));
+                    return Err(e);
                 }
-            };
-
-            // For AnyTLS proxies, the connect_stream may complete the TCP
-            // handshake (via a relay / connect-via) but fail on the AnyTLS
-            // TLS handshake (e.g. when the relay protocol is incompatible).
-            // In that case the TCP round-trip time is still a valid latency
-            // measurement — return it as the delay so the dashboard never
-            // shows a permanent error for this node.
-            let stream = if matches!(outbound.proto(), OutboundType::Anytls) {
-                match stream {
-                    Ok(s) => s,
-                    Err(e) => {
-                        let tcp_ms = connect_delay.as_millis();
-                        if tcp_ms > 10 {
-                            // TCP connect succeeded (relay tunnel was built),
-                            // only the AnyTLS handshake failed — return TCP
-                            // time as a reasonable latency proxy.
-                            warn!(
-                                "AnyTLS {} handshake failed ({e}, {tcp_ms}ms TCP), \
-                                 using TCP latency",
-                                name
-                            );
-                            return Ok((connect_delay, connect_delay));
-                        }
-                        return Err(e);
-                    }
-                }
-            } else {
-                stream?
             };
 
             let req = Request::get(url)

@@ -13,7 +13,6 @@ use super::ProxyManager;
 struct HealCheckInner {
     last_check: Instant,
     proxies: Vec<AnyOutboundHandler>,
-    task_handle: Option<Arc<tokio::task::JoinHandle<()>>>,
 }
 
 pub struct HealthCheck {
@@ -25,11 +24,18 @@ pub struct HealthCheck {
     /// Fix(2026-08-04): when HealthCheck is dropped, signal the background
     /// task to stop (prevents task leak on configuration hot-reload).
     stopped: Arc<AtomicBool>,
+    /// Handle of the ticker task, kept outside `inner` so `Drop` can abort it.
+    task_handle: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl Drop for HealthCheck {
     fn drop(&mut self) {
         self.stopped.store(true, Ordering::Relaxed);
+        if let Ok(mut h) = self.task_handle.lock()
+            && let Some(h) = h.take()
+        {
+            h.abort();
+        }
     }
 }
 
@@ -47,10 +53,10 @@ impl HealthCheck {
             lazy,
             proxy_manager,
             stopped: Arc::new(AtomicBool::new(false)),
+            task_handle: std::sync::Mutex::new(None),
             inner: Arc::new(tokio::sync::RwLock::new(HealCheckInner {
                 last_check: tokio::time::Instant::now(),
                 proxies,
-                task_handle: None,
             })),
         }
     }
@@ -91,7 +97,9 @@ impl HealthCheck {
             }
         });
 
-        self.inner.write().await.task_handle = Some(Arc::new(task_handle));
+        if let Ok(mut h) = self.task_handle.lock() {
+            *h = Some(task_handle);
+        }
     }
 
     pub async fn touch(&self) {

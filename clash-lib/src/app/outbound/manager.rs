@@ -912,23 +912,25 @@ impl OutboundManager {
     ) -> Result<(), Error> {
         let proxy_manager = &self.proxy_manager;
         let provider_registry = &mut self.proxy_providers;
-        fn make_proxy_set_provider(
-            name: &str,
-            vehicle: ThreadSafeProviderVehicle,
-            interval_secs: u64,
-            hc: HealthCheck,
-        ) -> Result<ArcProxyProvider, Error> {
-            ProxySetProvider::new(
-                name.to_owned(),
-                Duration::from_secs(interval_secs),
-                vehicle,
-                hc,
-            )
-            .map(|p| Arc::new(p) as ArcProxyProvider)
-            .map_err(|x| {
-                Error::InvalidConfig(format!("invalid provider config: {x}"))
-            })
-        }
+        let registry = self.registry.clone();
+        let make_proxy_set_provider =
+            move |name: &str,
+                  vehicle: ThreadSafeProviderVehicle,
+                  interval_secs: u64,
+                  hc: HealthCheck|
+                  -> Result<ArcProxyProvider, Error> {
+                ProxySetProvider::new(
+                    name.to_owned(),
+                    Duration::from_secs(interval_secs),
+                    vehicle,
+                    hc,
+                    Some(registry.clone()),
+                )
+                .map(|p| Arc::new(p) as ArcProxyProvider)
+                .map_err(|x| {
+                    Error::InvalidConfig(format!("invalid provider config: {x}"))
+                })
+            };
 
         for (name, provider) in proxy_providers.into_iter() {
             let (vehicle, interval_secs, health_check) = match provider {

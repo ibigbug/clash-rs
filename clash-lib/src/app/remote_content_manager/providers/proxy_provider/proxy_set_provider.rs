@@ -25,7 +25,12 @@ use crate::{
     proxy::{
         AnyOutboundHandler, anytls,
         direct::{self},
-        hysteria2, reject, socks, trojan, vless, vmess,
+        hysteria2, reject, socks, trojan,
+        utils::{
+            DirectConnector, OutboundHandlerRegistry, ProxyConnector,
+            RemoteConnector,
+        },
+        vless, vmess,
     },
 };
 use async_trait::async_trait;
@@ -68,6 +73,7 @@ impl ProxySetProvider {
         interval: Duration,
         vehicle: ThreadSafeProviderVehicle,
         hc: HealthCheck,
+        registry: Option<OutboundHandlerRegistry>,
     ) -> anyhow::Result<Self> {
         let hc = Arc::new(hc);
 
@@ -90,11 +96,50 @@ impl ProxySetProvider {
                 let hc = hc_updater.clone();
                 let n = n.clone();
                 let inner: Arc<tokio::sync::RwLock<Inner>> = inner_clone.clone();
+                let registry = registry.clone();
                 Box::pin(async move {
                     {
                         let mut inner = inner.write().await;
                         debug!("updating {} proxies for: {}", n, input.len());
                         inner.proxies.clone_from(&input);
+                    }
+                    if let Some(ref registry) = registry {
+                        let reg = registry.read().await;
+                        let mut connectors: HashMap<
+                            String,
+                            Arc<dyn RemoteConnector>,
+                        > = HashMap::new();
+                        for handler in &input {
+                            if let Some(connector_name) = handler.support_dialer() {
+                                let outbound =
+                                    reg.get(connector_name).cloned().or_else(|| {
+                                        input
+                                            .iter()
+                                            .find(|p| p.name() == connector_name)
+                                            .cloned()
+                                    });
+                                if let Some(outbound) = outbound {
+                                    let connector = connectors
+                                        .entry(connector_name.to_string())
+                                        .or_insert_with(|| {
+                                            Arc::new(ProxyConnector::new(
+                                                outbound,
+                                                Box::new(DirectConnector::new()),
+                                            ))
+                                        });
+                                    handler
+                                        .register_connector(connector.clone())
+                                        .await;
+                                } else {
+                                    warn!(
+                                        provider = n.as_str(),
+                                        "connector '{connector_name}' for proxy \
+                                         '{}' not found",
+                                        handler.name()
+                                    );
+                                }
+                            }
+                        }
                     }
                     hc.update(input).await;
                     tokio::spawn(async move {
@@ -303,7 +348,7 @@ impl ProxyProvider for ProxySetProvider {
     }
 
     async fn healthcheck(&self) {
-        self.hc.check(false).await;
+        self.hc.check(true).await;
     }
 }
 
@@ -368,6 +413,7 @@ proxies:
             Duration::from_secs(1),
             vehicle,
             hc,
+            None,
         )
         .unwrap();
 
