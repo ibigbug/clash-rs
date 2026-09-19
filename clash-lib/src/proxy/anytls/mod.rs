@@ -63,7 +63,27 @@ static RELAY_BUFFER_SIZE_CONFIG: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(DEFAULT_RELAY_BUFFER_SIZE);
 
 /// Set the global AnyTLS buffer sizes. Called during config loading.
+/// Validates sizes: `duplex` must be > 0, and `relay` must be in
+/// `1..=u16::MAX`.
 pub fn set_buffer_config(duplex: usize, relay: usize) {
+    let duplex = if duplex > 0 {
+        duplex
+    } else {
+        warn!(
+            "invalid AnyTLS duplex buffer size: {}, using default {}",
+            duplex, DEFAULT_DUPLEX_BUFFER_SIZE
+        );
+        DEFAULT_DUPLEX_BUFFER_SIZE
+    };
+    let relay = if (1..=u16::MAX as usize).contains(&relay) {
+        relay
+    } else {
+        warn!(
+            "invalid AnyTLS relay buffer size: {}, using default {}",
+            relay, DEFAULT_RELAY_BUFFER_SIZE
+        );
+        DEFAULT_RELAY_BUFFER_SIZE
+    };
     DUPLEX_BUFFER_SIZE.store(duplex, std::sync::atomic::Ordering::Release);
     RELAY_BUFFER_SIZE_CONFIG.store(relay, std::sync::atomic::Ordering::Release);
 }

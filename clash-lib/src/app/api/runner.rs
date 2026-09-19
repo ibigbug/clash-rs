@@ -193,7 +193,10 @@ impl Runner for ApiRunner {
                 .with_state(app_state)
                 .layer(ServiceBuilder::new().layer(TraceLayer::new_for_http()));
 
-            if let Some(external_ui) = controller_cfg.external_ui {
+            if let Some(external_ui) = controller_cfg
+                .external_ui
+                .filter(|path| !path.trim().is_empty())
+            {
                 let ui_path = PathBuf::from(&cwd).join(&external_ui);
                 // Check if the external-ui directory exists and contains files.
                 // If the directory is empty or missing, fall back to the

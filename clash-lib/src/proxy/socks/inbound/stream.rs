@@ -72,15 +72,35 @@ pub async fn handle_tcp(
             let ulen = buf[1] as usize;
             buf.resize(ulen, 0);
             s.read_exact(&mut buf[..]).await?;
-            let user = String::from_utf8_lossy(&buf[..]).into_owned();
+            let user = match str::from_utf8(&buf) {
+                Ok(u) => u.to_owned(),
+                Err(_) => {
+                    response = [0x1, response_code::FAILURE];
+                    s.write_all(&response).await?;
+                    s.shutdown().await?;
+                    return Err(io::Error::other(
+                        "invalid UTF-8 in SOCKS5 username",
+                    ));
+                }
+            };
 
             s.read_exact(&mut buf[..1]).await?;
             let plen = buf[0] as usize;
             buf.resize(plen, 0);
             s.read_exact(&mut buf[..]).await?;
-            let pass = String::from_utf8_lossy(&buf[..]).into_owned();
+            let pass = match str::from_utf8(&buf) {
+                Ok(p) => p,
+                Err(_) => {
+                    response = [0x1, response_code::FAILURE];
+                    s.write_all(&response).await?;
+                    s.shutdown().await?;
+                    return Err(io::Error::other(
+                        "invalid UTF-8 in SOCKS5 password",
+                    ));
+                }
+            };
 
-            match authenticator.authenticate(&user, &pass) {
+            match authenticator.authenticate(&user, pass) {
                 // +----+--------+
                 // |VER | STATUS |
                 // +----+--------+
