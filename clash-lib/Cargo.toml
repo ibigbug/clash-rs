@@ -193,7 +193,7 @@ tor-rtcompat = { version = "0.46", optional = true, default-features = false, fe
 # (a dev-dependency used by the in-process test server) still calls the old
 # signature and fails to build, and no fixed upstream tuic tag exists yet.
 # Bump both pins once upstream tuic compiles against current quinn.
-tuic-core= { tag = "v1.8.11", optional = true, git = "https://github.com/Itsusinn/tuic.git", features = ["async_marshal", "marshal", "model"] }
+tuic-core= { tag = "v1.8.5", optional = true, git = "https://github.com/Itsusinn/tuic.git", features = ["async_marshal", "marshal", "model"] }
 register-count = { version = "0.1", optional = true }
 
 quinn = { version = "0.11", default-features = false, features = ["futures-io", "runtime-tokio"] }
@@ -243,7 +243,7 @@ http-body-util = "0.1"
 reqwest = { version = "0.13", features = ["socks"] }
 sysinfo = { version = "0.39", features = ["network"]}
 moka = { version = "0.12", features = ["future"] }
-tuic-server = { tag = "v1.8.11", git = "https://github.com/Itsusinn/tuic.git" }
+tuic-server = { tag = "v1.8.5", git = "https://github.com/Itsusinn/tuic.git" }
 
 [build-dependencies]
 prost-build = "0.14"
