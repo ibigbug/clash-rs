@@ -297,23 +297,23 @@ async fn test_new_connection_during_active_transfer() {
                     .expect("conn1 stalled for 5 s")
                     .expect("rx1 closed");
 
-            if let Some((seq, payload_len)) = parse_tcp_data(pkt.data()) {
-                if payload_len > 0 {
-                    let end_seq = seq.wrapping_add(payload_len as u32);
-                    let advance = end_seq.wrapping_sub(cumulative_ack);
-                    if advance > 0 && advance < (1u32 << 31) {
-                        received += advance as usize;
-                        cumulative_ack = end_seq;
-                    }
-                    tun_in
-                        .send(build_tcp_ack(client_seq, cumulative_ack, u16::MAX))
-                        .unwrap();
-                    // Signal conn2 client on the first received data segment.
-                    if !signalled {
-                        signalled = true;
-                        if let Some(tx) = ready_tx.take() {
-                            let _ = tx.send(());
-                        }
+            if let Some((seq, payload_len)) = parse_tcp_data(pkt.data())
+                && payload_len > 0
+            {
+                let end_seq = seq.wrapping_add(payload_len as u32);
+                let advance = end_seq.wrapping_sub(cumulative_ack);
+                if advance > 0 && advance < (1u32 << 31) {
+                    received += advance as usize;
+                    cumulative_ack = end_seq;
+                }
+                tun_in
+                    .send(build_tcp_ack(client_seq, cumulative_ack, u16::MAX))
+                    .unwrap();
+                // Signal conn2 client on the first received data segment.
+                if !signalled {
+                    signalled = true;
+                    if let Some(tx) = ready_tx.take() {
+                        let _ = tx.send(());
                     }
                 }
             }

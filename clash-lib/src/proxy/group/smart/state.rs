@@ -189,6 +189,7 @@ impl SmartState {
     /// * `sess` - Session information
     /// * `uploaded` - Bytes uploaded
     /// * `downloaded` - Bytes downloaded
+    #[allow(dead_code)]
     pub fn record_traffic(
         &mut self,
         sess: &Session,

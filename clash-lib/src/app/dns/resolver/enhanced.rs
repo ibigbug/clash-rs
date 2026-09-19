@@ -39,7 +39,7 @@ pub struct EnhancedResolver {
     fallback_domain_filters: Option<Vec<Box<dyn FallbackDomainFilter>>>,
     fallback_ip_filters: Option<Vec<Box<dyn FallbackIPFilter>>>,
 
-    lru_cache: Option<hickory_resolver::ResponseCache>,
+    lru_cache: Option<std::sync::RwLock<(hickory_resolver::ResponseCache, u64)>>,
     policy: Option<trie::StringTrie<Vec<ThreadSafeDNSClient>>>,
 
     proxy_resolver: Option<Vec<ThreadSafeDNSClient>>,
@@ -241,10 +241,13 @@ impl EnhancedResolver {
             } else {
                 None
             },
-            lru_cache: Some(hickory_resolver::ResponseCache::new(
-                4096,
-                hickory_resolver::TtlConfig::default(),
-            )),
+            lru_cache: Some(std::sync::RwLock::new((
+                hickory_resolver::ResponseCache::new(
+                    1024,
+                    hickory_resolver::TtlConfig::default(),
+                ),
+                1024,
+            ))),
             policy: if !cfg.nameserver_policy.is_empty() {
                 let mut p = trie::StringTrie::new();
                 for (domain, ns) in &cfg.nameserver_policy {
@@ -307,7 +310,7 @@ impl EnhancedResolver {
                                              * different server after the ip is
                                              * reverse mapped to hostname and
                                              * being resolved again */
-                    4096,
+                    1024,
                 ),
             ))),
         }
@@ -386,8 +389,9 @@ impl EnhancedResolver {
         trace!(q = q.to_string(), "start");
 
         // Cache hit — return early
-        if let Some(lru) = &self.lru_cache
-            && let Some(Ok(cached)) = lru.get(q, Instant::now()).map(|c| {
+        if let Some(lru_lock) = &self.lru_cache
+            && let Ok(guard) = lru_lock.read()
+            && let Some(Ok(cached)) = guard.0.get(q, Instant::now()).map(|c| {
                 c.inspect_err(|x| warn!("failed to get cached message: {}", x))
             })
         {
@@ -433,7 +437,7 @@ impl EnhancedResolver {
         let rv = query.await;
 
         if let Ok(msg) = &rv
-            && let Some(lru) = &self.lru_cache
+            && let Some(lru_lock) = &self.lru_cache
             && !(q.query_type() == rr::RecordType::TXT
                 && q.name().to_ascii().starts_with("_acme-challenge."))
             && !matches!(
@@ -444,16 +448,16 @@ impl EnhancedResolver {
                 let ips = EnhancedResolver::ip_list_of_message(msg);
                 ips.is_empty() || ips.iter().any(|ip| !ip.is_unspecified())
             }
+            && let Ok(guard) = lru_lock.read()
         {
-            lru.insert(q.clone(), Ok(msg.clone()), Instant::now());
+            guard.0.insert(q.clone(), Ok(msg.clone()), Instant::now());
         }
 
         rv
     }
 
     fn match_policy(&self, m: &op::Message) -> Option<&Vec<ThreadSafeDNSClient>> {
-        if let (Some(_fallback), Some(_fallback_domain_filters), Some(policy)) =
-            (&self.fallback, &self.fallback_domain_filters, &self.policy)
+        if let Some(policy) = &self.policy
             && let Some(domain) = EnhancedResolver::domain_name_of_message(m)
         {
             return policy.search(&domain).map(|n| n.get_data().unwrap());
@@ -729,6 +733,26 @@ impl ClashResolver for EnhancedResolver {
         ResolverKind::Clash
     }
 
+    /// Clear DNS caches under memory pressure.
+    /// - reverse_lookup_cache: cleared immediately (Arc<RwLock<LruCache>>)
+    /// - lru_cache: ResponseCache replaced with a clean instance.
+    async fn clear_cache(&self) {
+        if let Some(lru) = &self.reverse_lookup_cache {
+            let mut guard = lru.write().await;
+            guard.clear();
+            trace!("reverse_lookup_cache cleared due to memory pressure");
+        }
+        if let Some(lru_lock) = &self.lru_cache
+            && let Ok(mut guard) = lru_lock.write()
+        {
+            guard.0 = hickory_resolver::ResponseCache::new(
+                guard.1,
+                hickory_resolver::TtlConfig::default(),
+            );
+            trace!("lru_cache cleared due to memory pressure");
+        }
+    }
+
     fn fake_ip_enabled(&self) -> bool {
         self.fake_dns.is_some()
     }
@@ -836,10 +860,13 @@ mod tests {
 
         let mut resolver = EnhancedResolver::new_default().await;
         resolver.main.clear(); // ensure cache miss would fail deterministically
-        resolver.lru_cache = Some(hickory_resolver::ResponseCache::new(
+        resolver.lru_cache = Some(std::sync::RwLock::new((
+            hickory_resolver::ResponseCache::new(
+                16,
+                hickory_resolver::TtlConfig::default(),
+            ),
             16,
-            hickory_resolver::TtlConfig::default(),
-        ));
+        )));
 
         let mut request = op::Message::query();
         let mut query = op::Query::new();
@@ -860,9 +887,13 @@ mod tests {
             rr::RData::A(rr::rdata::A(ip)),
         ));
 
-        let lru = resolver.lru_cache.as_ref().unwrap();
+        let lru_lock = resolver.lru_cache.as_ref().unwrap();
         let q = request.queries.first().unwrap().clone();
-        lru.insert(q, Ok(cached), Instant::now());
+        lru_lock
+            .read()
+            .unwrap()
+            .0
+            .insert(q, Ok(cached), Instant::now());
 
         let response = resolver
             .exchange(&request)
@@ -1064,34 +1095,32 @@ mod tests {
             false,
         );
 
-        let mut config = Config::default();
-        config.enable = true;
-        config.ipv6 = false;
-
-        // Set up proxy server nameserver
-        config.proxy_server_nameserver = Some(vec![NameServer {
-            net: DNSNetMode::Udp,
-            host: url::Host::Ipv4("8.8.8.8".parse().unwrap()),
-            port: 53,
-            interface: None,
-            proxy: None,
-        }]);
-
-        config.default_nameserver = vec![NameServer {
-            net: DNSNetMode::Udp,
-            host: url::Host::Ipv4("114.114.114.114".parse().unwrap()),
-            port: 53,
-            interface: None,
-            proxy: None,
-        }];
-
-        config.nameserver = vec![NameServer {
-            net: DNSNetMode::Udp,
-            host: url::Host::Ipv4("223.5.5.5".parse().unwrap()),
-            port: 53,
-            interface: None,
-            proxy: None,
-        }];
+        let config = Config {
+            enable: true,
+            ipv6: false,
+            proxy_server_nameserver: Some(vec![NameServer {
+                net: DNSNetMode::Udp,
+                host: url::Host::Ipv4("8.8.8.8".parse().unwrap()),
+                port: 53,
+                interface: None,
+                proxy: None,
+            }]),
+            default_nameserver: vec![NameServer {
+                net: DNSNetMode::Udp,
+                host: url::Host::Ipv4("114.114.114.114".parse().unwrap()),
+                port: 53,
+                interface: None,
+                proxy: None,
+            }],
+            nameserver: vec![NameServer {
+                net: DNSNetMode::Udp,
+                host: url::Host::Ipv4("223.5.5.5".parse().unwrap()),
+                port: 53,
+                interface: None,
+                proxy: None,
+            }],
+            ..Default::default()
+        };
 
         let resolver = EnhancedResolver::new(
             config,
@@ -1127,28 +1156,26 @@ mod tests {
             false,
         );
 
-        let mut config = Config::default();
-        config.enable = true;
-        config.ipv6 = false;
-
-        // No proxy server nameserver configured
-        config.proxy_server_nameserver = None;
-
-        config.default_nameserver = vec![NameServer {
-            net: DNSNetMode::Udp,
-            host: url::Host::Ipv4("114.114.114.114".parse().unwrap()),
-            port: 53,
-            interface: None,
-            proxy: None,
-        }];
-
-        config.nameserver = vec![NameServer {
-            net: DNSNetMode::Udp,
-            host: url::Host::Ipv4("223.5.5.5".parse().unwrap()),
-            port: 53,
-            interface: None,
-            proxy: None,
-        }];
+        let config = Config {
+            enable: true,
+            ipv6: false,
+            proxy_server_nameserver: None,
+            default_nameserver: vec![NameServer {
+                net: DNSNetMode::Udp,
+                host: url::Host::Ipv4("114.114.114.114".parse().unwrap()),
+                port: 53,
+                interface: None,
+                proxy: None,
+            }],
+            nameserver: vec![NameServer {
+                net: DNSNetMode::Udp,
+                host: url::Host::Ipv4("223.5.5.5".parse().unwrap()),
+                port: 53,
+                interface: None,
+                proxy: None,
+            }],
+            ..Default::default()
+        };
 
         let resolver = EnhancedResolver::new(
             config,
@@ -1211,24 +1238,26 @@ mod tests {
             interface: None,
             proxy: None,
         };
-        let mut config = Config::default();
-        config.enable = true;
-        config.ipv6 = false;
-        config.proxy_server_nameserver = Some(vec![ns.clone()]);
-        config.default_nameserver = vec![NameServer {
-            net: DNSNetMode::Udp,
-            host: url::Host::Ipv4("114.114.114.114".parse().unwrap()),
-            port: 53,
-            interface: None,
-            proxy: None,
-        }];
-        config.nameserver = vec![NameServer {
-            net: DNSNetMode::Udp,
-            host: url::Host::Ipv4("223.5.5.5".parse().unwrap()),
-            port: 53,
-            interface: None,
-            proxy: None,
-        }];
+        let config = Config {
+            enable: true,
+            ipv6: false,
+            proxy_server_nameserver: Some(vec![ns.clone()]),
+            default_nameserver: vec![NameServer {
+                net: DNSNetMode::Udp,
+                host: url::Host::Ipv4("114.114.114.114".parse().unwrap()),
+                port: 53,
+                interface: None,
+                proxy: None,
+            }],
+            nameserver: vec![NameServer {
+                net: DNSNetMode::Udp,
+                host: url::Host::Ipv4("223.5.5.5".parse().unwrap()),
+                port: 53,
+                interface: None,
+                proxy: None,
+            }],
+            ..Default::default()
+        };
         (config, ns)
     }
 
@@ -1304,5 +1333,69 @@ mod tests {
             "unexpected IP: {}",
             ip
         );
+    }
+
+    #[tokio::test]
+    async fn test_nameserver_policy_without_fallback_matches_policy() {
+        use crate::app::dns::config::{Config, DNSNetMode, NameServer};
+        use std::collections::HashMap;
+        use tempfile::tempdir;
+        let temp_dir = tempdir().unwrap();
+        let cache_store = crate::app::profile::ThreadSafeCacheFile::new(
+            temp_dir.path().join("cache.db").to_str().unwrap(),
+            false,
+        );
+
+        let ns_main = NameServer {
+            net: DNSNetMode::Udp,
+            host: url::Host::Ipv4("1.1.1.1".parse().unwrap()),
+            port: 53,
+            interface: None,
+            proxy: None,
+        };
+        let ns_policy = NameServer {
+            net: DNSNetMode::Udp,
+            host: url::Host::Ipv4("8.8.8.8".parse().unwrap()),
+            port: 53,
+            interface: None,
+            proxy: None,
+        };
+
+        let mut nameserver_policy = HashMap::new();
+        nameserver_policy.insert("policy.example.com".to_string(), ns_policy);
+
+        let config = Config {
+            enable: true,
+            default_nameserver: vec![ns_main.clone()],
+            nameserver: vec![ns_main],
+            fallback: vec![],
+            nameserver_policy,
+            ..Default::default()
+        };
+
+        let resolver = EnhancedResolver::new(
+            config,
+            cache_store,
+            None,
+            Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            None,
+        )
+        .await;
+
+        assert!(resolver.fallback.is_none());
+        assert!(resolver.policy.is_some());
+
+        let mut req = hickory_proto::op::Message::query();
+        let mut query = hickory_proto::op::Query::new();
+        let name = rr::Name::from_str_relaxed("policy.example.com")
+            .unwrap()
+            .append_domain(&rr::Name::root())
+            .unwrap();
+        query.set_name(name);
+        query.set_query_type(rr::RecordType::A);
+        req.add_query(query);
+
+        let matched = resolver.match_policy(&req);
+        assert!(matched.is_some(), "should match policy nameserver");
     }
 }

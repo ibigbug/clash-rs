@@ -45,7 +45,7 @@ impl SiteStats {
     /// Calculate success rate for this site
     pub fn success_rate(&self) -> f64 {
         if self.success_history.is_empty() {
-            return 0.0;
+            return 1.0; // Optimistic default for new sites with no history
         }
         let success_count = self.success_history.iter().filter(|&&x| x).count();
         // Use integer arithmetic to avoid floating-point precision issues
@@ -87,28 +87,14 @@ impl SiteStats {
             return 9999.0;
         }
 
-        let mut sum = 0.0;
-        let mut weight_sum = 0.0;
-        let now_secs = current_timestamp_secs();
-
-        // Calculate age based on last_attempt_secs and current time
-        let age_secs = now_secs.saturating_sub(self.last_attempt_secs) as f64; // u64 -> f64
-
-        for delay in self.delay_history.iter() {
-            // Use the calculated age for time weighting
-            let time_weight = (-0.1 * age_secs).exp();
-            let delay_weight = (-0.001 * *delay).exp(); // Dereference delay, remove redundant cast. Higher delays get less weight
-            let weight = time_weight * delay_weight;
-
-            sum += delay * weight;
-            weight_sum += weight;
-        }
-
-        let avg_delay = if weight_sum > 0.0 {
-            sum / weight_sum
-        } else {
-            9999.0
-        };
+        // Simple average of recorded delays.  The previous implementation used
+        // a time_weight based on last_attempt_secs, but since delay_history
+        // stores only values (not timestamps), every sample shared the same
+        // age, making time_weight a constant scalar with no effect on the
+        // relative weighting.  A plain average is the correct approach until
+        // per-sample timestamps are tracked.
+        let sum: f64 = self.delay_history.iter().sum();
+        let avg_delay = sum / self.delay_history.len() as f64;
 
         // Adjust based on success rate
         let success_rate = self.success_rate();
@@ -206,10 +192,15 @@ impl TrafficStatsCollector {
     /// Start tracking a new session
     ///
     /// Initializes tracking data structures for a new connection session.
+    /// Only initializes on first encounter — re-entering an existing session
+    /// (e.g. during adaptive retry) preserves accumulated data.
     ///
     /// # Arguments
     /// * `session_id` - Unique identifier for the session
     pub fn start_session(&mut self, session_id: &str) {
+        if self.connection_start.contains_key(session_id) {
+            return; // Already tracking this session, preserve existing data
+        }
         self.connection_start
             .insert(session_id.to_string(), Instant::now());
         self.session_bytes.insert(session_id.to_string(), (0, 0));
@@ -227,6 +218,7 @@ impl TrafficStatsCollector {
     /// * `session_id` - Session identifier
     /// * `uploaded` - Bytes uploaded in this transfer
     /// * `downloaded` - Bytes downloaded in this transfer
+    #[allow(dead_code)]
     pub fn record_transfer(
         &mut self,
         session_id: &str,

@@ -19,6 +19,23 @@ pub use splice::zero_copy_bidirectional;
 
 use crate::{app::dispatcher::BoxedInstrumentedStream, proxy::ProxyStream};
 
+/// Number of bytes processed by a single `CopyBuffer::poll_copy` invocation
+/// before we cooperatively yield back to the tokio runtime.
+///
+/// Without this, a CPU-bound proxy stream (e.g. Shadowsocks AES-GCM on a
+/// 78 BogoMIPS ARMv7 dual-core router) can keep a worker thread busy for
+/// tens of milliseconds per `poll_write` call. With 16 concurrent SS flows
+/// (32 directions) on only 2 worker threads, that starves short control
+/// tasks (DNS resolution, API polling, SSH keepalive) which share the same
+/// runtime, manifesting as "speedtest crashes the router / DNS times out".
+///
+/// Yielding every 256 KiB lets the runtime interleave ~60 DNS-sized tasks
+/// per second per flow at 67 Mbit/s while costing only one extra schedule
+/// per ~3 ms of cipher work. The threshold is deliberately a multiple of
+/// the typical 64 KiB tcp-buffer so a single buffer-fill/write cycle is
+/// not interrupted; we yield between cycles, not mid-write.
+const YIELD_EVERY_BYTES: u64 = 256 * 1024;
+
 #[derive(Debug)]
 pub enum CopyBidirectionalError {
     LeftClosed(std::io::Error),
@@ -66,6 +83,15 @@ pub struct CopyBuffer {
     cap: usize,
     amt: u64,
     buf: Box<[u8]>,
+    /// Bytes transferred since the last cooperative yield. See
+    /// [`YIELD_EVERY_BYTES`] for rationale.
+    bytes_since_yield: u64,
+}
+
+impl Default for CopyBuffer {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl CopyBuffer {
@@ -78,6 +104,7 @@ impl CopyBuffer {
             cap: 0,
             amt: 0,
             buf: vec![0; 2 * 1024].into_boxed_slice(),
+            bytes_since_yield: 0,
         }
     }
 
@@ -93,6 +120,7 @@ impl CopyBuffer {
             cap: 0,
             amt: 0,
             buf: buf.into_boxed_slice(),
+            bytes_since_yield: 0,
         })
     }
 
@@ -154,9 +182,22 @@ impl CopyBuffer {
 
             // If our buffer has some data, let's write it out!
             while self.pos < self.cap {
+                let remaining_yield = (YIELD_EVERY_BYTES
+                    .saturating_sub(self.bytes_since_yield)
+                    as usize)
+                    .min(self.cap - self.pos);
+                let to_write = if remaining_yield > 0 {
+                    remaining_yield
+                } else {
+                    self.cap - self.pos
+                };
+
                 let me = &mut *self;
-                let i =
-                    ready!(writer.as_mut().poll_write(cx, &me.buf[me.pos..me.cap]))?;
+                let i = ready!(
+                    writer
+                        .as_mut()
+                        .poll_write(cx, &me.buf[me.pos..me.pos + to_write])
+                )?;
                 if i == 0 {
                     return Poll::Ready(Err(io::Error::new(
                         io::ErrorKind::WriteZero,
@@ -165,6 +206,8 @@ impl CopyBuffer {
                 } else {
                     self.pos += i;
                     self.amt += i as u64;
+                    self.bytes_since_yield =
+                        self.bytes_since_yield.saturating_add(i as u64);
                     self.need_flush = true;
                     // Reset idle timeout on successful write
                     if let (Some(timeout), Some(duration)) =
@@ -174,6 +217,10 @@ impl CopyBuffer {
                             .as_mut()
                             .reset(tokio::time::Instant::now() + duration);
                     }
+                }
+
+                if self.bytes_since_yield >= YIELD_EVERY_BYTES {
+                    break;
                 }
             }
 
@@ -190,6 +237,24 @@ impl CopyBuffer {
             if self.pos == self.cap && self.read_done {
                 ready!(writer.as_mut().poll_flush(cx))?;
                 return Poll::Ready(Ok(self.amt));
+            }
+
+            // Cooperative yield: after transferring `YIELD_EVERY_BYTES` since
+            // the last yield, flush any buffered writes and ask the runtime
+            // to re-schedule us on the next poll loop. This prevents a single
+            // CPU-bound cipher (e.g. Shadowsocks AES-GCM on a 78 BogoMIPS
+            // ARMv7 dual-core router) from monopolising a worker thread and
+            // starving short control tasks (DNS, API, SSH) that share the
+            // same tokio runtime. See [`YIELD_EVERY_BYTES`] for the rationale
+            // behind the threshold.
+            if self.bytes_since_yield >= YIELD_EVERY_BYTES {
+                self.bytes_since_yield = 0;
+                if self.need_flush {
+                    ready!(writer.as_mut().poll_flush(cx))?;
+                    self.need_flush = false;
+                }
+                cx.waker().wake_by_ref();
+                return Poll::Pending;
             }
         }
     }
@@ -524,5 +589,79 @@ impl<T: ReadExactBase> ReadExt for T {
                 return Poll::Ready(Ok(()));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt, duplex};
+
+    use super::*;
+
+    #[tokio::test]
+    async fn test_copy_buf_bidirectional_small_buffer() {
+        let (mut client_io, mut server_io) = duplex(64 * 1024);
+        let (mut proxy_client, mut proxy_server) = duplex(64 * 1024);
+
+        let copy_task = tokio::spawn(async move {
+            copy_buf_bidirectional_with_timeout(
+                &mut server_io,
+                &mut proxy_client,
+                2 * 1024,
+                Duration::from_secs(5),
+                Duration::from_secs(5),
+            )
+            .await
+        });
+
+        let client_msg = b"hello world";
+        client_io.write_all(client_msg).await.unwrap();
+        client_io.shutdown().await.unwrap();
+
+        let mut buf = vec![0u8; client_msg.len()];
+        proxy_server.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, client_msg);
+        proxy_server.shutdown().await.unwrap();
+
+        let (a_to_b, b_to_a) = copy_task.await.unwrap().unwrap();
+        assert_eq!(a_to_b, client_msg.len() as u64);
+        assert_eq!(b_to_a, 0);
+    }
+
+    #[tokio::test]
+    async fn test_copy_buf_bidirectional_oversized_buffer() {
+        // Test buffer larger than YIELD_EVERY_BYTES (256 KiB), e.g. 512 KiB
+        let (mut client_io, mut server_io) = duplex(1024 * 1024);
+        let (mut proxy_client, mut proxy_server) = duplex(1024 * 1024);
+
+        let copy_task = tokio::spawn(async move {
+            copy_buf_bidirectional_with_timeout(
+                &mut server_io,
+                &mut proxy_client,
+                512 * 1024,
+                Duration::from_secs(5),
+                Duration::from_secs(5),
+            )
+            .await
+        });
+
+        let data = vec![42u8; 600 * 1024]; // 600 KiB > 256 KiB
+        let data_clone = data.clone();
+
+        let client_task = tokio::spawn(async move {
+            client_io.write_all(&data_clone).await.unwrap();
+            client_io.shutdown().await.unwrap();
+        });
+
+        let mut received = Vec::new();
+        proxy_server.read_to_end(&mut received).await.unwrap();
+        proxy_server.shutdown().await.unwrap();
+
+        client_task.await.unwrap();
+        let (a_to_b, b_to_a) = copy_task.await.unwrap().unwrap();
+        assert_eq!(a_to_b, data.len() as u64);
+        assert_eq!(b_to_a, 0);
+        assert_eq!(received, data);
     }
 }

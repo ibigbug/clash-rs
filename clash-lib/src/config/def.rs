@@ -355,7 +355,6 @@ impl Display for LogLevel {
 ///   - DOMAIN-SUFFIX,facebook.com,REJECT
 ///   - DOMAIN-KEYWORD,google,select
 ///   - DOMAIN,google.com,select
-///   - DOMAIN,google.com,select,interface=en0
 ///   - SRC-IP-CIDR,192.168.1.1/24,DIRECT
 ///   - GEOIP,CN,DIRECT
 ///   - DST-PORT,53,trojan
@@ -746,6 +745,9 @@ pub struct EdnsClientSubnet {
 pub struct Experimental {
     /// buffer size for tcp stream bidirectional copy
     pub tcp_buffer_size: Option<usize>,
+    /// max entries in the closed-flows ring buffer (default 50, lower saves
+    /// RAM)
+    pub closed_flows_cap: Option<usize>,
     #[serde(default)]
     pub ignore_resolve_fail: bool,
 }

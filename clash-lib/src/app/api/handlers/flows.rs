@@ -219,12 +219,43 @@ async fn build_flow_records(
         merge_info!(info, chains, true);
     }
 
-    // Closed connections (ring buffer).
+    // Closed connections (ring buffer) — uses ClosedFlowInfo which has
+    // pre-extracted concrete fields (no session_holder/proxy_chain_holder
+    // needed).
     if include_closed {
         let closed = mgr.closed_flows_snapshot().await;
         for info in &closed {
-            let chains = info.proxy_chain_holder.snapshot().await;
-            merge_info!(info, chains, false);
+            let key = FlowKey {
+                dst_host: info.host.clone(),
+                dst_port: info.destination_port,
+                protocol: info.network.clone(),
+            };
+            let acc = map.entry(key).or_insert_with(|| Acc {
+                src_ips: Vec::new(),
+                conn_count: 0,
+                active_count: 0,
+                closed_count: 0,
+                upload_total: 0,
+                download_total: 0,
+                rule: String::new(),
+                rule_payload: String::new(),
+                chains: Vec::new(),
+                country: None,
+                asn: None,
+                last_seen: DateTime::<Utc>::MIN_UTC,
+            });
+            acc.apply(ConnEntry {
+                src_ip: info.source_ip.clone(),
+                upload: info.upload_total,
+                download: info.download_total,
+                rule: info.rule.clone(),
+                rule_payload: info.rule_payload.clone(),
+                chains: info.proxy_chain.clone(),
+                country: info.country.clone(),
+                asn: info.asn.clone(),
+                start_time: info.start_time,
+                is_active: false,
+            });
         }
     }
 
