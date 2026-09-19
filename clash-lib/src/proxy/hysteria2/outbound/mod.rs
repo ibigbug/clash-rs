@@ -26,7 +26,10 @@ use bytes::{Bytes, BytesMut};
 use erased_serde::Serialize as ErasedSerialize;
 use futures::{SinkExt, StreamExt};
 use h3::client::SendRequest;
-use h3_quinn::OpenStreams;
+use h3_quinn::{Connection as H3QuinnConnection, OpenStreams};
+
+type H3ClientConnection = h3::client::Connection<H3QuinnConnection, Bytes>;
+type H3ClientGuard = (H3ClientConnection, SendRequest<OpenStreams, Bytes>);
 use quinn::{
     ClientConfig, Connection, TokioRuntime, crypto::rustls::QuicClientConfig,
 };
@@ -104,7 +107,7 @@ pub struct Handler {
     conn: Mutex<Option<Arc<HysteriaConnection>>>,
     next_session_id: AtomicU32,
     // a send request guard to keep the connection alive
-    guard: Mutex<Option<SendRequest<OpenStreams, Bytes>>>,
+    guard: Mutex<Option<H3ClientGuard>>,
     // support udp is decided by server
     support_udp: RwLock<bool>,
 }
@@ -174,7 +177,7 @@ impl Handler {
         &self,
         sess: &Session,
         resolver: ThreadSafeDNSResolver,
-    ) -> anyhow::Result<(Connection, SendRequest<OpenStreams, Bytes>)> {
+    ) -> anyhow::Result<(Connection, H3ClientGuard)> {
         tracing::trace!(
             "hysteria2 new_authed_connection_inner: starting connection to {:?}",
             self.opts.addr
@@ -276,10 +279,10 @@ impl Handler {
     async fn auth(
         conn: &quinn::Connection,
         passwd: &str,
-    ) -> anyhow::Result<(SendRequest<OpenStreams, Bytes>, CcRx, bool)> {
-        let h3_conn = h3_quinn::Connection::new(conn.clone());
+    ) -> anyhow::Result<(H3ClientGuard, CcRx, bool)> {
+        let h3_conn = H3QuinnConnection::new(conn.clone());
 
-        let (_, mut sender) =
+        let (driver, mut sender) =
             h3::client::builder().build::<_, _, Bytes>(h3_conn).await?;
 
         let req = http::Request::post("https://hysteria/auth")
@@ -314,7 +317,7 @@ impl Handler {
             .to_str()?
             .parse()?;
 
-        Ok((sender, cc_rx, support_udp))
+        Ok(((driver, sender), cc_rx, support_udp))
     }
 
     pub async fn new_authed_connection(
@@ -336,7 +339,7 @@ impl Handler {
         }) {
             Some(s) => Ok(s.clone()),
             None => {
-                let (session, guard) = self
+                let (session, (driver, guard)) = self
                     .new_authed_connection_inner(sess, resolver)
                     .await
                     .map_err(|e| {
@@ -349,9 +352,11 @@ impl Handler {
                 let hyst_conn = HysteriaConnection::new_with_task_loop(
                     session,
                     self.opts.udp_mtu,
+                    Some(driver),
+                    Some(guard),
                 );
                 *quinn_conn_lock = Some(hyst_conn.clone());
-                *self.guard.lock().await = Some(guard);
+                *self.guard.lock().await = None;
                 Ok(hyst_conn)
             }
         }
@@ -457,17 +462,24 @@ pub struct HysteriaConnection {
 
     // config
     pub udp_mtu: Option<usize>,
+
+    pub _h3_conn: tokio::sync::Mutex<Option<H3ClientConnection>>,
+    pub _h3_guard: tokio::sync::Mutex<Option<SendRequest<OpenStreams, Bytes>>>,
 }
 
 impl HysteriaConnection {
     pub fn new_with_task_loop(
         conn: Arc<quinn::Connection>,
         udp_mtu: Option<u32>,
+        h3_conn: Option<H3ClientConnection>,
+        h3_guard: Option<SendRequest<OpenStreams, Bytes>>,
     ) -> Arc<Self> {
         let s = Arc::new(Self {
             conn,
             udp_sessions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             udp_mtu: udp_mtu.map(|x| x as usize),
+            _h3_conn: tokio::sync::Mutex::new(h3_conn),
+            _h3_guard: tokio::sync::Mutex::new(h3_guard),
         });
         tokio::spawn(Self::spawn_tasks(s.clone()));
 
