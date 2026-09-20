@@ -10,6 +10,10 @@ updates:
           - "*"
         exclude-patterns:
           - "tower-http"
+      rust-security-dependencies:
+        applies-to: security-updates
+        patterns:
+          - "*"
     ignore:
       - dependency-name: "tower-http"
   - package-ecosystem: "github-actions"
@@ -20,6 +24,10 @@ updates:
       actions-dependencies:
         patterns:
           - "*"
+      actions-security-dependencies:
+        applies-to: security-updates
+        patterns:
+          - "*"
   - package-ecosystem: "npm"
     directory: "/clash-dashboard"
     schedule:
@@ -28,4 +36,9 @@ updates:
       npm-dependencies:
         patterns:
           - "*"
+      npm-security-dependencies:
+        applies-to: security-updates
+        patterns:
+          - "*"
+
 
