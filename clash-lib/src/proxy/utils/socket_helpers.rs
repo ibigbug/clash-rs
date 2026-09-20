@@ -95,9 +95,22 @@ pub async fn new_udp_socket(
     src: Option<SocketAddr>,
     iface: Option<&OutboundInterface>,
     #[cfg(target_os = "linux")] so_mark: Option<u32>,
-    // Optional family hint for the socket.
-    // If not provided, the family will be determined based on the source
-    // address or interface.
+    family_hint: Option<std::net::SocketAddr>,
+) -> std::io::Result<UdpSocket> {
+    new_udp_socket_blocking(
+        src,
+        iface,
+        #[cfg(target_os = "linux")]
+        so_mark,
+        family_hint,
+    )
+}
+
+/// Synchronous core of [`new_udp_socket`], for callers that cannot await
+pub fn new_udp_socket_blocking(
+    src: Option<SocketAddr>,
+    iface: Option<&OutboundInterface>,
+    #[cfg(target_os = "linux")] so_mark: Option<u32>,
     family_hint: Option<std::net::SocketAddr>,
 ) -> std::io::Result<UdpSocket> {
     // Determine the socket family based on the source address or interface

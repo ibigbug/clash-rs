@@ -724,6 +724,22 @@ impl OutboundHandleMap {
             outbound_name: outbound_name.to_owned(),
             src_addr,
         };
+        // A closed sender means its `rw_handle` task ended and dropped the
+        // receiver (e.g. the outbound datagram stream ended after a proxy
+        // reconnect). Reusing it would silently drop every packet and, because
+        // the lookup refreshes `last_active`, the timeout cleaner would never
+        // evict it. Drop the dead session so the caller rebuilds the
+        // association on the live connection.
+        if self.0.get(&key).is_some_and(|val| val.sender.is_closed()) {
+            if let Some(dead) = self.0.remove(&key) {
+                dead.rw_handle.abort();
+            }
+            trace!(
+                "evicting closed outbound udp session {:?}",
+                (outbound_name, src_addr)
+            );
+            return None;
+        }
         self.0.get_mut(&key).map(|val| {
             trace!(
                 "updating last access time for outbound {:?}",
@@ -744,5 +760,43 @@ impl Drop for OutboundHandleMap {
         for (_, val) in self.0.drain() {
             val.rw_handle.abort();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn src() -> SocketAddr {
+        "127.0.0.1:40000".parse().unwrap()
+    }
+
+    #[tokio::test]
+    async fn closed_udp_session_is_evicted_for_reconnect() {
+        let mut map = OutboundHandleMap::new();
+        let (tx, rx) = tokio::sync::mpsc::channel::<(UdpPacket, SocksAddr)>(4);
+        let handle = tokio::spawn(async {});
+        map.insert("proxy", src(), handle, tx);
+
+        // Receiver alive: the cached sender is reused.
+        assert!(map.get_outbound_sender_mut("proxy", src()).is_some());
+
+        // Receiver dropped (its rw_handle ended): the entry is evicted so the
+        // caller rebuilds the association instead of writing to a dead channel.
+        drop(rx);
+        assert!(map.get_outbound_sender_mut("proxy", src()).is_none());
+        // The entry is removed, not merely skipped.
+        assert!(map.0.is_empty());
+    }
+
+    #[tokio::test]
+    async fn live_udp_session_is_retained() {
+        let mut map = OutboundHandleMap::new();
+        let (tx, _rx) = tokio::sync::mpsc::channel::<(UdpPacket, SocksAddr)>(4);
+        let handle = tokio::spawn(async {});
+        map.insert("proxy", src(), handle, tx);
+
+        assert!(map.get_outbound_sender_mut("proxy", src()).is_some());
+        assert_eq!(map.0.len(), 1);
     }
 }
