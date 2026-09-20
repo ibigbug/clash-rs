@@ -47,7 +47,6 @@ target = "aarch64-unknown-linux-gnu"
 release-name = "aarch64-unknown-linux-gnu"
 tool = "cross"
 extra-args = "-F plus"
-zig = "2.17"
 
 [[target]]
 os = "ubuntu-latest"
