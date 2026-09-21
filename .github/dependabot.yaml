@@ -10,12 +10,16 @@ updates:
           - "*"
         exclude-patterns:
           - "tower-http"
+          - "tuic-core"
+          - "tuic-server"
       rust-security-dependencies:
         applies-to: security-updates
         patterns:
           - "*"
     ignore:
       - dependency-name: "tower-http"
+      - dependency-name: "tuic-core"
+      - dependency-name: "tuic-server"
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:

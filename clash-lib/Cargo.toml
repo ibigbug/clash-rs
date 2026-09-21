@@ -218,7 +218,7 @@ totp-rs = { version = "^5.7", features = ["serde_support"], optional = true }
 shadowquic = { version = "0.3.13", optional = true, default-features = false}
 
 # experimental
-tailscale = { version = "0.5.0", optional = true }
+tailscale = { version = "0.6.1", optional = true }
 
 aws-lc-rs = { version = "1", default-features = false, optional = true }
 
