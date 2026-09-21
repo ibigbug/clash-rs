@@ -88,11 +88,11 @@ tracing-appender = { version = "0.2" }
 tracing-log = "0.2"
 
 tracing-chrome = { version = "0.7", optional = true }
-opentelemetry = { version = "0.32", optional = true }
-opentelemetry-otlp = { version = "0.32", optional = true }
-opentelemetry_sdk = { version = "0.32", optional = true, features = ["rt-tokio"] }
+opentelemetry = { version = "0.33", optional = true }
+opentelemetry-otlp = { version = "0.33", optional = true }
+opentelemetry_sdk = { version = "0.33", optional = true, features = ["rt-tokio"] }
 tracing-opentelemetry = { version = "0.33", optional = true }
-opentelemetry-semantic-conventions = { version = "0.32", optional = true, features = ["semconv_experimental"] }
+opentelemetry-semantic-conventions = { version = "0.33", optional = true, features = ["semconv_experimental"] }
 
 # Data structures
 url = "2"
