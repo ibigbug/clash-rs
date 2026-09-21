@@ -18,6 +18,8 @@ aws-lc-rs = [
     "watfaq-dns/aws-lc-rs",
     "rcgen/aws_lc_rs",
     "shadowquic?/aws-lc-rs",
+    "wind-quic?/aws-lc-rs",
+    "wind-tuic?/aws-lc-rs",
 ]
 ring = [
     "rustls/ring",
@@ -29,11 +31,13 @@ ring = [
     "watfaq-dns/ring",
     "rcgen/ring",
     "shadowquic?/ring",
+    "wind-quic?/ring",
+    "wind-tuic?/ring",
 ]
 
 # Protos
 shadowsocks = ["dep:shadowsocks", "dep:blake3"]
-tuic = ["dep:tuic-core", "dep:register-count"]
+tuic = ["dep:wind-tuic", "dep:wind-core", "dep:wind-quic", "dep:wind-quinn"]
 ssh = ["dep:russh", "dep:dirs", "dep:totp-rs"]
 onion = ["dep:arti-client", "dep:tor-rtcompat", "arti-client/onion-service-client"]
 shadowquic = ["dep:shadowquic", "shadowquic?/shadowquic-quinn"]
@@ -186,15 +190,12 @@ arti-client = { version = "0.46", optional = true, default-features = false, fea
 tor-rtcompat = { version = "0.46", optional = true, default-features = false, features = ["tokio", "rustls"] }
 
 
-# tuic
-# Held at v1.8.5 (this dependency-group bump left the rest updated). Upgrading
-# tuic to v1.8.10 pulls a newer `Tipuch/quinn` `bbrv3` branch tip whose
-# `into_0rtt()` signature dropped `ZeroRttAccepted`; the `tuic-server` crate
-# (a dev-dependency used by the in-process test server) still calls the old
-# signature and fails to build, and no fixed upstream tuic tag exists yet.
-# Bump both pins once upstream tuic compiles against current quinn.
-tuic-core= { tag = "v1.8.5", optional = true, git = "https://github.com/Itsusinn/tuic.git", features = ["async_marshal", "marshal", "model"] }
-register-count = { version = "0.1", optional = true }
+# TUIC uses the sibling Wind checkout, like the local TUIC client/server.
+wind-tuic = { path = "../../wind/crates/wind-tuic", optional = true, default-features = false, features = ["client", "decode", "quinn"] }
+wind-core = { path = "../../wind/crates/wind-core", optional = true, default-features = false }
+wind-quic = { path = "../../wind/crates/wind-quic", optional = true, default-features = false, features = ["quinn"] }
+# Keep Wind's Quinn fork separate from the crates.io Quinn used by Hysteria2.
+wind-quinn = { package = "quinn", git = "https://github.com/Tipuch/quinn.git", branch = "bbrv3", optional = true, default-features = false, features = ["runtime-tokio"] }
 
 quinn = { version = "0.11", default-features = false, features = ["futures-io", "runtime-tokio"] }
 
@@ -243,7 +244,9 @@ http-body-util = "0.1"
 reqwest = { version = "0.13", features = ["socks"] }
 sysinfo = { version = "0.39", features = ["network"]}
 moka = { version = "0.12", features = ["future"] }
-tuic-server = { tag = "v1.8.5", git = "https://github.com/Itsusinn/tuic.git" }
+wind-tuic = { path = "../../wind/crates/wind-tuic", default-features = false, features = ["server", "quinn"] }
+wind-base = { path = "../../wind/crates/wind-base" }
+eyre = "0.6"
 
 [build-dependencies]
 prost-build = "0.14"

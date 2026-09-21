@@ -1,33 +1,16 @@
-mod compat;
-mod handle_stream;
-mod handle_task;
+mod datagram;
 pub(crate) mod types;
 
-use crate::{
-    common::tls::{DefaultTlsVerifier, build_tls_client_config},
-    proxy::{tuic::types::SocketAdderTrans, utils::new_udp_socket},
-};
+use crate::common::tls::{DefaultTlsVerifier, build_tls_client_config};
 use anyhow::Result;
 use async_trait::async_trait;
 
-use tracing::debug;
-use tuic_core::quinn::{
-    ClientConfig as QuinnConfig, Endpoint as QuinnEndpoint, EndpointConfig,
-    TokioRuntime, TransportConfig as QuinnTransportConfig, VarInt,
-    bbr::BbrConfig,
-    congestion::{Bbr3Config, CubicConfig, NewRenoConfig},
-    crypto::rustls::QuicClientConfig,
-};
-
 use erased_serde::Serialize as ErasedSerialize;
-use std::{
-    collections::HashMap,
-    net::{Ipv4Addr, Ipv6Addr},
-    sync::{
-        Arc,
-        atomic::{AtomicU16, Ordering},
-    },
-    time::Duration,
+use std::{collections::HashMap, sync::Arc, time::Duration};
+use wind_core::AppContext;
+use wind_quinn::VarInt;
+use wind_tuic::quinn::outbound::{
+    PeerResolver, ReconnectConfig, TuicOutbound, TuicOutboundOpts, UdpSocketFactory,
 };
 
 use uuid::Uuid;
@@ -42,20 +25,21 @@ use crate::{
         dns::ThreadSafeDNSResolver,
     },
     proxy::{
-        DialWithConnector,
-        tuic::types::{ServerAddr, TuicEndpoint},
+        DialWithConnector, tuic::types::ServerAddr, utils::new_udp_socket_blocking,
     },
     session::Session,
 };
 
-use crate::session::SocksAddr as ClashSocksAddr;
-use tokio::sync::{Mutex as AsyncMutex, OnceCell};
+use tokio::sync::OnceCell;
 
-use self::types::{CongestionControl, TuicConnection, UdpRelayMode, UdpSession};
+use self::{
+    datagram::TuicDatagramOutbound,
+    types::{CongestionControl, UdpRelayMode},
+};
 
 use super::{
     ConnectorType, HandlerCommonOptions, OutboundHandler, OutboundType,
-    PlainProxyAPIResponse, datagram::UdpPacket,
+    PlainProxyAPIResponse,
 };
 
 #[derive(Debug, Clone)]
@@ -96,9 +80,10 @@ pub struct HandlerOptions {
 
 pub struct Handler {
     opts: HandlerOptions,
-    ep: OnceCell<TuicEndpoint>,
-    conn: AsyncMutex<Option<Arc<TuicConnection>>>,
-    next_assoc_id: AtomicU16,
+    /// Shared with the Wind outbound; cancelling it on drop stops the
+    /// reconnect supervisor and closes the connection.
+    ctx: Arc<AppContext>,
+    outbound: OnceCell<Arc<TuicOutbound>>,
 }
 
 impl std::fmt::Debug for Handler {
@@ -109,7 +94,18 @@ impl std::fmt::Debug for Handler {
     }
 }
 
+impl Drop for Handler {
+    fn drop(&mut self) {
+        self.ctx.token.cancel();
+    }
+}
+
 impl DialWithConnector for Handler {}
+
+type TuicTcpStream =
+    tokio::io::Join<wind_quic::quinn::QuinnRecv, wind_quic::quinn::QuinnSend>;
+
+impl crate::proxy::ProxyStream for TuicTcpStream {}
 
 #[async_trait]
 impl OutboundHandler for Handler {
@@ -196,17 +192,30 @@ impl Handler {
     pub fn new(opts: HandlerOptions) -> Self {
         Self {
             opts,
-            ep: OnceCell::new(),
-            conn: AsyncMutex::new(None),
-            next_assoc_id: AtomicU16::new(0),
+            ctx: Arc::new(AppContext::default()),
+            outbound: OnceCell::new(),
         }
     }
 
-    async fn init_endpoint(
+    /// Build the Wind TUIC outbound for this handler's configuration.
+    ///
+    /// The rustls `ClientConfig` is built here (mTLS, custom verifier,
+    /// `disable-sni`, ALPN) and handed to Wind verbatim so the whole
+    /// connection/TLS surface stays under Clash's configuration.
+    async fn init_outbound(
         opts: HandlerOptions,
+        ctx: Arc<AppContext>,
         resolver: ThreadSafeDNSResolver,
         sess: &Session,
-    ) -> Result<TuicEndpoint> {
+    ) -> Result<Arc<TuicOutbound>> {
+        anyhow::ensure!(
+            !opts.heartbeat_interval.is_zero(),
+            "TUIC heartbeat interval must be positive"
+        );
+        anyhow::ensure!(
+            !opts.gc_interval.is_zero(),
+            "TUIC GC interval must be positive"
+        );
         let verifier =
             Arc::new(DefaultTlsVerifier::new(None, opts.skip_cert_verify));
         let mut crypto = build_tls_client_config(
@@ -219,118 +228,119 @@ impl Handler {
         // throw: aborted by peer: the cryptographic handshake failed: error
         // 120: peer doesn't support any known protocol
         crypto.alpn_protocols.clone_from(&opts.alpn);
-        crypto.enable_early_data = true;
+        crypto.enable_early_data = opts.reduce_rtt;
         crypto.enable_sni = !opts.disable_sni;
 
-        let mut quinn_config =
-            QuinnConfig::new(Arc::new(QuicClientConfig::try_from(crypto)?));
-        let mut transport_config = QuinnTransportConfig::default();
-        transport_config
-            .max_concurrent_bidi_streams(opts.max_open_stream)
-            .max_concurrent_uni_streams(opts.max_open_stream)
-            .send_window(opts.send_window)
-            .stream_receive_window(opts.receive_window)
-            .max_idle_timeout(Some(opts.idle_timeout.try_into().unwrap()));
-        match opts.congestion_controller {
-            CongestionControl::Cubic => transport_config
-                .congestion_controller_factory(Arc::new(CubicConfig::default())),
-            CongestionControl::NewReno => transport_config
-                .congestion_controller_factory(Arc::new(NewRenoConfig::default())),
-            CongestionControl::Bbr => transport_config
-                .congestion_controller_factory(Arc::new(BbrConfig::default())),
-            CongestionControl::Bbr3 => transport_config
-                .congestion_controller_factory(Arc::new(Bbr3Config::default())),
+        let server = ServerAddr::new(
+            opts.server.clone(),
+            opts.port,
+            opts.ip.as_ref().and_then(|ip| ip.parse().ok()),
+            opts.sni.clone(),
+        );
+        let peer_addr = server.resolve(&resolver).await?;
+
+        // Re-resolve the server before each Wind reconnect so DNS rotation and
+        // failover are followed instead of pinning the address resolved above.
+        // An explicit `ip` override still short-circuits inside `resolve`.
+        let peer_resolver: PeerResolver = {
+            let server = server.clone();
+            let resolver = resolver.clone();
+            Arc::new(move || {
+                let server = server.clone();
+                let resolver = resolver.clone();
+                Box::pin(async move {
+                    server.resolve(&resolver).await.map_err(|e| e.to_string())
+                })
+            })
         };
 
-        quinn_config.transport_config(Arc::new(transport_config));
-
-        // TODO: we should try to resolve the server address once?
-        let socket = {
-            if resolver.ipv6() {
-                new_udp_socket(
-                    Some((Ipv6Addr::UNSPECIFIED, 0).into()),
-                    sess.iface.as_ref(),
+        // Preserve Clash's outbound socket policy: bind the QUIC UDP socket to
+        // the selected interface and/or set the Linux routing mark, so policy
+        // routing and TUN setups don't leak the TUIC connection out the wrong
+        // egress (or route it back through the tunnel).
+        let socket_factory: UdpSocketFactory = {
+            let iface = sess.iface.clone();
+            #[cfg(target_os = "linux")]
+            let so_mark = sess.so_mark;
+            Arc::new(move |peer: std::net::SocketAddr| {
+                new_udp_socket_blocking(
+                    None,
+                    iface.as_ref(),
                     #[cfg(target_os = "linux")]
-                    sess.so_mark,
-                    None,
+                    so_mark,
+                    Some(peer),
                 )
-                .await?
-            } else {
-                new_udp_socket(
-                    Some((Ipv4Addr::UNSPECIFIED, 0).into()),
-                    None,
-                    #[cfg(target_os = "linux")]
-                    sess.so_mark,
-                    None,
-                )
-                .await?
-            }
+                .and_then(tokio::net::UdpSocket::into_std)
+            })
         };
 
-        debug!("binding socket to: {:?}", socket.local_addr()?);
-
-        let endpoint = QuinnEndpoint::new(
-            EndpointConfig::default(),
-            None,
-            socket.into_std()?,
-            Arc::new(TokioRuntime),
-        )?;
-
-        endpoint.set_default_client_config(quinn_config);
-
-        // Parse ip field if provided
-        let ip_addr = opts.ip.as_ref().and_then(|ip_str| ip_str.parse().ok());
-
-        let endpoint = TuicEndpoint {
-            ep: endpoint,
-            server: ServerAddr::new(opts.server, opts.port, ip_addr, opts.sni),
-            uuid: opts.uuid,
-            password: Arc::from(opts.password.into_bytes().into_boxed_slice()),
-            udp_relay_mode: opts.udp_relay_mode,
+        let wind_opts = TuicOutboundOpts {
+            peer_addr,
+            peer_resolver: Some(peer_resolver),
+            sni: server.server_name().to_owned(),
+            auth: (
+                opts.uuid,
+                Arc::from(opts.password.clone().into_bytes().into_boxed_slice()),
+            ),
             zero_rtt_handshake: opts.reduce_rtt,
             heartbeat: opts.heartbeat_interval,
             gc_interval: opts.gc_interval,
             gc_lifetime: opts.gc_lifetime,
+            skip_cert_verify: opts.skip_cert_verify,
+            alpn: opts
+                .alpn
+                .iter()
+                .map(|a| String::from_utf8_lossy(a).into_owned())
+                .collect(),
+            reconnect: ReconnectConfig::default(),
+            client_config: Some(Arc::new(crypto)),
+            congestion_control: opts.congestion_controller.into(),
+            max_concurrent_bi_streams: Some(
+                u32::try_from(opts.max_open_stream.into_inner()).unwrap_or(u32::MAX),
+            ),
+            max_concurrent_uni_streams: Some(
+                u32::try_from(opts.max_open_stream.into_inner()).unwrap_or(u32::MAX),
+            ),
+            send_window: Some(opts.send_window),
+            stream_receive_window: Some(opts.receive_window.into_inner()),
+            max_idle_time: Some(opts.idle_timeout),
+            udp_relay_mode: opts.udp_relay_mode.into(),
+            socket_factory: Some(socket_factory),
         };
 
-        Ok(endpoint)
+        let outbound = tokio::time::timeout(
+            opts.request_timeout,
+            TuicOutbound::new(ctx, wind_opts),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("TUIC connect timed out"))?
+        .map_err(|e| anyhow::anyhow!("TUIC connect: {e}"))?;
+        outbound
+            .start_poll()
+            .await
+            .map_err(|e| anyhow::anyhow!("TUIC poll: {e}"))?;
+        Ok(Arc::new(outbound))
     }
 
-    async fn get_conn(
+    async fn get_outbound(
         &self,
-        resolver: &ThreadSafeDNSResolver,
         sess: &Session,
-    ) -> Result<Arc<TuicConnection>> {
-        let endpoint = self
-            .ep
+        resolver: &ThreadSafeDNSResolver,
+    ) -> Result<Arc<TuicOutbound>> {
+        // The endpoint is built once and shared, so the first session's
+        // interface / routing mark wins; these are process-wide settings in
+        // practice (`interface-name` / `routing-mark`).
+        self.outbound
             .get_or_try_init(|| {
-                Self::init_endpoint(self.opts.clone(), resolver.clone(), sess)
+                Self::init_outbound(
+                    self.opts.clone(),
+                    self.ctx.clone(),
+                    resolver.clone(),
+                    sess,
+                )
             })
-            .await?;
-
-        let fut = async {
-            let mut guard = self.conn.lock().await;
-
-            let conn = match guard.as_ref() {
-                None => {
-                    // init
-                    let new_conn = endpoint.connect(resolver, false).await?;
-                    *guard = Some(new_conn.clone());
-                    new_conn
-                }
-                Some(existing) if existing.check_open().is_err() => {
-                    // reconnect
-                    let new_conn = endpoint.connect(resolver, true).await?;
-                    *guard = Some(new_conn.clone());
-                    new_conn
-                }
-                Some(existing) => existing.clone(),
-            };
-
-            Ok(conn)
-        };
-
-        tokio::time::timeout(self.opts.request_timeout, fut).await?
+            .await
+            .cloned()
     }
 
     async fn do_connect_stream(
@@ -338,10 +348,16 @@ impl Handler {
         sess: &Session,
         resolver: ThreadSafeDNSResolver,
     ) -> Result<BoxedInstrumentedStream> {
-        let conn = self.get_conn(&resolver, sess).await?;
-        let dest = sess.destination.clone().into_tuic();
-        let tuic_tcp = conn.connect_tcp(dest).await?;
-        let s = InstrumentedStreamWrapper::new(tuic_tcp);
+        let outbound = self.get_outbound(sess, &resolver).await?;
+        let dest = sess.destination.clone().into();
+        let io = tokio::time::timeout(
+            self.opts.request_timeout,
+            outbound.connect_tcp(&dest),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("TUIC stream connect timed out"))?
+        .map_err(|e| anyhow::anyhow!("TUIC stream connect: {e}"))?;
+        let s = InstrumentedStreamWrapper::new(io);
         s.append_to_chain(self.name()).await;
         Ok(Box::new(s))
     }
@@ -351,78 +367,22 @@ impl Handler {
         sess: &Session,
         resolver: ThreadSafeDNSResolver,
     ) -> Result<BoxedInstrumentedDatagram> {
-        let conn = self.get_conn(&resolver, sess).await?;
-        let assos_id = self.next_assoc_id.fetch_add(1, Ordering::SeqCst);
-        let quic_udp = TuicDatagramOutbound::new(assos_id, conn, sess.source.into());
+        let outbound = self.get_outbound(sess, &resolver).await?;
+        let quic_udp = TuicDatagramOutbound::new(outbound, self.ctx.clone(), sess);
         let s = InstrumentedDatagramWrapper::new(quic_udp);
         s.append_to_chain(self.name()).await;
         Ok(Box::new(s))
     }
 }
 
-#[derive(Debug)]
-struct TuicDatagramOutbound {
-    send_tx: tokio_util::sync::PollSender<UdpPacket>,
-    recv_rx: tokio::sync::mpsc::Receiver<UdpPacket>,
-}
-
-impl TuicDatagramOutbound {
-    pub fn new(
-        assoc_id: u16,
-        conn: Arc<TuicConnection>,
-        local_addr: ClashSocksAddr,
-    ) -> Self {
-        // TODO not sure about the size of buffer
-        let (send_tx, send_rx) = tokio::sync::mpsc::channel::<UdpPacket>(32);
-        let (recv_tx, recv_rx) = tokio::sync::mpsc::channel::<UdpPacket>(32);
-        let udp_sessions = conn.udp_sessions.clone();
-        tokio::spawn(async move {
-            // capture vars
-            let (mut send_rx, recv_tx) = (send_rx, recv_tx);
-            udp_sessions.write().await.insert(
-                assoc_id,
-                UdpSession {
-                    incoming: recv_tx,
-                    local_addr,
-                },
-            );
-            while let Some(next_send) = send_rx.recv().await {
-                let res = conn
-                    .outgoing_udp(
-                        next_send.data.into(),
-                        next_send.dst_addr.into_tuic(),
-                        assoc_id,
-                    )
-                    .await;
-                if res.is_err() {
-                    break;
-                }
-            }
-            // TuicDatagramOutbound dropped or outgoing_udp occurs error
-            tracing::info!(
-                "[udp] [dissociate] closing UDP session [{assoc_id:#06x}]"
-            );
-            _ = conn.dissociate(assoc_id).await;
-            udp_sessions.write().await.remove(&assoc_id);
-            anyhow::Ok(())
-        });
-
-        Self {
-            send_tx: tokio_util::sync::PollSender::new(send_tx),
-            recv_rx,
-        }
-    }
-}
-
-impl crate::proxy::ProxyStream for tuic_core::quinn::Connect {}
-
 #[cfg(test)]
 pub(crate) mod test_utils;
 
 #[cfg(test)]
 mod tests {
-    use std::{sync::Arc, time::Duration};
+    use std::{net::SocketAddr, sync::Arc, time::Duration};
 
+    use futures::{SinkExt, StreamExt};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use super::{test_utils::TuicServerProcess, *};
@@ -434,7 +394,7 @@ mod tests {
                 noop::NoopResolver,
             },
         },
-        session::Session,
+        session::{Session, SocksAddr as ClashSocksAddr},
     };
 
     fn gen_options(port: u16) -> anyhow::Result<HandlerOptions> {
@@ -537,6 +497,100 @@ mod tests {
             stream.read_exact(&mut buf).await?;
             assert_eq!(&buf, b"world");
         }
+
+        drop(echo);
+        Ok(())
+    }
+
+    /// 0-RTT (`reduce-rtt`) TCP ping-pong. The first connection completes a
+    /// full handshake and caches a TLS session ticket; the second reconnects
+    /// on the same endpoint, which may resume via `into_0rtt()`. Auth must
+    /// still be sent before the Connect command on both.
+    #[tokio::test]
+    #[cfg_attr(
+        qemu_emulated,
+        ignore = "QUIC under qemu-user (cross test) is unreliable"
+    )]
+    async fn test_tuic_reduce_rtt_tcp() -> anyhow::Result<()> {
+        crate::tests::initialize();
+        let server = TuicServerProcess::start().await?;
+        let port = server.port();
+
+        let mut opts = gen_options(port)?;
+        opts.reduce_rtt = true;
+        let handler = Arc::new(Handler::new(opts));
+        handler
+            .register_connector(GLOBAL_DIRECT_CONNECTOR.clone())
+            .await;
+
+        let resolver = Arc::new(NoopResolver);
+
+        let session = |target_port: u16| Session {
+            network: crate::session::Network::Tcp,
+            typ: crate::session::Type::Socks5,
+            source: "127.0.0.1:54321".parse().unwrap(),
+            destination: format!("127.0.0.1:{target_port}").parse().unwrap(),
+            resolved_ip: None,
+            so_mark: None,
+            iface: None,
+            country: None,
+            asn: None,
+            traffic_stats: None,
+            inbound_user: None,
+        };
+
+        // First connection: full handshake, which also caches a ticket.
+        let echo = TcpEchoServer::start().await?;
+        let mut stream = handler
+            .connect_stream(&session(echo.port()), resolver.clone())
+            .await?;
+        stream.write_all(b"hello").await?;
+        stream.flush().await?;
+        let mut buf = vec![0u8; 5];
+        stream.read_exact(&mut buf).await?;
+        assert_eq!(&buf, b"world");
+        drop(stream);
+        drop(echo);
+
+        // Let the NewSessionTicket arrive before tearing the connection down.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let outbound = handler
+            .outbound
+            .get()
+            .expect("outbound must be initialized")
+            .clone();
+        outbound
+            .connection
+            .load_full()
+            .inner()
+            .close(0u32.into(), b"test reconnect");
+
+        // Wait for the reconnect supervisor to swap in a fresh connection
+        // (the default backoff is 500ms).
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while outbound
+            .connection
+            .load_full()
+            .inner()
+            .close_reason()
+            .is_some()
+        {
+            anyhow::ensure!(
+                std::time::Instant::now() < deadline,
+                "TUIC client did not reconnect within 10s"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        // Second connection: same endpoint, so it may resume with 0-RTT.
+        let echo = TcpEchoServer::start().await?;
+        let mut stream = handler
+            .connect_stream(&session(echo.port()), resolver)
+            .await?;
+        stream.write_all(b"hello").await?;
+        stream.flush().await?;
+        stream.read_exact(&mut buf).await?;
+        assert_eq!(&buf, b"world");
 
         drop(echo);
         Ok(())
@@ -715,6 +769,205 @@ mod tests {
         }
 
         drop(echo);
+        Ok(())
+    }
+
+    /// Minimal UDP echo server: every datagram is sent back to its sender.
+    async fn spawn_udp_echo(bind: &str) -> anyhow::Result<SocketAddr> {
+        let socket = tokio::net::UdpSocket::bind(bind).await?;
+        let addr = socket.local_addr()?;
+        tokio::spawn(async move {
+            let mut buf = vec![0u8; 4096];
+            while let Ok((n, peer)) = socket.recv_from(&mut buf).await {
+                if socket.send_to(&buf[..n], peer).await.is_err() {
+                    break;
+                }
+            }
+        });
+        Ok(addr)
+    }
+
+    /// UDP relay round trip in native mode: datagrams travel as `Packet`
+    /// commands and are fragmented/reassembled by both sides.
+    #[tokio::test]
+    #[cfg_attr(
+        qemu_emulated,
+        ignore = "QUIC under qemu-user (cross test) is unreliable"
+    )]
+    async fn test_tuic_udp_roundtrip_native() -> anyhow::Result<()> {
+        udp_roundtrip(UdpRelayMode::Native).await
+    }
+
+    /// UDP relay round trip in QUIC mode: each destination gets its own
+    /// datagram stream.
+    #[tokio::test]
+    #[cfg_attr(
+        qemu_emulated,
+        ignore = "QUIC under qemu-user (cross test) is unreliable"
+    )]
+    async fn test_tuic_udp_roundtrip_quic() -> anyhow::Result<()> {
+        udp_roundtrip(UdpRelayMode::Quic).await
+    }
+
+    async fn udp_roundtrip(mode: UdpRelayMode) -> anyhow::Result<()> {
+        use crate::proxy::datagram::UdpPacket;
+
+        crate::tests::initialize();
+        let server = TuicServerProcess::start().await?;
+        let echo = spawn_udp_echo("127.0.0.1:0").await?;
+
+        let mut opts = gen_options(server.port())?;
+        opts.udp_relay_mode = mode;
+        let handler = Arc::new(Handler::new(opts));
+        handler
+            .register_connector(GLOBAL_DIRECT_CONNECTOR.clone())
+            .await;
+
+        let session = Session {
+            network: crate::session::Network::Udp,
+            typ: crate::session::Type::Socks5,
+            source: "127.0.0.1:54321".parse()?,
+            destination: ClashSocksAddr::Ip(echo),
+            resolved_ip: None,
+            so_mark: None,
+            iface: None,
+            country: None,
+            asn: None,
+            traffic_stats: None,
+            inbound_user: None,
+        };
+
+        let mut datagram = handler
+            .connect_datagram(&session, Arc::new(NoopResolver))
+            .await?;
+
+        // Two probes on one association: the second reply must still land in
+        // this session, not a freshly registered one.
+        for probe in [b"hello-udp".as_slice(), b"second".as_slice()] {
+            datagram
+                .send(UdpPacket {
+                    data: probe.to_vec(),
+                    dst_addr: ClashSocksAddr::Ip(echo),
+                    ..Default::default()
+                })
+                .await?;
+            let reply =
+                tokio::time::timeout(Duration::from_secs(4), datagram.next())
+                    .await
+                    .expect("UDP reply timed out")
+                    .expect("UDP session ended before the reply");
+            assert_eq!(reply.data, probe);
+        }
+
+        Ok(())
+    }
+
+    /// A dropped QUIC connection must end the existing UDP association instead
+    /// of silently blackholing it: the datagram stream closes so the caller
+    /// can recreate the association on the reconnected link.
+    #[tokio::test]
+    #[cfg_attr(
+        qemu_emulated,
+        ignore = "QUIC under qemu-user (cross test) is unreliable"
+    )]
+    async fn test_tuic_udp_association_ends_on_reconnect() -> anyhow::Result<()> {
+        use crate::proxy::datagram::UdpPacket;
+
+        crate::tests::initialize();
+        let server = TuicServerProcess::start().await?;
+        let echo = spawn_udp_echo("127.0.0.1:0").await?;
+
+        let handler = Arc::new(Handler::new(gen_options(server.port())?));
+        handler
+            .register_connector(GLOBAL_DIRECT_CONNECTOR.clone())
+            .await;
+
+        let session = Session {
+            network: crate::session::Network::Udp,
+            typ: crate::session::Type::Socks5,
+            source: "127.0.0.1:54321".parse()?,
+            destination: ClashSocksAddr::Ip(echo),
+            resolved_ip: None,
+            so_mark: None,
+            iface: None,
+            country: None,
+            asn: None,
+            traffic_stats: None,
+            inbound_user: None,
+        };
+
+        let mut datagram = handler
+            .connect_datagram(&session, Arc::new(NoopResolver))
+            .await?;
+
+        datagram
+            .send(UdpPacket {
+                data: b"hello-udp".to_vec(),
+                dst_addr: ClashSocksAddr::Ip(echo),
+                ..Default::default()
+            })
+            .await?;
+        let reply = tokio::time::timeout(Duration::from_secs(4), datagram.next())
+            .await
+            .expect("UDP reply timed out")
+            .expect("UDP session ended before the reply");
+        assert_eq!(reply.data, b"hello-udp");
+
+        // Force the connection down; the supervisor reconnects with the
+        // default 500ms backoff.
+        let outbound = handler
+            .outbound
+            .get()
+            .expect("outbound must be initialized")
+            .clone();
+        outbound
+            .connection
+            .load_full()
+            .inner()
+            .close(0u32.into(), b"test reconnect");
+
+        // The association must end rather than keep accepting sends.
+        match tokio::time::timeout(Duration::from_secs(4), datagram.next()).await {
+            Ok(None) => {}
+            other => panic!(
+                "expected the UDP association stream to end after reconnect, got \
+                 {other:?}"
+            ),
+        }
+
+        // Wait for the reconnect supervisor to swap in a fresh connection.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while outbound
+            .connection
+            .load_full()
+            .inner()
+            .close_reason()
+            .is_some()
+        {
+            anyhow::ensure!(
+                std::time::Instant::now() < deadline,
+                "TUIC client did not reconnect within 10s"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        // A fresh association on the reconnected link must still work.
+        let mut datagram = handler
+            .connect_datagram(&session, Arc::new(NoopResolver))
+            .await?;
+        datagram
+            .send(UdpPacket {
+                data: b"after-reconnect".to_vec(),
+                dst_addr: ClashSocksAddr::Ip(echo),
+                ..Default::default()
+            })
+            .await?;
+        let reply = tokio::time::timeout(Duration::from_secs(4), datagram.next())
+            .await
+            .expect("UDP reply after reconnect timed out")
+            .expect("UDP session ended before the reply after reconnect");
+        assert_eq!(reply.data, b"after-reconnect");
+
         Ok(())
     }
 }
