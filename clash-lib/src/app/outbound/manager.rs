@@ -580,6 +580,7 @@ impl OutboundManager {
             name: &str,
             proxies: &Option<Vec<String>>,
             use_provider: &Option<Vec<String>>,
+            url: Option<&str>,
             interval: u64,
             lazy: bool,
             handlers: &HashMap<String, AnyOutboundHandler>,
@@ -594,6 +595,7 @@ impl OutboundManager {
                 let pd = make_provider_from_proxies(
                     name,
                     proxies,
+                    url,
                     interval,
                     lazy,
                     handlers,
@@ -622,6 +624,7 @@ impl OutboundManager {
         fn make_provider_from_proxies(
             name: &str,
             proxies: &[String],
+            url: Option<&str>,
             interval: u64,
             lazy: bool,
             handlers: &HashMap<String, AnyOutboundHandler>,
@@ -645,9 +648,10 @@ impl OutboundManager {
                 })
                 .collect::<Result<Vec<_>, _>>()?;
 
+            let hc_url = url.unwrap_or(DEFAULT_LATENCY_TEST_URL);
             let hc = HealthCheck::new(
                 proxies.clone(),
-                DEFAULT_LATENCY_TEST_URL.to_owned(),
+                hc_url.to_owned(),
                 interval,
                 lazy,
                 proxy_manager,
@@ -672,6 +676,7 @@ impl OutboundManager {
                         &proto.name,
                         &proto.proxies,
                         &proto.use_provider,
+                        proto.url.as_deref(),
                         0,
                         true,
                         handlers,
@@ -705,6 +710,7 @@ impl OutboundManager {
                         &proto.name,
                         &proto.proxies,
                         &proto.use_provider,
+                        Some(proto.url.as_str()),
                         proto.interval,
                         proto.lazy.unwrap_or_default(),
                         handlers,
@@ -752,6 +758,7 @@ impl OutboundManager {
                         &proto.name,
                         &proto.proxies,
                         &proto.use_provider,
+                        Some(proto.url.as_str()),
                         proto.interval,
                         proto.lazy.unwrap_or_default(),
                         handlers,
@@ -787,6 +794,7 @@ impl OutboundManager {
                         &proto.name,
                         &proto.proxies,
                         &proto.use_provider,
+                        Some(proto.url.as_str()),
                         proto.interval,
                         proto.lazy.unwrap_or_default(),
                         handlers,
@@ -822,6 +830,7 @@ impl OutboundManager {
                         &proto.name,
                         &proto.proxies,
                         &proto.use_provider,
+                        proto.url.as_deref(),
                         0,
                         true,
                         handlers,
@@ -861,6 +870,7 @@ impl OutboundManager {
                         &proto.name,
                         &proto.proxies,
                         &proto.use_provider,
+                        proto.url.as_deref(),
                         0,
                         proto.lazy.unwrap_or_default(),
                         handlers,
@@ -993,5 +1003,96 @@ impl OutboundManager {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        app::{dns::MockClashResolver, profile::ThreadSafeCacheFile},
+        config::internal::proxy::{
+            OutboundGroupFallback, OutboundGroupProtocol, OutboundGroupSelect,
+            OutboundGroupUrlTest,
+        },
+        proxy::mocks::MockDummyOutboundHandler,
+    };
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn test_group_healthcheck_url() {
+        let mut node1 = MockDummyOutboundHandler::new();
+        node1.expect_name().return_const("node-1".to_owned());
+        let node1 = Arc::new(node1);
+        let outbounds: Vec<AnyOutboundHandler> = vec![node1];
+        let outbound_groups = vec![
+            OutboundGroupProtocol::UrlTest(OutboundGroupUrlTest {
+                name: "url-test-grp".to_string(),
+                proxies: Some(vec!["node-1".to_string()]),
+                url: "http://custom-url.test/generate_204".to_string(),
+                interval: 300,
+                lazy: Some(true),
+                ..Default::default()
+            }),
+            OutboundGroupProtocol::Fallback(OutboundGroupFallback {
+                name: "fallback-grp".to_string(),
+                proxies: Some(vec!["node-1".to_string()]),
+                url: "http://fallback-url.test/generate_204".to_string(),
+                interval: 300,
+                lazy: Some(true),
+                ..Default::default()
+            }),
+            OutboundGroupProtocol::Select(OutboundGroupSelect {
+                name: "select-grp".to_string(),
+                proxies: Some(vec!["node-1".to_string()]),
+                url: None, // should default to DEFAULT_LATENCY_TEST_URL
+                ..Default::default()
+            }),
+        ];
+
+        let resolver = Arc::new(MockClashResolver::new());
+        let cache_store = ThreadSafeCacheFile::new("", false);
+        let registry = Arc::new(tokio::sync::RwLock::new(HashMap::new()));
+
+        let mgr = OutboundManager::new(
+            outbounds,
+            outbound_groups,
+            HashMap::new(),
+            vec!["node-1".to_string()],
+            resolver,
+            cache_store,
+            ".".to_string(),
+            None,
+            registry,
+        )
+        .await
+        .expect("build outbound manager");
+
+        let urltest_provider = mgr
+            .proxy_providers
+            .get("url-test-grp")
+            .expect("url-test provider");
+        assert_eq!(
+            urltest_provider.healthcheck_url(),
+            Some("http://custom-url.test/generate_204")
+        );
+
+        let fallback_provider = mgr
+            .proxy_providers
+            .get("fallback-grp")
+            .expect("fallback provider");
+        assert_eq!(
+            fallback_provider.healthcheck_url(),
+            Some("http://fallback-url.test/generate_204")
+        );
+
+        let select_provider = mgr
+            .proxy_providers
+            .get("select-grp")
+            .expect("select provider");
+        assert_eq!(
+            select_provider.healthcheck_url(),
+            Some(DEFAULT_LATENCY_TEST_URL)
+        );
     }
 }

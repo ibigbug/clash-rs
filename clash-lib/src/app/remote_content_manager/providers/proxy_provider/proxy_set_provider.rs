@@ -350,6 +350,10 @@ impl ProxyProvider for ProxySetProvider {
     async fn healthcheck(&self) {
         self.hc.check(true).await;
     }
+
+    fn healthcheck_url(&self) -> Option<&str> {
+        Some(self.hc.url())
+    }
 }
 
 #[cfg(test)]

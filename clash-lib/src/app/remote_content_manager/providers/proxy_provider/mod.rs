@@ -21,4 +21,7 @@ pub trait ProxyProvider: Provider {
     async fn touch(&self);
     /// this is a blocking call, you may want to spawn a new task to run this
     async fn healthcheck(&self);
+    fn healthcheck_url(&self) -> Option<&str> {
+        None
+    }
 }

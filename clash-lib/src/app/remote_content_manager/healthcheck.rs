@@ -61,6 +61,10 @@ impl HealthCheck {
         }
     }
 
+    pub fn url(&self) -> &str {
+        &self.url
+    }
+
     pub async fn kick_off(&self) {
         let interval = self.interval;
         let lazy = self.lazy;
