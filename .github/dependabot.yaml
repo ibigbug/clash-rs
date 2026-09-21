@@ -8,6 +8,10 @@ updates:
       rust-dependencies:
         patterns:
           - "*"
+        exclude-patterns:
+          - "tower-http"
+    ignore:
+      - dependency-name: "tower-http"
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
