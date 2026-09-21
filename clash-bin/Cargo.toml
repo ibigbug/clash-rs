@@ -46,7 +46,7 @@ dhat = { version = "0.3", optional = true }
 tikv-jemallocator = { version = "0.7", optional = true }
 tikv-jemalloc-ctl = { version = "0.7", optional = true }
 
-sentry = { version = "0.48", default-features = false, features = ["backtrace", "contexts", "panic", "reqwest", "rustls"] }
+sentry = { version = "0.49", default-features = false, features = ["backtrace", "contexts", "panic", "reqwest", "rustls"] }
 human-panic = "2.0"
 
 

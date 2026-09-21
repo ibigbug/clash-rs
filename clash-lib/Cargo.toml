@@ -71,7 +71,7 @@ hyper-util = "0.1"
 http = { version = "1" }
 http-body-util = "0.1.3"
 socket2 = { version = "0.6", features = ["all"] }
-tokio-tungstenite = "0.29.0"
+tokio-tungstenite = "0.30.0"
 
 # TLS
 tokio-rustls = { version = "0.26", default-features = false, features = ["logging", "tls12"] }
@@ -109,7 +109,7 @@ uuid = { version = "1", features = ["v4", "v5", "fast-rng", "macro-diagnostics",
 network-interface = { version = "2" }
 base64 = "0.23"
 hex = "0.4"
-zstd = "0.13"
+zstd = "0.14"
 portable-atomic = { version = "1", features = ["serde"] }
 generic-array = "1.4"
 
@@ -154,7 +154,7 @@ rust-embed = { version = "8", optional = true }
 # TUN
 tun-rs = { version = "2", features = ["async", "async_framed"], optional = true }
 watfaq-netstack = { path = "../clash-netstack", optional = true }
-smoltcp = { version = "0.13", default-features = false, features = ["std", "log", "medium-ip", "proto-ipv4", "proto-ipv6", "socket-udp", "socket-tcp"], optional = true }
+smoltcp = { version = "0.14", default-features = false, features = ["std", "log", "medium-ip", "proto-ipv4", "proto-ipv6", "socket-udp", "socket-tcp"], optional = true }
 
 # WireGuard
 boringtun = { version = "0.1.0", git = "https://github.com/Watfaq/boring-noise.git", rev = "9ddf1b5", package = "boring-noise", optional = true, default-features = false }
@@ -167,7 +167,7 @@ erased-serde = "0.4"
 
 
 # Macro Magic
-educe = "0.7"
+educe = "0.8"
 
 # DNS
 watfaq-dns = { path = "../clash-dns", default-features = false }
@@ -182,12 +182,12 @@ rand = "0.10"
 tracing = "0.1"
 
 shadowsocks = { version = "1.24", optional = true, features = ["aead-cipher-2022", "stream-cipher", "aead-cipher-extra"], git = "https://github.com/shadowsocks/shadowsocks-rust.git", rev = "c4d8d18527289d12470cad1ce718754c908a75fe" }
-maxminddb = "0.30"
+maxminddb = "0.32"
 public-suffix = "0.1"
 murmur3 = "0.5"
 
-arti-client = { version = "0.44", optional = true, default-features = false, features = ["tokio", "rustls", "static-sqlite"] }
-tor-rtcompat = { version = "0.44", optional = true, default-features = false, features = ["tokio", "rustls"] }
+arti-client = { version = "0.46", optional = true, default-features = false, features = ["tokio", "rustls", "static-sqlite"] }
+tor-rtcompat = { version = "0.46", optional = true, default-features = false, features = ["tokio", "rustls"] }
 
 
 # TUIC uses the sibling Wind checkout, like the local TUIC client/server.
@@ -203,7 +203,7 @@ quinn = { version = "0.11", default-features = false, features = ["futures-io", 
 h3 = "0.0.8"
 h3-quinn = "0.0.10"
 quinn-proto = { version = "0.11", default-features = false }
-blake2 = "0.10.6"
+blake2 = "0.11.0"
 digest = "0.11.3"
 
 console-subscriber = { git = "https://github.com/tokio-rs/console.git" }
@@ -212,14 +212,14 @@ memory-stats = "1.0.0"
 
 # ssh
 russh = { version = "0.61", default-features = false, features = ["async-trait","rsa"], optional = true }
-dirs = { version = "6.0", optional = true }
+dirs = { version = "7.0", optional = true }
 totp-rs = { version = "^5.7", features = ["serde_support"], optional = true }
 
 # shadowquic
 shadowquic = { version = "0.3.13", optional = true, default-features = false}
 
 # experimental
-tailscale = { version = "0.4.0", optional = true }
+tailscale = { version = "0.5.0", optional = true }
 
 aws-lc-rs = { version = "1", default-features = false, optional = true }
 

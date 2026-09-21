@@ -193,13 +193,52 @@ impl Runner for ApiRunner {
                 .with_state(app_state)
                 .layer(ServiceBuilder::new().layer(TraceLayer::new_for_http()));
 
-            if let Some(external_ui) = controller_cfg.external_ui {
-                router = router
-                    .route("/ui", get(|| async { Redirect::to("/ui/") }))
-                    .nest_service(
-                        "/ui/",
-                        ServeDir::new(PathBuf::from(cwd).join(external_ui)),
-                    );
+            if let Some(external_ui) = controller_cfg
+                .external_ui
+                .filter(|path| !path.trim().is_empty())
+            {
+                let ui_path = PathBuf::from(&cwd).join(&external_ui);
+                // Check if the external-ui directory exists and contains files.
+                // If the directory is empty or missing, fall back to the
+                // embedded dashboard (when the `dashboard` feature is enabled)
+                // so the web UI is always available even on fresh deployments.
+                let has_files = ui_path.is_dir()
+                    && std::fs::read_dir(&ui_path)
+                        .map(|mut d| d.next().is_some())
+                        .unwrap_or(false);
+
+                if has_files {
+                    info!("serving external UI from {}", ui_path.display());
+                    router = router
+                        .route("/ui", get(|| async { Redirect::to("/ui/") }))
+                        .nest_service("/ui/", ServeDir::new(ui_path));
+                } else {
+                    #[cfg(feature = "dashboard")]
+                    {
+                        info!(
+                            "external-ui directory '{}' is empty or missing, \
+                             falling back to embedded dashboard",
+                            ui_path.display()
+                        );
+                        use super::embedded_dashboard;
+                        router = router
+                            .route("/ui", get(|| async { Redirect::to("/ui/") }))
+                            .route("/ui/", get(embedded_dashboard::serve_index))
+                            .route(
+                                "/ui/{*path}",
+                                get(embedded_dashboard::serve_asset),
+                            );
+                    }
+                    #[cfg(not(feature = "dashboard"))]
+                    {
+                        warn!(
+                            "external-ui directory '{}' is empty or missing and \
+                             dashboard feature is not compiled in; UI will not be \
+                             available",
+                            ui_path.display()
+                        );
+                    }
+                }
             } else {
                 #[cfg(feature = "dashboard")]
                 {

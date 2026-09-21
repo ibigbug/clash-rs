@@ -9,7 +9,10 @@ use super::{
 };
 use crate::{
     Dispatcher,
-    proxy::AnyStream,
+    proxy::{
+        AnyStream,
+        anytls::{duplex_buffer_size, relay_buffer_size},
+    },
     session::{Network, Session, SocksAddr, Type},
 };
 use bytes::BufMut;
@@ -18,13 +21,6 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_rustls::TlsAcceptor;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
-
-/// Size of the in-process duplex pipe between the AnyTLS relay and the
-/// dispatcher (mirrors the outbound).
-const DUPLEX_BUFFER_SIZE: usize = 64 * 1024;
-
-/// Read buffer size for framed relay (mirrors the outbound).
-const RELAY_BUFFER_SIZE: usize = 16 * 1024;
 
 /// Forward an unauthenticated TLS stream to a fallback backend for camouflage.
 ///
@@ -298,7 +294,7 @@ async fn handle_udp_session(
     fw_mark: Option<u32>,
 ) {
     let (mut remote_read, mut remote_write) = tokio::io::split(tls_stream);
-    let (mut app_stream, relay_stream) = tokio::io::duplex(DUPLEX_BUFFER_SIZE);
+    let (mut app_stream, relay_stream) = tokio::io::duplex(duplex_buffer_size());
     let (mut relay_read, mut relay_write) = tokio::io::split(relay_stream);
 
     let cancel = CancellationToken::new();
@@ -308,7 +304,7 @@ async fn handle_udp_session(
 
     // Task A: relay_read (writes from InboundDatagramAnytls) → CMD_PSH → TLS
     tokio::spawn(async move {
-        let mut buf = vec![0u8; RELAY_BUFFER_SIZE];
+        let mut buf = vec![0u8; relay_buffer_size()];
         loop {
             tokio::select! {
                 biased;
@@ -430,7 +426,7 @@ async fn handle_tcp_relay(
     fw_mark: Option<u32>,
 ) {
     let (mut remote_read, mut remote_write) = tokio::io::split(tls_stream);
-    let (app_stream, relay_stream) = tokio::io::duplex(DUPLEX_BUFFER_SIZE);
+    let (app_stream, relay_stream) = tokio::io::duplex(duplex_buffer_size());
     let (mut relay_read, mut relay_write) = tokio::io::split(relay_stream);
 
     let cancel = CancellationToken::new();
@@ -439,7 +435,7 @@ async fn handle_tcp_relay(
 
     // Task A: relay_read (from dispatcher) → CMD_PSH frames → remote_write
     tokio::spawn(async move {
-        let mut buf = vec![0u8; RELAY_BUFFER_SIZE];
+        let mut buf = vec![0u8; relay_buffer_size()];
         loop {
             tokio::select! {
                 biased;

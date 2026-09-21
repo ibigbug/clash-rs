@@ -130,9 +130,12 @@ impl SocksAddr {
     }
 
     pub fn must_into_socket_addr(self) -> SocketAddr {
-        let self_clone = self.clone();
-        self.try_into_socket_addr()
-            .unwrap_or_else(|| panic!("not a socket address: {self_clone:?}"))
+        self.try_into_socket_addr().unwrap_or_else(|| {
+            tracing::warn!(
+                "must_into_socket_addr: domain address, falling back to 0.0.0.0:0"
+            );
+            SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), 0)
+        })
     }
 
     pub fn try_into_socket_addr(self) -> Option<SocketAddr> {

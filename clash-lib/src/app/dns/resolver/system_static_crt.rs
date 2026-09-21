@@ -44,6 +44,9 @@ impl ClashResolver for SystemResolver {
         host: &str,
         _: bool,
     ) -> anyhow::Result<Option<std::net::Ipv4Addr>> {
+        if let Some(std::net::IpAddr::V4(ip)) = parse_ip_literal(host) {
+            return Ok(Some(ip));
+        }
         let response = self.inner.ipv4_lookup(host).await?;
         Ok(response
             .answers()
@@ -60,6 +63,9 @@ impl ClashResolver for SystemResolver {
         host: &str,
         _: bool,
     ) -> anyhow::Result<Option<std::net::Ipv6Addr>> {
+        if let Some(std::net::IpAddr::V6(ip)) = parse_ip_literal(host) {
+            return Ok(Some(ip));
+        }
         let response = self.inner.ipv6_lookup(host).await?;
         Ok(response
             .answers()
