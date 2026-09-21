@@ -284,7 +284,8 @@ fn main() -> anyhow::Result<()> {
         _guard = Some(sentry::init((env!("SENTRY_DSN"), options)));
     }
 
-    let mut config = parse_config()?;
+    let mut config = parse_config()
+        .inspect_err(|err| eprintln!("Failed to parse configuration: {err}"))?;
 
     config.general.controller.external_controller_ipc = cli.controller_ipc;
     if cli.compatibility {
