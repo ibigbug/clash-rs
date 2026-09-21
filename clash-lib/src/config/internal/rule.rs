@@ -223,7 +223,9 @@ impl RuleType {
                 target: target.to_string(),
             }),
             "DOMAIN-REGEX" => Ok(RuleKind::DomainRegex {
-                regex: regex::Regex::new(payload)
+                regex: regex::RegexBuilder::new(payload)
+                    .case_insensitive(true)
+                    .build()
                     .map_err(|e| Error::InvalidConfig(e.to_string()))?,
                 target: target.to_string(),
             }),
