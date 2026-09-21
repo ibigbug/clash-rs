@@ -17,12 +17,13 @@ use futures::{FutureExt, StreamExt, stream::FuturesUnordered};
 use http_body_util::Empty;
 use hyper::Request;
 use hyper_util::rt::TokioIo;
+use portable_atomic::AtomicU64;
 use serde::Serialize;
 use std::{
     collections::{HashMap, VecDeque},
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, Ordering},
     },
     time::Duration,
 };
@@ -32,15 +33,13 @@ use tracing::{debug, instrument, trace, warn};
 pub mod healthcheck;
 pub mod providers;
 
-static GLOBAL_TRAFFIC_RATE_BPS: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
+static GLOBAL_TRAFFIC_RATE_BPS: AtomicU64 = AtomicU64::new(0);
 
 pub fn get_global_traffic_rate() -> u64 {
-    GLOBAL_TRAFFIC_RATE_BPS.load(std::sync::atomic::Ordering::Relaxed)
+    GLOBAL_TRAFFIC_RATE_BPS.load(Ordering::Relaxed)
 }
 pub fn set_global_traffic_rate(upload: u64, download: u64) {
-    GLOBAL_TRAFFIC_RATE_BPS
-        .store(upload + download, std::sync::atomic::Ordering::Relaxed);
+    GLOBAL_TRAFFIC_RATE_BPS.store(upload + download, Ordering::Relaxed);
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
