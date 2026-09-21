@@ -384,14 +384,14 @@ impl InboundProviderDef {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub struct InboundHttpProvider {
     #[serde(skip)]
     pub name: String,
     pub url: String,
-    pub interval: u64,
-    pub path: String,
+    pub interval: Option<u64>,
+    pub path: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]

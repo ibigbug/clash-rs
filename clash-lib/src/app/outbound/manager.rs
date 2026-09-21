@@ -152,8 +152,19 @@ impl OutboundManager {
     /// Look up a handler by name. Returns `None` when the name is not
     /// registered.  The registry is read under a shared lock, so this method
     /// is `async` — callers must `.await` the result.
+    /// If not found in the static registry, searches in proxy providers.
     pub async fn get_outbound(&self, name: &str) -> Option<AnyOutboundHandler> {
-        self.registry.read().await.get(name).cloned()
+        if let Some(h) = self.registry.read().await.get(name).cloned() {
+            return Some(h);
+        }
+        for provider in self.proxy_providers.values() {
+            for proxy in provider.proxies().await {
+                if proxy.name() == name {
+                    return Some(proxy);
+                }
+            }
+        }
+        None
     }
 
     /// this doesn't populate history/liveness information
@@ -945,17 +956,21 @@ impl OutboundManager {
         for (name, provider) in proxy_providers.into_iter() {
             let (vehicle, interval_secs, health_check) = match provider {
                 OutboundProxyProviderDef::Http(http) => {
+                    let path = http.path.unwrap_or_else(|| {
+                        let md5 = crate::common::utils::md5_str(http.url.as_bytes());
+                        format!("proxy_providers/{md5}.yaml")
+                    });
                     let vehicle = http_vehicle::Vehicle::new(
                         http.url.parse::<Uri>().unwrap_or_else(|_| {
                             print_and_exit!("invalid provider url: {}", http.url);
                         }),
-                        http.path,
+                        path,
                         Some(cwd.clone()),
                         resolver.clone(),
                     );
                     (
                         Arc::new(vehicle) as ThreadSafeProviderVehicle,
-                        http.interval,
+                        http.interval.unwrap_or(86400),
                         http.health_check,
                     )
                 }
@@ -976,9 +991,17 @@ impl OutboundManager {
 
             let hc = HealthCheck::new(
                 vec![],
-                health_check.url,
-                health_check.interval,
-                health_check.lazy.unwrap_or_default(),
+                health_check
+                    .as_ref()
+                    .and_then(|h| h.url.clone())
+                    .unwrap_or_else(|| {
+                        "http://www.gstatic.com/generate_204".to_string()
+                    }),
+                health_check
+                    .as_ref()
+                    .and_then(|h| h.interval)
+                    .unwrap_or(300),
+                health_check.as_ref().and_then(|h| h.lazy).unwrap_or(true),
                 proxy_manager.clone(),
             );
 
@@ -1015,7 +1038,7 @@ mod tests {
             OutboundGroupFallback, OutboundGroupProtocol, OutboundGroupSelect,
             OutboundGroupUrlTest,
         },
-        proxy::mocks::MockDummyOutboundHandler,
+        proxy::mocks::{MockDummyOutboundHandler, MockDummyProxyProvider},
     };
     use std::sync::Arc;
 
@@ -1094,5 +1117,52 @@ mod tests {
             select_provider.healthcheck_url(),
             Some(DEFAULT_LATENCY_TEST_URL)
         );
+    }
+
+    #[tokio::test]
+    async fn test_get_outbound_finds_provider_proxy() {
+        let resolver = Arc::new(MockClashResolver::new());
+        let cache_store = ThreadSafeCacheFile::new("", false);
+        let registry = Arc::new(tokio::sync::RwLock::new(HashMap::new()));
+
+        let mut direct_node = MockDummyOutboundHandler::new();
+        direct_node
+            .expect_name()
+            .return_const("direct-node".to_owned());
+        let outbounds: Vec<AnyOutboundHandler> = vec![Arc::new(direct_node)];
+
+        let mut mgr = OutboundManager::new(
+            outbounds,
+            vec![],
+            HashMap::new(),
+            vec!["direct-node".to_string()],
+            resolver,
+            cache_store,
+            ".".to_string(),
+            None,
+            registry,
+        )
+        .await
+        .expect("build outbound manager");
+
+        let mut mock_provider = MockDummyProxyProvider::new();
+        mock_provider
+            .expect_name()
+            .return_const("sub-provider".to_owned());
+        mock_provider.expect_proxies().returning(|| {
+            let mut node = MockDummyOutboundHandler::new();
+            node.expect_name().return_const("sub-node-1".to_owned());
+            vec![Arc::new(node)]
+        });
+
+        mgr.proxy_providers
+            .insert("sub-provider".to_string(), Arc::new(mock_provider));
+
+        let found = mgr.get_outbound("sub-node-1").await;
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().name(), "sub-node-1");
+
+        let not_found = mgr.get_outbound("non-existent-node").await;
+        assert!(not_found.is_none());
     }
 }

@@ -722,32 +722,32 @@ impl OutboundProxyProviderDef {
     }
 }
 
-#[derive(serde::Serialize, serde::Deserialize, Debug)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub struct OutboundHttpProvider {
     #[serde(skip)]
     pub name: String,
     pub url: String,
-    pub interval: u64,
-    pub path: String,
-    pub health_check: HealthCheck,
+    pub interval: Option<u64>,
+    pub path: Option<String>,
+    pub health_check: Option<HealthCheck>,
 }
 
-#[derive(serde::Serialize, serde::Deserialize, Debug)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub struct OutboundFileProvider {
     #[serde(skip)]
     pub name: String,
     pub path: String,
     pub interval: Option<u64>,
-    pub health_check: HealthCheck,
+    pub health_check: Option<HealthCheck>,
 }
 
-#[derive(serde::Serialize, serde::Deserialize, Debug)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct HealthCheck {
-    pub enable: bool,
-    pub url: String,
-    pub interval: u64,
+    pub enable: Option<bool>,
+    pub url: Option<String>,
+    pub interval: Option<u64>,
     pub lazy: Option<bool>,
 }
 

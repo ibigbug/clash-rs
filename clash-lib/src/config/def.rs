@@ -901,7 +901,9 @@ pub struct InlineRuleProviderDef {
 mod tests {
     use crate::config::{
         def::Port,
-        internal::proxy::{OutboundGroupProtocol, OutboundProxyProtocol},
+        internal::proxy::{
+            OutboundGroupProtocol, OutboundProxyProtocol, OutboundProxyProviderDef,
+        },
     };
 
     use super::Config;
@@ -1538,6 +1540,35 @@ rules:
         assert_eq!(providers.len(), 2);
         assert!(providers.contains_key("provider1"));
         assert!(providers.contains_key("test"));
+    }
+
+    #[test]
+    fn parse_proxy_providers_without_path() {
+        let cfg = r#"
+proxy-providers:
+  kycloud:
+    type: http
+    url: "https://sub.kycloud.org/api/v1/client/subscribe?token=xxx"
+"#;
+        let des = cfg
+            .parse::<Config>()
+            .expect("should parse config with optional proxy-provider path");
+        let providers = des.proxy_provider.expect("proxy-providers should be set");
+        assert_eq!(providers.len(), 1);
+        let p = providers
+            .get("kycloud")
+            .expect("kycloud provider should exist");
+        if let OutboundProxyProviderDef::Http(h) = p {
+            assert_eq!(
+                h.url,
+                "https://sub.kycloud.org/api/v1/client/subscribe?token=xxx"
+            );
+            assert_eq!(h.path, None);
+            assert_eq!(h.interval, None);
+            assert_eq!(h.health_check, None);
+        } else {
+            panic!("expected Http proxy provider");
+        }
     }
 
     /// Feature-gated tests for TUIC proxy type parsing.
