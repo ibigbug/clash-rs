@@ -92,7 +92,6 @@ export function TrafficChart({ timestamps, up, down }: TrafficChartProps) {
       chartRef.current?.destroy();
       chartRef.current = null;
     };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
