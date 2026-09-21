@@ -945,17 +945,21 @@ impl OutboundManager {
         for (name, provider) in proxy_providers.into_iter() {
             let (vehicle, interval_secs, health_check) = match provider {
                 OutboundProxyProviderDef::Http(http) => {
+                    let path = http.path.unwrap_or_else(|| {
+                        let md5 = crate::common::utils::md5_str(http.url.as_bytes());
+                        format!("proxy_providers/{md5}.yaml")
+                    });
                     let vehicle = http_vehicle::Vehicle::new(
                         http.url.parse::<Uri>().unwrap_or_else(|_| {
                             print_and_exit!("invalid provider url: {}", http.url);
                         }),
-                        http.path,
+                        path,
                         Some(cwd.clone()),
                         resolver.clone(),
                     );
                     (
                         Arc::new(vehicle) as ThreadSafeProviderVehicle,
-                        http.interval,
+                        http.interval.unwrap_or(86400),
                         http.health_check,
                     )
                 }
@@ -976,9 +980,17 @@ impl OutboundManager {
 
             let hc = HealthCheck::new(
                 vec![],
-                health_check.url,
-                health_check.interval,
-                health_check.lazy.unwrap_or_default(),
+                health_check
+                    .as_ref()
+                    .and_then(|h| h.url.clone())
+                    .unwrap_or_else(|| {
+                        "http://www.gstatic.com/generate_204".to_string()
+                    }),
+                health_check
+                    .as_ref()
+                    .and_then(|h| h.interval)
+                    .unwrap_or(300),
+                health_check.as_ref().and_then(|h| h.lazy).unwrap_or(true),
                 proxy_manager.clone(),
             );
 

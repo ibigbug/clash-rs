@@ -175,13 +175,17 @@ impl InboundManager {
                             continue;
                         }
                     };
+                    let path = path.unwrap_or_else(|| {
+                        let md5 = crate::common::utils::md5_str(url.as_bytes());
+                        format!("inbound_providers/{md5}.yaml")
+                    });
                     let v = http_vehicle::Vehicle::new(
                         uri,
                         path,
                         Some(cwd.clone()),
                         dns_resolver.clone(),
                     );
-                    (Arc::new(v), Duration::from_secs(interval))
+                    (Arc::new(v), Duration::from_secs(interval.unwrap_or(86400)))
                 }
                 InboundProviderDef::File(InboundFileProvider { path, interval, .. }) => {
                     let v = file_vehicle::Vehicle::new(&path);
