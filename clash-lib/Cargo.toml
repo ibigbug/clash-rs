@@ -190,10 +190,10 @@ arti-client = { version = "0.46", optional = true, default-features = false, fea
 tor-rtcompat = { version = "0.46", optional = true, default-features = false, features = ["tokio", "rustls"] }
 
 
-# TUIC uses the sibling Wind checkout, like the local TUIC client/server.
-wind-tuic = { path = "../../wind/crates/wind-tuic", optional = true, default-features = false, features = ["client", "decode", "quinn"] }
-wind-core = { path = "../../wind/crates/wind-core", optional = true, default-features = false }
-wind-quic = { path = "../../wind/crates/wind-quic", optional = true, default-features = false, features = ["quinn"] }
+# TUIC uses the published Wind release.
+wind-tuic = { git = "https://github.com/rust-proxy/wind", tag = "v0.1.0", optional = true, default-features = false, features = ["client", "decode", "quinn"] }
+wind-core = { git = "https://github.com/rust-proxy/wind", tag = "v0.1.0", optional = true, default-features = false }
+wind-quic = { git = "https://github.com/rust-proxy/wind", tag = "v0.1.0", optional = true, default-features = false, features = ["quinn"] }
 # Keep Wind's Quinn fork separate from the crates.io Quinn used by Hysteria2.
 wind-quinn = { package = "quinn", git = "https://github.com/Tipuch/quinn.git", branch = "bbrv3", optional = true, default-features = false, features = ["runtime-tokio"] }
 
@@ -244,8 +244,8 @@ http-body-util = "0.1"
 reqwest = { version = "0.13", features = ["socks"] }
 sysinfo = { version = "0.39", features = ["network"]}
 moka = { version = "0.12", features = ["future"] }
-wind-tuic = { path = "../../wind/crates/wind-tuic", default-features = false, features = ["server", "quinn"] }
-wind-base = { path = "../../wind/crates/wind-base" }
+wind-tuic = { git = "https://github.com/rust-proxy/wind", tag = "v0.1.0", default-features = false, features = ["server", "quinn"] }
+wind-base = { git = "https://github.com/rust-proxy/wind", tag = "v0.1.0" }
 eyre = "0.6"
 
 [build-dependencies]

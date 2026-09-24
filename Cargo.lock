@@ -11798,6 +11798,7 @@ checksum = "712e227841d057c1ee1cd2fb22fa7e5a5461ae8e48fa2ca79ec42cfc1931183f"
 [[package]]
 name = "wind-base"
 version = "0.2.0"
+source = "git+https://github.com/rust-proxy/wind?tag=v0.1.0#8c77c4adb28a8b432d54b646d31fe87b1e106dd4"
 dependencies = [
  "async-trait",
  "bytes",
@@ -11813,6 +11814,7 @@ dependencies = [
 [[package]]
 name = "wind-core"
 version = "0.2.0"
+source = "git+https://github.com/rust-proxy/wind?tag=v0.1.0#8c77c4adb28a8b432d54b646d31fe87b1e106dd4"
 dependencies = [
  "async-trait",
  "bytes",
@@ -11836,6 +11838,7 @@ dependencies = [
 [[package]]
 name = "wind-quic"
 version = "0.2.0"
+source = "git+https://github.com/rust-proxy/wind?tag=v0.1.0#8c77c4adb28a8b432d54b646d31fe87b1e106dd4"
 dependencies = [
  "aws-lc-rs",
  "bytes",
@@ -11859,6 +11862,7 @@ dependencies = [
 [[package]]
 name = "wind-rule"
 version = "0.2.0"
+source = "git+https://github.com/rust-proxy/wind?tag=v0.1.0#8c77c4adb28a8b432d54b646d31fe87b1e106dd4"
 dependencies = [
  "ipnet",
  "regex",
@@ -11867,6 +11871,7 @@ dependencies = [
 [[package]]
 name = "wind-tuic"
 version = "0.2.0"
+source = "git+https://github.com/rust-proxy/wind?tag=v0.1.0#8c77c4adb28a8b432d54b646d31fe87b1e106dd4"
 dependencies = [
  "arc-swap",
  "async-trait",
