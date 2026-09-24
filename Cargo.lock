@@ -1772,26 +1772,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d0a5c400df2834b80a4c3327b3aad3a4c4cd4de0629063962b03235697506a28"
 
 [[package]]
-name = "crossfire"
-version = "3.1.22"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "342783f90d75bfc49d9c7cff550d0a25d3b1b346b5964f3f22672d195cbb6b1f"
-dependencies = [
- "crossfire-utils",
- "futures-core",
- "parking_lot",
- "pointers",
- "smallvec",
- "tokio",
-]
-
-[[package]]
-name = "crossfire-utils"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d3398c18f4a17fd2b156e19256dfd20666488d5bf9a0d111d3fa8088e12b62ae"
-
-[[package]]
 name = "crunchy"
 version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6206,12 +6186,6 @@ checksum = "51bae2ac328883f7acdfea3d66a7c35751187f870bc81f94563733a154d7a670"
 dependencies = [
  "plotters-backend",
 ]
-
-[[package]]
-name = "pointers"
-version = "0.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e527185f77b1805a7f16bed2b92e9bbe5a5efcb925f760e3c61cbd243b2ade93"
 
 [[package]]
 name = "poly1305"
@@ -11839,6 +11813,7 @@ checksum = "712e227841d057c1ee1cd2fb22fa7e5a5461ae8e48fa2ca79ec42cfc1931183f"
 [[package]]
 name = "wind-base"
 version = "0.2.0"
+source = "git+https://github.com/rust-proxy/wind?rev=3ab2388761a32337e9f810348869ce68bfcc3067#3ab2388761a32337e9f810348869ce68bfcc3067"
 dependencies = [
  "async-trait",
  "bytes",
@@ -11854,6 +11829,7 @@ dependencies = [
 [[package]]
 name = "wind-core"
 version = "0.2.0"
+source = "git+https://github.com/rust-proxy/wind?rev=3ab2388761a32337e9f810348869ce68bfcc3067#3ab2388761a32337e9f810348869ce68bfcc3067"
 dependencies = [
  "async-trait",
  "bytes",
@@ -11863,6 +11839,7 @@ dependencies = [
  "futures",
  "pin-project",
  "pin-project-lite",
+ "portable-atomic",
  "quinn 0.12.0",
  "rand 0.10.3",
  "serde",
@@ -11877,6 +11854,7 @@ dependencies = [
 [[package]]
 name = "wind-quic"
 version = "0.2.0"
+source = "git+https://github.com/rust-proxy/wind?rev=3ab2388761a32337e9f810348869ce68bfcc3067#3ab2388761a32337e9f810348869ce68bfcc3067"
 dependencies = [
  "aws-lc-rs",
  "bytes",
@@ -11900,6 +11878,7 @@ dependencies = [
 [[package]]
 name = "wind-rule"
 version = "0.2.0"
+source = "git+https://github.com/rust-proxy/wind?rev=3ab2388761a32337e9f810348869ce68bfcc3067#3ab2388761a32337e9f810348869ce68bfcc3067"
 dependencies = [
  "ipnet",
  "regex",
@@ -11908,12 +11887,12 @@ dependencies = [
 [[package]]
 name = "wind-tuic"
 version = "0.2.0"
+source = "git+https://github.com/rust-proxy/wind?rev=3ab2388761a32337e9f810348869ce68bfcc3067#3ab2388761a32337e9f810348869ce68bfcc3067"
 dependencies = [
  "arc-swap",
  "async-trait",
  "aws-lc-rs",
  "bytes",
- "crossfire",
  "dashmap",
  "enum_dispatch",
  "eyre",
