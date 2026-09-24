@@ -12,7 +12,7 @@ use axum::{
     http::{Request, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::get,
+    routing::{any, get},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -34,7 +34,7 @@ struct ProviderState {
 pub fn routes(outbound_manager: ThreadSafeOutboundManager) -> Router<Arc<AppState>> {
     let state = ProviderState { outbound_manager };
     Router::new()
-        .route("/", get(get_providers))
+        .route("/", any(get_providers))
         .nest(
             "/{provider_name}",
             Router::new()
