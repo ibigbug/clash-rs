@@ -41,7 +41,7 @@ jobs:
     name: Release
     if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/v')))
     needs: [build]
-    uses: rust-proxy/workflows/.github/workflows/release-publish.yml@main
+    uses: rust-proxy/workflows/.github/workflows/release-publish.yml@e6adb5658af3a7bf9df4d323a1de4e92ce600ee3 # main
     secrets:
       token: ${{ secrets.WATFAQ_RELEASE_PAT }}
     with:
