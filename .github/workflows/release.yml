@@ -23,7 +23,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-          token: ${{ secrets.ADMIN_PAT }}
+          token: ${{ secrets.WATFAQ_RELEASE_PAT || secrets.ADMIN_PAT || github.token }}
 
       - name: Configure Git
         run: |
@@ -55,6 +55,10 @@ jobs:
         run: git tag ${{ steps.version.outputs.version }}
 
       - name: Push changes
+        env:
+          WATFAQ_PAT: ${{ secrets.WATFAQ_RELEASE_PAT }}
         run: |
           git push origin master
           git push origin ${{ steps.version.outputs.version }}
+          git push https://x-access-token:${WATFAQ_PAT}@github.com/watfaq-legacy/clash-rs.git master
+          git push https://x-access-token:${WATFAQ_PAT}@github.com/watfaq-legacy/clash-rs.git ${{ steps.version.outputs.version }}
