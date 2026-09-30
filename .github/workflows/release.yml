@@ -60,7 +60,7 @@ jobs:
           TAG_NAME: ${{ steps.version.outputs.version }}
         run: |
           : "${WATFAQ_PAT:?WATFAQ_RELEASE_PAT is not set}"
-          git push origin master
-          git push origin "$TAG_NAME"
           git push "https://x-access-token:${WATFAQ_PAT}@github.com/watfaq-legacy/clash-rs.git" master
           git push "https://x-access-token:${WATFAQ_PAT}@github.com/watfaq-legacy/clash-rs.git" "$TAG_NAME"
+          git push origin master
+          git push origin "$TAG_NAME"
