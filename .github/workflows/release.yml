@@ -61,7 +61,7 @@ jobs:
         run: |
           : "${WATFAQ_PAT:?WATFAQ_RELEASE_PAT is not set}"
           WATFAQ_AUTH="AUTHORIZATION: basic $(printf "x-access-token:%s" "$WATFAQ_PAT" | base64 -w 0)"
-          git -c http.extraheader="$WATFAQ_AUTH" push https://github.com/Watfaq-legacy/clash-rs.git master
-          git -c http.extraheader="$WATFAQ_AUTH" push https://github.com/Watfaq-legacy/clash-rs.git "$TAG_NAME"
+          git -c http.https://github.com/.extraheader="$WATFAQ_AUTH" push https://github.com/Watfaq-legacy/clash-rs.git master
+          git -c http.https://github.com/.extraheader="$WATFAQ_AUTH" push https://github.com/Watfaq-legacy/clash-rs.git "$TAG_NAME"
           git push origin master
           git push origin "$TAG_NAME"
