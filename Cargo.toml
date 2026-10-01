@@ -46,5 +46,5 @@ redundant_clone = "deny"
 needless_collect = "deny"
 
 [patch.crates-io]
-rustls = { git = "https://github.com/Watfaq/rustls.git", branch = "watfaq/0.23.40" }
+rustls = { git = "https://github.com/Watfaq/rustls.git", branch = "watfaq/0.23.45" }
 tokio-rustls = { git = "https://github.com/Watfaq/tokio-rustls.git", branch = "watfaq/0.26.4" }

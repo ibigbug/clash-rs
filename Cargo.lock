@@ -7711,8 +7711,7 @@ dependencies = [
 [[package]]
 name = "rustls"
 version = "0.23.45"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0d41d731c7d2f962d1ccc364cec258de3c0e93b38c2fb3ba97ac74513048d634"
+source = "git+https://github.com/Watfaq/rustls.git?branch=watfaq%2F0.23.45#63d10d50f2308478f366f14f9f81e378f5911e3c"
 dependencies = [
  "aws-lc-rs",
  "log",
@@ -7721,6 +7720,7 @@ dependencies = [
  "rustls-pki-types",
  "rustls-webpki",
  "subtle",
+ "x25519-dalek 2.0.1",
  "zeroize",
 ]
 
@@ -13081,8 +13081,3 @@ dependencies = [
  "cc",
  "pkg-config",
 ]
-
-[[patch.unused]]
-name = "rustls"
-version = "0.23.40"
-source = "git+https://github.com/Watfaq/rustls.git?branch=watfaq%2F0.23.40#e6e8e7e1a0d65f2f273eb7b5b6179896536ac174"
