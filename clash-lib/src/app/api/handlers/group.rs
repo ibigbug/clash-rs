@@ -31,9 +31,11 @@ pub struct GroupState {
 pub fn routes(outbound_manager: ThreadSafeOutboundManager) -> Router<Arc<AppState>> {
     let state = GroupState { outbound_manager };
     Router::new()
+        .route("/", get(get_groups))
         .nest(
             "/{name}",
             Router::new()
+                .route("/", get(get_group))
                 .route("/delay", get(get_group_delay))
                 .route_layer(middleware::from_fn_with_state(
                     state.clone(),
@@ -42,6 +44,29 @@ pub fn routes(outbound_manager: ThreadSafeOutboundManager) -> Router<Arc<AppStat
                 .with_state(state.clone()),
         )
         .with_state(state)
+}
+
+async fn get_groups(State(state): State<GroupState>) -> impl IntoResponse {
+    let outbound_manager = state.outbound_manager.clone();
+    let mut res = HashMap::new();
+    let groups = outbound_manager.get_groups().await;
+    res.insert("proxies".to_owned(), groups);
+    Json(res)
+}
+
+async fn get_group(
+    Extension(proxy): Extension<AnyOutboundHandler>,
+    State(state): State<GroupState>,
+) -> impl IntoResponse {
+    if proxy.try_as_group_handler().is_none() {
+        return (
+            StatusCode::NOT_FOUND,
+            format!("proxy {} is not a group", proxy.name()),
+        )
+            .into_response();
+    }
+    let outbound_manager = state.outbound_manager.clone();
+    Json(outbound_manager.get_proxy(&proxy).await).into_response()
 }
 
 async fn find_group_by_name(

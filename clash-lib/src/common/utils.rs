@@ -86,7 +86,9 @@ pub fn serialize_duration<S>(
 where
     S: serde::Serializer,
 {
-    serializer.serialize_u128(duration.as_millis())
+    let millis = duration.as_millis();
+    let capped = u16::try_from(millis).unwrap_or(u16::MAX);
+    serializer.serialize_u16(capped)
 }
 
 pub async fn download<P>(
