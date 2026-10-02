@@ -338,41 +338,46 @@ impl WireguardTunnel {
         }
     }
 
-    async fn handle_routine_result<'a>(&self, mut result: TunnResult<'a>) {
-        let mut buf = vec![0u8; 65535];
-        loop {
-            match result {
-                TunnResult::Done => {
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                    break;
-                }
-                TunnResult::Err(WireGuardError::ConnectionExpired) => {
-                    warn!("wireguard connection expired");
-                    let mut peer = self.peer.lock().await;
-                    let tun_result =
-                        peer.format_handshake_initiation(&mut buf[..], false);
-                    drop(peer);
+    async fn handle_routine_result(&self, result: TunnResult<'_>) {
+        match result {
+            TunnResult::Done => {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            TunnResult::Err(WireGuardError::ConnectionExpired) => {
+                warn!("wireguard connection expired");
+                let mut buf = vec![0u8; 65535];
+                let mut peer = self.peer.lock().await;
+                let tun_result =
+                    peer.format_handshake_initiation(&mut buf[..], false);
+                drop(peer);
 
-                    result = tun_result;
-                    continue;
-                }
-                TunnResult::Err(e) => {
-                    error!("wireguard error: {e:?}");
-                    break;
-                }
-                TunnResult::WriteToNetwork(packet) => {
-                    match self.udp_send(packet).await {
-                        Ok(_) => {}
-                        Err(e) => {
+                match tun_result {
+                    TunnResult::Done => {
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    }
+                    TunnResult::WriteToNetwork(packet) => {
+                        if let Err(e) = self.udp_send(packet).await {
                             error!("failed to send packet: {}", e);
                         }
                     }
-                    break;
+                    TunnResult::Err(e) => {
+                        error!("wireguard error: {e:?}");
+                    }
+                    _ => {
+                        error!("unexpected result from wireguard");
+                    }
                 }
-                _ => {
-                    error!("unexpected result from wireguard");
-                    break;
+            }
+            TunnResult::Err(e) => {
+                error!("wireguard error: {e:?}");
+            }
+            TunnResult::WriteToNetwork(packet) => {
+                if let Err(e) = self.udp_send(packet).await {
+                    error!("failed to send packet: {}", e);
                 }
+            }
+            _ => {
+                error!("unexpected result from wireguard");
             }
         }
     }
