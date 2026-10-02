@@ -178,16 +178,18 @@ impl DeviceManager {
                 socket.flush().await.ok()?;
                 trace!("sent dns query: {:?}", msg);
 
-                let pkt =
-                    match tokio::time::timeout(Duration::from_secs(5), socket.next())
-                        .await
-                    {
-                        Ok(Some(pkt)) => pkt,
-                        _ => {
-                            warn!("wg dns query timed out with server {server}");
-                            return None;
-                        }
-                    };
+                let pkt = match tokio::time::timeout(
+                    Duration::from_secs(5),
+                    socket.next(),
+                )
+                .await
+                {
+                    Ok(Some(pkt)) => pkt,
+                    _ => {
+                        warn!("wg dns query timed out with server {server}");
+                        return None;
+                    }
+                };
 
                 let msg = hickory_proto::op::Message::from_vec(&pkt.data).ok()?;
                 trace!("got dns response: {:?}", msg);

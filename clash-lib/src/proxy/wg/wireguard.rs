@@ -5,7 +5,6 @@ use std::{
     time::Duration,
 };
 
-
 use boringtun::{
     noise::{Tunn, TunnResult, errors::WireGuardError},
     x25519::{PublicKey, StaticSecret},
@@ -339,10 +338,7 @@ impl WireguardTunnel {
         }
     }
 
-    async fn handle_routine_result<'a>(
-        &self,
-        mut result: TunnResult<'a>,
-    ) {
+    async fn handle_routine_result<'a>(&self, mut result: TunnResult<'a>) {
         let mut buf = vec![0u8; 65535];
         loop {
             match result {
