@@ -44,7 +44,6 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(docker_test)', 'cfg(throug
 [workspace.lints.clippy]
 redundant_clone = "deny"
 needless_collect = "deny"
-double_must_use = "allow"
 
 [patch.crates-io]
 rustls = { git = "https://github.com/Watfaq/rustls.git", branch = "watfaq/0.23.45" }

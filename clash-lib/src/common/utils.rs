@@ -5,7 +5,6 @@ use crate::{
         http::{ClashHTTPClientExt, DEFAULT_USER_AGENT, HttpClient},
     },
 };
-use async_recursion::async_recursion;
 use futures::StreamExt;
 use http_body_util::{BodyDataStream, Empty};
 use rand::distr::uniform::{SampleRange, SampleUniform};
@@ -117,56 +116,55 @@ where
     download_with_ext(url, path, http_client, ext, 10).await
 }
 
-#[async_recursion]
 async fn download_with_ext<P>(
     url: &str,
     path: P,
     http_client: &HttpClient,
     req_ext: ClashHTTPClientExt,
-    max_redirects: usize,
+    mut max_redirects: usize,
 ) -> anyhow::Result<()>
 where
     P: AsRef<Path> + std::marker::Send,
 {
-    debug!("downloading data from {url}");
-    // Strip URI fragment before parsing: HTTP clients must not include
-    // fragments in request-target URIs (RFC 7230 §5.3), and hyper::Uri
-    // rejects them.
-    let url_no_fragment = url.rsplit_once('#').map(|x| x.0).unwrap_or(url);
-    let url = url_no_fragment.parse::<hyper::Uri>()?;
-    let mut req = http::Request::builder()
-        .header(http::header::USER_AGENT, DEFAULT_USER_AGENT)
-        .uri(&url)
-        .method(http::Method::GET)
-        .body(Empty::<bytes::Bytes>::new())?;
-    req.extensions_mut().insert(req_ext.clone());
+    let mut url = url.to_string();
+    let res = loop {
+        debug!("downloading data from {url}");
+        // Strip URI fragment before parsing: HTTP clients must not include
+        // fragments in request-target URIs (RFC 7230 §5.3), and hyper::Uri
+        // rejects them.
+        let url_no_fragment = url.rsplit_once('#').map(|x| x.0).unwrap_or(&url);
+        let parsed_url = url_no_fragment.parse::<hyper::Uri>()?;
+        let mut req = http::Request::builder()
+            .header(http::header::USER_AGENT, DEFAULT_USER_AGENT)
+            .uri(&parsed_url)
+            .method(http::Method::GET)
+            .body(Empty::<bytes::Bytes>::new())?;
+        req.extensions_mut().insert(req_ext.clone());
 
-    let res = http_client.request(req).await?;
+        let res = http_client.request(req).await?;
 
-    if res.status().is_redirection() {
-        let redirected = res
-            .headers()
-            .get("Location")
-            .ok_or(new_io_error(
-                format!("failed to download from {url}").as_str(),
-            ))?
-            .to_str()?;
-        debug!("redirected to {redirected}");
-        if max_redirects == 0 {
-            return Err(Error::InvalidConfig(
-                "too many redirects, max redirects reached".to_string(),
-            )
-            .into());
+        if res.status().is_redirection() {
+            let location = res
+                .headers()
+                .get(http::header::LOCATION)
+                .ok_or_else(|| {
+                    new_io_error(format!("failed to download from {url}").as_str())
+                })?
+                .to_str()?;
+            debug!("redirected to {location}");
+            if max_redirects == 0 {
+                return Err(Error::InvalidConfig(
+                    "too many redirects, max redirects reached".to_string(),
+                )
+                .into());
+            }
+            max_redirects -= 1;
+            url = location.to_string();
+            continue;
         }
-        return download_with_ext(
-            redirected,
-            path,
-            http_client,
-            req_ext,
-            max_redirects - 1,
-        )
-        .await;
-    }
+
+        break res;
+    };
 
     if !res.status().is_success() {
         return Err(Error::InvalidConfig(format!(

@@ -5,7 +5,7 @@ use std::{
     time::Duration,
 };
 
-use async_recursion::async_recursion;
+
 use boringtun::{
     noise::{Tunn, TunnResult, errors::WireGuardError},
     x25519::{PublicKey, StaticSecret},
@@ -339,38 +339,44 @@ impl WireguardTunnel {
         }
     }
 
-    #[async_recursion]
-    async fn handle_routine_result<'a: 'async_recursion>(
+    async fn handle_routine_result<'a>(
         &self,
-        result: TunnResult<'a>,
+        mut result: TunnResult<'a>,
     ) {
-        match result {
-            TunnResult::Done => {
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-            TunnResult::Err(WireGuardError::ConnectionExpired) => {
-                warn!("wireguard connection expired");
-                let mut buf = vec![0u8; 65535];
-                let mut peer = self.peer.lock().await;
-                let tun_result =
-                    peer.format_handshake_initiation(&mut buf[..], false);
-                drop(peer);
-
-                self.handle_routine_result(tun_result).await;
-            }
-            TunnResult::Err(e) => {
-                error!("wireguard error: {e:?}");
-            }
-            TunnResult::WriteToNetwork(packet) => {
-                match self.udp_send(packet).await {
-                    Ok(_) => {}
-                    Err(e) => {
-                        error!("failed to send packet: {}", e);
-                    }
+        let mut buf = vec![0u8; 65535];
+        loop {
+            match result {
+                TunnResult::Done => {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    break;
                 }
-            }
-            _ => {
-                error!("unexpected result from wireguard");
+                TunnResult::Err(WireGuardError::ConnectionExpired) => {
+                    warn!("wireguard connection expired");
+                    let mut peer = self.peer.lock().await;
+                    let tun_result =
+                        peer.format_handshake_initiation(&mut buf[..], false);
+                    drop(peer);
+
+                    result = tun_result;
+                    continue;
+                }
+                TunnResult::Err(e) => {
+                    error!("wireguard error: {e:?}");
+                    break;
+                }
+                TunnResult::WriteToNetwork(packet) => {
+                    match self.udp_send(packet).await {
+                        Ok(_) => {}
+                        Err(e) => {
+                            error!("failed to send packet: {}", e);
+                        }
+                    }
+                    break;
+                }
+                _ => {
+                    error!("unexpected result from wireguard");
+                    break;
+                }
             }
         }
     }
