@@ -43,7 +43,7 @@ jobs:
     needs: [build]
     uses: rust-proxy/workflows/.github/workflows/release-publish.yml@e6adb5658af3a7bf9df4d323a1de4e92ce600ee3 # main
     secrets:
-      token: ${{ secrets.WATFAQ_RELEASE_PAT }}
+      token: ${{ secrets.ADMIN_PAT }}
     with:
       cliff-config: '.github/cliff.toml'
       create-latest-on-push: true
