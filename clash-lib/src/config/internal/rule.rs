@@ -154,6 +154,12 @@ fn split_rule_tokens(line: &str) -> Vec<&str> {
     tokens
 }
 
+/// Parses port configurations into a list of [`PortRange`].
+///
+/// Supports single ports (e.g. `80`) and ranges (e.g. `8000-8080` or
+/// `8000:8080`). Multiple entries can be delimited by `/` (standard in
+/// comma-separated rule lines, e.g. `DST-PORT,80/443/8000-8080,DIRECT`) or `,`
+/// (in standalone payloads).
 fn parse_ports(payload: &str) -> Result<Vec<PortRange>, Error> {
     let mut ranges = Vec::new();
     let items = payload
@@ -587,5 +593,13 @@ mod tests {
             }
             _ => panic!("Expected InUser rule"),
         }
+
+        // Test invalid port inputs and standalone comma parsing
+        assert!(parse_ports("80,443").is_ok());
+        assert!(parse_ports("70000").is_err());
+        assert!(parse_ports("100-50").is_err());
+        assert!(parse_ports("").is_err());
+        assert!(RuleType::try_from("DST-PORT,70000,DIRECT".to_string()).is_err());
+        assert!(RuleType::try_from("DST-PORT,100-50,DIRECT".to_string()).is_err());
     }
 }
