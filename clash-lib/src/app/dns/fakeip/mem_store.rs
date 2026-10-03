@@ -91,4 +91,9 @@ impl Store for InMemStore {
         // TODO: copy
         // NOTE: use file based persistence store
     }
+
+    async fn flush(&mut self) {
+        self.itoh.clear();
+        self.htoi.clear();
+    }
 }

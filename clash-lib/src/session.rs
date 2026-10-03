@@ -381,17 +381,73 @@ pub enum Type {
     Http,
     HttpConnect,
     Socks5,
-    #[cfg(feature = "tun")]
     Tun,
-    #[cfg(all(target_os = "linux", feature = "tproxy"))]
     Tproxy,
-    #[cfg(all(target_os = "linux", feature = "redir"))]
     Redir,
     Tunnel,
     Shadowsocks,
     Anytls,
     Hysteria2,
     Ignore,
+}
+
+impl Display for Type {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Http => "HTTP",
+            Self::HttpConnect => "HTTP-CONNECT",
+            Self::Socks5 => "SOCKS5",
+            Self::Tun => "TUN",
+            Self::Tproxy => "TPROXY",
+            Self::Redir => "REDIR",
+            Self::Tunnel => "TUNNEL",
+            Self::Shadowsocks => "SHADOWSOCKS",
+            Self::Anytls => "ANYTLS",
+            Self::Hysteria2 => "HYSTERIA2",
+            Self::Ignore => "IGNORE",
+        })
+    }
+}
+
+impl std::str::FromStr for Type {
+    type Err = crate::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let s = s.trim();
+        if s.eq_ignore_ascii_case("HTTP") {
+            Ok(Self::Http)
+        } else if s.eq_ignore_ascii_case("HTTPCONNECT")
+            || s.eq_ignore_ascii_case("HTTP-CONNECT")
+        {
+            Ok(Self::HttpConnect)
+        } else if s.eq_ignore_ascii_case("SOCKS") || s.eq_ignore_ascii_case("SOCKS5")
+        {
+            Ok(Self::Socks5)
+        } else if s.eq_ignore_ascii_case("TUN") {
+            Ok(Self::Tun)
+        } else if s.eq_ignore_ascii_case("TPROXY") {
+            Ok(Self::Tproxy)
+        } else if s.eq_ignore_ascii_case("REDIR") {
+            Ok(Self::Redir)
+        } else if s.eq_ignore_ascii_case("TUNNEL") {
+            Ok(Self::Tunnel)
+        } else if s.eq_ignore_ascii_case("SHADOWSOCKS")
+            || s.eq_ignore_ascii_case("SS")
+        {
+            Ok(Self::Shadowsocks)
+        } else if s.eq_ignore_ascii_case("ANYTLS") {
+            Ok(Self::Anytls)
+        } else if s.eq_ignore_ascii_case("HYSTERIA2")
+            || s.eq_ignore_ascii_case("HY2")
+        {
+            Ok(Self::Hysteria2)
+        } else if s.eq_ignore_ascii_case("IGNORE") || s.eq_ignore_ascii_case("INNER")
+        {
+            Ok(Self::Ignore)
+        } else {
+            Err(crate::Error::InvalidConfig(format!("unknown in-type: {s}")))
+        }
+    }
 }
 
 impl Display for Network {

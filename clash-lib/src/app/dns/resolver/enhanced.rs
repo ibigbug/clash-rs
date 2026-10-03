@@ -775,6 +775,13 @@ impl ClashResolver for EnhancedResolver {
         let mut fake_dns = self.fake_dns.as_ref().unwrap().write().await;
         fake_dns.reverse_lookup(ip).await
     }
+
+    async fn flush_fakeip(&self) {
+        if let Some(fake_dns) = &self.fake_dns {
+            let mut fake_dns = fake_dns.write().await;
+            fake_dns.flush().await;
+        }
+    }
 }
 
 #[cfg(test)]

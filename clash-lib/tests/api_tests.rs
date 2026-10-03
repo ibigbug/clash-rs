@@ -1291,6 +1291,15 @@ fn auth_get(url: &str) -> hyper::Request<http_body_util::Empty<Bytes>> {
         .expect("Failed to build request")
 }
 
+fn auth_post(url: &str) -> hyper::Request<http_body_util::Empty<Bytes>> {
+    hyper::Request::builder()
+        .uri(url)
+        .header(hyper::header::AUTHORIZATION, "Bearer clash-rs")
+        .method(http::method::Method::POST)
+        .body(http_body_util::Empty::<Bytes>::new())
+        .expect("Failed to build request")
+}
+
 /// Helper to parse the response body as JSON.
 async fn parse_json(
     response: http::Response<hyper::body::Incoming>,
@@ -1984,4 +1993,52 @@ async fn test_group_delay_url_test() {
         json.get("url-test").and_then(|v| v.as_u64()).is_some(),
         "response should have a numeric 'url-test' delay field"
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_cache_flush_apis() {
+    let (_clash, api_port) = start_client_clash();
+
+    // 1. POST /cache/fakeip/flush when fakeip is not enabled -> 400 Bad Request
+    let fakeip_url = format!("http://127.0.0.1:{}/cache/fakeip/flush", api_port);
+    let resp =
+        send_http_request(fakeip_url.parse().unwrap(), auth_post(&fakeip_url))
+            .await
+            .expect("Failed to send POST /cache/fakeip/flush");
+    assert_eq!(resp.status(), http::StatusCode::BAD_REQUEST);
+
+    // 2. POST /cache/dns/flush -> 204 No Content
+    let dns_url = format!("http://127.0.0.1:{}/cache/dns/flush", api_port);
+    let resp = send_http_request(dns_url.parse().unwrap(), auth_post(&dns_url))
+        .await
+        .expect("Failed to send POST /cache/dns/flush");
+    assert_eq!(resp.status(), http::StatusCode::NO_CONTENT);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_cache_fakeip_flush_enabled() {
+    let port_base = alloc_ports(CLIENT_PORT_BLOCK);
+    let wd =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data/config/client");
+    let config_str = make_client_config_str(port_base)
+        .replace("enable: false", "enable: true")
+        .replace("enhanced-mode: normal", "enhanced-mode: fake-ip");
+    let _clash = ClashInstance::start(
+        Options {
+            config: Config::Str(config_str),
+            cwd: Some(wd.to_string_lossy().to_string()),
+            rt: None,
+            log_file: None,
+            config_path: None,
+        },
+        (port_base..port_base + CLIENT_PORT_BLOCK).collect(),
+    )
+    .expect("Failed to start client with fake-ip");
+
+    let fakeip_url = format!("http://127.0.0.1:{}/cache/fakeip/flush", port_base);
+    let resp =
+        send_http_request(fakeip_url.parse().unwrap(), auth_post(&fakeip_url))
+            .await
+            .expect("Failed to send POST /cache/fakeip/flush");
+    assert_eq!(resp.status(), http::StatusCode::NO_CONTENT);
 }

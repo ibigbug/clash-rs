@@ -12,6 +12,8 @@ pub mod domain_suffix;
 pub mod final_;
 pub mod geodata;
 pub mod geoip;
+pub mod in_type;
+pub mod in_user;
 pub mod ipcidr;
 pub mod network;
 pub mod port;

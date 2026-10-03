@@ -104,6 +104,10 @@ impl ThreadSafeCacheFile {
         self.0.write().await.delete_fake_ip_pair(ip, host);
     }
 
+    pub async fn flush_fake_ip(&self) {
+        self.0.write().await.flush_fake_ip();
+    }
+
     /// Store smart proxy group statistics
     pub async fn set_smart_stats(
         &self,
@@ -197,6 +201,11 @@ impl CacheFile {
     pub fn delete_fake_ip_pair(&mut self, ip: &str, host: &str) {
         self.db.ip_to_host.remove(ip);
         self.db.host_to_ip.remove(host);
+    }
+
+    pub fn flush_fake_ip(&mut self) {
+        self.db.ip_to_host.clear();
+        self.db.host_to_ip.clear();
     }
 
     pub fn set_smart_stats(

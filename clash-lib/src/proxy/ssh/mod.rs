@@ -31,7 +31,8 @@ use crate::{
 
 use super::{
     ConnectorType, DialWithConnector, HandlerCommonOptions, OutboundHandler,
-    OutboundType, PlainProxyAPIResponse, utils::RemoteConnector,
+    OutboundType, PlainProxyAPIResponse,
+    utils::{GLOBAL_DIRECT_CONNECTOR, RemoteConnector},
 };
 
 /// Wrapper for `ChannelStream` for `Debug` trait
@@ -167,8 +168,38 @@ impl OutboundHandler for Handler {
     async fn connect_stream(
         &self,
         sess: &Session,
-        _resolver: ThreadSafeDNSResolver,
+        resolver: ThreadSafeDNSResolver,
     ) -> io::Result<BoxedInstrumentedStream> {
+        let dialer = self.connector.read().await;
+
+        self.connect_stream_with_connector(
+            sess,
+            resolver,
+            dialer
+                .as_ref()
+                .unwrap_or(&GLOBAL_DIRECT_CONNECTOR.clone())
+                .as_ref(),
+        )
+        .await
+    }
+
+    async fn connect_stream_with_connector(
+        &self,
+        sess: &Session,
+        resolver: ThreadSafeDNSResolver,
+        connector: &dyn RemoteConnector,
+    ) -> io::Result<BoxedInstrumentedStream> {
+        let stream = connector
+            .connect_stream(
+                resolver,
+                self.opts.server.as_str(),
+                self.opts.port,
+                sess.iface.as_ref(),
+                #[cfg(target_os = "linux")]
+                sess.so_mark,
+            )
+            .await?;
+
         // key exchange algorithms
         let kex = Cow::Borrowed(KEX_ALGORITHMS);
         // host key algorithms
@@ -198,11 +229,9 @@ impl OutboundHandler for Handler {
         });
         let sh = connector::Client { server_public_key };
 
-        // TODO: adding fw_mark
-        let mut session =
-            client::connect(config, (self.opts.server.as_str(), self.opts.port), sh)
-                .await
-                .map_err(io::Error::other)?;
+        let mut session = client::connect_stream(config, stream, sh)
+            .await
+            .map_err(io::Error::other)?;
 
         auth0(&mut session, &self.opts).await?;
 
