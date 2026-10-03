@@ -1,4 +1,4 @@
-use radix_trie::{Trie, TrieCommon};
+use radix_trie::Trie;
 
 /// A Radix Trie specialized for domain suffix matching.
 ///
@@ -6,7 +6,6 @@ use radix_trie::{Trie, TrieCommon};
 /// `moc.elgoog.`), any subdomain query like `mail.google.com`
 /// (`moc.elgoog.liam.`) can find its suffix match via `get_ancestor_value` in
 /// O(L) time, where L is the length of the query domain.
-#[allow(dead_code)]
 pub struct DomainSuffixTrie<T> {
     trie: Trie<String, T>,
 }
@@ -17,7 +16,6 @@ impl<T> Default for DomainSuffixTrie<T> {
     }
 }
 
-#[allow(dead_code)]
 impl<T> DomainSuffixTrie<T> {
     pub fn new() -> Self {
         Self { trie: Trie::new() }
@@ -45,14 +43,6 @@ impl<T> DomainSuffixTrie<T> {
     pub fn search(&self, domain: &str) -> Option<&T> {
         let key = Self::format_key(domain);
         self.trie.get_ancestor_value(&key)
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.trie.is_empty()
-    }
-
-    pub fn len(&self) -> usize {
-        self.trie.len()
     }
 }
 
