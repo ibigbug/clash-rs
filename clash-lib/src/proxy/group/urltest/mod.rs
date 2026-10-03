@@ -1,11 +1,11 @@
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     io,
     sync::{
         Mutex,
         atomic::{AtomicBool, AtomicU16, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use async_trait::async_trait;
@@ -29,6 +29,89 @@ use crate::{
     },
     session::Session,
 };
+
+// ============================================================================
+// 被动故障熔断配置常量与状态 (Passive Failure Circuit Breaker)
+// ============================================================================
+
+/// 触发熔断的连续被动连接失败次数
+const CIRCUIT_BREAKER_FAILURES_THRESHOLD: u32 = 3;
+
+/// 熔断冷却时间 (30秒)
+const CIRCUIT_BREAKER_COOLDOWN: Duration = Duration::from_secs(30);
+
+/// 失败计数有效时间 (60秒): 如果两次失败间隔超过此时间且未触发熔断,
+/// 重置连续失败计数
+const CIRCUIT_BREAKER_FAILURE_EXPIRY: Duration = Duration::from_secs(60);
+
+#[derive(Debug, Clone)]
+struct NodeFailureRecord {
+    consecutive_failures: u32,
+    last_failure: Instant,
+    tripped_until: Option<Instant>,
+}
+
+#[derive(Debug, Default)]
+struct CircuitBreakerState {
+    nodes: HashMap<String, NodeFailureRecord>,
+}
+
+impl CircuitBreakerState {
+    fn new() -> Self {
+        Self {
+            nodes: HashMap::new(),
+        }
+    }
+
+    fn record_success(&mut self, name: &str) {
+        if let Some(record) = self.nodes.get_mut(name) {
+            record.consecutive_failures = 0;
+            record.tripped_until = None;
+        }
+    }
+
+    /// 记录一次被动连接失败. 返回 true 表示此节点刚触发熔断 (或在 half-open
+    /// 再次熔断)
+    fn record_failure(&mut self, name: &str, now: Instant) -> bool {
+        let record = self.nodes.entry(name.to_string()).or_insert_with(|| {
+            NodeFailureRecord {
+                consecutive_failures: 0,
+                last_failure: now,
+                tripped_until: None,
+            }
+        });
+
+        let was_tripped = record.tripped_until.map(|t| now < t).unwrap_or(false);
+
+        // 如果上次失败在很久以前且未熔断, 则重置为 1
+        if !was_tripped
+            && record.tripped_until.is_none()
+            && now.duration_since(record.last_failure)
+                > CIRCUIT_BREAKER_FAILURE_EXPIRY
+        {
+            record.consecutive_failures = 1;
+        } else {
+            record.consecutive_failures =
+                record.consecutive_failures.saturating_add(1);
+        }
+
+        record.last_failure = now;
+
+        if record.consecutive_failures >= CIRCUIT_BREAKER_FAILURES_THRESHOLD {
+            record.tripped_until = Some(now + CIRCUIT_BREAKER_COOLDOWN);
+            !was_tripped
+        } else {
+            false
+        }
+    }
+
+    fn is_tripped(&self, name: &str, now: Instant) -> bool {
+        self.nodes
+            .get(name)
+            .and_then(|record| record.tripped_until)
+            .is_some_and(|tripped_until| now < tripped_until)
+    }
+}
 
 // ============================================================================
 // 自适应 tolerance 配置常量
@@ -144,6 +227,8 @@ pub struct Handler {
     /// Some(name) = 锁定到指定节点名称, fastest() 返回该节点不自动切换
     /// None = 自动模式 (默认)
     manual_lock: Mutex<Option<String>>,
+    /// 被动故障熔断器状态 (Passive Failure Circuit Breaker)
+    circuit_breaker: Mutex<CircuitBreakerState>,
 }
 
 impl std::fmt::Debug for Handler {
@@ -171,6 +256,36 @@ impl Handler {
             adaptive_state: Mutex::new(AdaptiveState::new(tolerance)),
             force_switch: AtomicBool::new(false),
             manual_lock: Mutex::new(None),
+            circuit_breaker: Mutex::new(CircuitBreakerState::new()),
+        }
+    }
+
+    pub(crate) fn record_failure(&self, name: &str) {
+        if let Ok(mut cb) = self.circuit_breaker.lock() {
+            let newly_tripped = cb.record_failure(name, Instant::now());
+            if newly_tripped {
+                warn!(
+                    proxy = name,
+                    group = self.name(),
+                    cooldown_secs = CIRCUIT_BREAKER_COOLDOWN.as_secs(),
+                    "circuit breaker tripped for proxy after consecutive failures"
+                );
+            }
+        }
+    }
+
+    pub(crate) fn record_success(&self, name: &str) {
+        if let Ok(mut cb) = self.circuit_breaker.lock() {
+            cb.record_success(name);
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_tripped(&self, name: &str) -> bool {
+        if let Ok(cb) = self.circuit_breaker.lock() {
+            cb.is_tripped(name, Instant::now())
+        } else {
+            false
         }
     }
 
@@ -227,14 +342,24 @@ impl Handler {
             proxies.len() as u16 - 1,
         ) as usize;
 
-        let mut fastest = None;
+        let now = Instant::now();
+        let mut fastest_untripped = None;
+        let mut fastest_any = None;
         let mut current_alive = false;
+        let mut current_tripped = false;
         let mut current_delay = Duration::MAX;
         for (index, proxy) in proxies.iter().enumerate() {
             let (alive, delay) =
                 proxy_manager.alive_and_last_delay(proxy.name()).await;
+            let is_tripped = if let Ok(cb) = self.circuit_breaker.lock() {
+                cb.is_tripped(proxy.name(), now)
+            } else {
+                false
+            };
+
             if index == current_fastest_index {
                 current_alive = alive;
+                current_tripped = is_tripped;
             }
             if !alive {
                 continue;
@@ -244,13 +369,24 @@ impl Handler {
             if index == current_fastest_index {
                 current_delay = delay;
             }
-            if match fastest {
+            if match fastest_any {
                 None => true,
                 Some((_, fastest_delay)) => delay < fastest_delay,
             } {
-                fastest = Some((index, delay));
+                fastest_any = Some((index, delay));
+            }
+
+            if !is_tripped
+                && match fastest_untripped {
+                    None => true,
+                    Some((_, fastest_delay)) => delay < fastest_delay,
+                }
+            {
+                fastest_untripped = Some((index, delay));
             }
         }
+
+        let fastest = fastest_untripped.or(fastest_any);
 
         // --- 检查强制切换标志 (手动测速触发) ---
         // Fix(2026-08-04): when every proxy failed the manual test (fastest is
@@ -322,15 +458,14 @@ impl Handler {
             .checked_add(tolerance)
             .unwrap_or(Duration::MAX);
 
-        // 是否应该切换到最快节点 (基于 tolerance 逻辑)
+        // 是否应该切换到最快节点 (基于 tolerance 逻辑或节点不可用/熔断)
+        let current_effective_alive = current_alive && !current_tripped;
         let should_switch_by_tolerance =
-            !current_alive || current_delay > switch_threshold;
+            !current_effective_alive || current_delay > switch_threshold;
 
-        // 流量高时跳过切换 (但仍然更新 fastest_proxy_index 用于查询)
+        // 流量高时跳过切换 (但如果当前节点死亡或熔断, 必须紧急切换)
         let selected_index = if traffic_skip {
-            // 流量 > 250KB/s: 跳过此轮切换, 保持当前节点
-            // (除非当前节点已死亡, 此时必须切换)
-            if !current_alive {
+            if !current_effective_alive {
                 fastest_index
             } else {
                 current_fastest_index
@@ -380,13 +515,20 @@ impl Handler {
         };
 
         if traffic_skip && switched {
-            // 流量高但当前节点死亡, 紧急切换到最快节点
+            // 流量高但当前节点死亡或熔断, 紧急切换到最快节点
             debug!(
                 from = %proxies[current_fastest_index].name(),
                 to = %selected.name(),
                 delay = ?selected_delay,
                 traffic_rate_kibps = traffic_rate / 1024,
-                "traffic skip but current died, emergency switch to fastest"
+                "traffic skip but current died or tripped, emergency switch to fastest"
+            );
+        } else if current_tripped && switched {
+            warn!(
+                from = %proxies[current_fastest_index].name(),
+                to = %selected.name(),
+                delay = ?selected_delay,
+                "circuit breaker: current node tripped, bypassing to fastest available node"
             );
         } else if traffic_skip {
             trace!(
@@ -447,11 +589,17 @@ impl OutboundHandler for Handler {
         let fastest = self.fastest(false).await.ok_or_else(|| {
             io::Error::other(format!("no proxy found for {}", self.name()))
         })?;
-        let s = fastest.connect_stream(sess, resolver).await?;
-
-        s.append_to_chain(self.name()).await;
-
-        Ok(s)
+        match fastest.connect_stream(sess, resolver).await {
+            Ok(s) => {
+                self.record_success(fastest.name());
+                s.append_to_chain(self.name()).await;
+                Ok(s)
+            }
+            Err(e) => {
+                self.record_failure(fastest.name());
+                Err(e)
+            }
+        }
     }
 
     async fn connect_datagram(
@@ -462,11 +610,17 @@ impl OutboundHandler for Handler {
         let fastest = self.fastest(false).await.ok_or_else(|| {
             io::Error::other(format!("no proxy found for {}", self.name()))
         })?;
-        let d = fastest.connect_datagram(sess, resolver).await?;
-
-        d.append_to_chain(self.name()).await;
-
-        Ok(d)
+        match fastest.connect_datagram(sess, resolver).await {
+            Ok(d) => {
+                self.record_success(fastest.name());
+                d.append_to_chain(self.name()).await;
+                Ok(d)
+            }
+            Err(e) => {
+                self.record_failure(fastest.name());
+                Err(e)
+            }
+        }
     }
 
     async fn support_connector(&self) -> ConnectorType {
@@ -482,17 +636,23 @@ impl OutboundHandler for Handler {
         resolver: ThreadSafeDNSResolver,
         connector: &dyn RemoteConnector,
     ) -> io::Result<BoxedInstrumentedStream> {
-        let s = self
-            .fastest(true)
-            .await
-            .ok_or_else(|| {
-                io::Error::other(format!("no proxy found for {}", self.name()))
-            })?
+        let fastest = self.fastest(true).await.ok_or_else(|| {
+            io::Error::other(format!("no proxy found for {}", self.name()))
+        })?;
+        match fastest
             .connect_stream_with_connector(sess, resolver, connector)
-            .await?;
-
-        s.append_to_chain(self.name()).await;
-        Ok(s)
+            .await
+        {
+            Ok(s) => {
+                self.record_success(fastest.name());
+                s.append_to_chain(self.name()).await;
+                Ok(s)
+            }
+            Err(e) => {
+                self.record_failure(fastest.name());
+                Err(e)
+            }
+        }
     }
 
     async fn connect_datagram_with_connector(
@@ -501,13 +661,22 @@ impl OutboundHandler for Handler {
         resolver: ThreadSafeDNSResolver,
         connector: &dyn RemoteConnector,
     ) -> io::Result<BoxedInstrumentedDatagram> {
-        self.fastest(true)
-            .await
-            .ok_or_else(|| {
-                io::Error::other(format!("no proxy found for {}", self.name()))
-            })?
+        let fastest = self.fastest(true).await.ok_or_else(|| {
+            io::Error::other(format!("no proxy found for {}", self.name()))
+        })?;
+        match fastest
             .connect_datagram_with_connector(sess, resolver, connector)
             .await
+        {
+            Ok(d) => {
+                self.record_success(fastest.name());
+                Ok(d)
+            }
+            Err(e) => {
+                self.record_failure(fastest.name());
+                Err(e)
+            }
+        }
     }
 
     fn try_as_group_handler(&self) -> Option<&dyn GroupProxyAPIResponse> {
@@ -768,5 +937,73 @@ mod tests {
         // Unlock by selecting empty string or "auto"
         handler.select("").await.unwrap();
         assert_eq!(handler.get_active_proxy().await.unwrap().name(), "b");
+    }
+
+    #[tokio::test]
+    async fn test_circuit_breaker_bypasses_failing_node() {
+        let proxies: Vec<AnyOutboundHandler> = vec![
+            Arc::new(NoopOutboundHandler { name: "a".into() }),
+            Arc::new(NoopOutboundHandler { name: "b".into() }),
+        ];
+        let mut provider = MockDummyProxyProvider::new();
+        provider.expect_proxies().returning({
+            let proxies = proxies.clone();
+            move || proxies.clone()
+        });
+
+        let proxy_manager = ProxyManager::new(Arc::new(NoopResolver), None);
+        // a=20ms, b=50ms -> a is faster
+        proxy_manager
+            .report_delay("a", true, Duration::from_millis(20))
+            .await;
+        proxy_manager
+            .report_delay("b", true, Duration::from_millis(50))
+            .await;
+        let handler = super::Handler::new(
+            super::HandlerOptions {
+                name: "url-test".to_owned(),
+                ..Default::default()
+            },
+            20,
+            vec![Arc::new(provider)],
+            proxy_manager.clone(),
+        );
+
+        // Initially "a" is chosen because it has lower delay
+        assert_eq!(handler.get_active_proxy().await.unwrap().name(), "a");
+        assert!(!handler.is_tripped("a"));
+
+        // Simulate 2 passive failures on "a" - threshold is 3, so not tripped
+        // yet
+        handler.record_failure("a");
+        assert!(!handler.is_tripped("a"));
+        assert_eq!(handler.get_active_proxy().await.unwrap().name(), "a");
+
+        handler.record_failure("a");
+        assert!(!handler.is_tripped("a"));
+        assert_eq!(handler.get_active_proxy().await.unwrap().name(), "a");
+
+        // 3rd failure trips the circuit breaker on "a"
+        handler.record_failure("a");
+        assert!(handler.is_tripped("a"));
+
+        // Now "a" is tripped, so fastest() bypasses "a" and selects "b"!
+        assert_eq!(handler.get_active_proxy().await.unwrap().name(), "b");
+
+        // If "b" also trips, circuit breaker falls back gracefully to fastest
+        // available node
+        handler.record_failure("b");
+        handler.record_failure("b");
+        handler.record_failure("b");
+        assert!(handler.is_tripped("b"));
+        // Both tripped: falls back to fastest available (a has 20ms < 50ms)
+        // without returning None
+        assert!(handler.get_active_proxy().await.is_some());
+
+        // Once "a" succeeds (half-open recovery), it resets consecutive
+        // failures
+        handler.record_success("a");
+        assert!(!handler.is_tripped("a"));
+        assert_eq!(handler.get_active_proxy().await.unwrap().name(), "a");
     }
 }
