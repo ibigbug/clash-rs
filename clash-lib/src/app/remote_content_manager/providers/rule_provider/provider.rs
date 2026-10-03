@@ -83,7 +83,7 @@ pub enum RuleContent {
 }
 
 pub struct FastClassicalRules {
-    raw_rules: Vec<Box<dyn RuleMatcher>>,
+    raw_rules: Vec<String>,
     exact_domains: std::collections::HashSet<String>,
     domain_suffix_trie: crate::common::domain_trie::DomainSuffixTrie<()>,
     domain_keywords_ac: Option<aho_corasick::AhoCorasick>,
@@ -141,11 +141,7 @@ impl FastClassicalRules {
     }
 
     pub fn list_rules(&self, limit: usize) -> Vec<String> {
-        self.raw_rules
-            .iter()
-            .take(limit)
-            .map(|r| format!("{},{}", r.type_name(), r.payload()))
-            .collect()
+        self.raw_rules.iter().take(limit).cloned().collect()
     }
 }
 
@@ -554,19 +550,25 @@ fn make_classical_rules(
                 ip_cidr.insert(&ipnet.to_string());
             }
             _ => {
-                let rule_matcher = map_rule_type(
-                    rule_type.clone(),
-                    mmdb.clone(),
-                    geodata.clone(),
-                    None,
-                );
+                let rule_matcher =
+                    map_rule_type(rule_type, mmdb.clone(), geodata.clone(), None);
+                raw_rules.push(format!(
+                    "{},{}",
+                    rule_matcher.type_name(),
+                    rule_matcher.payload()
+                ));
                 other_rules.push(rule_matcher);
+                continue;
             }
         }
 
         let rule_matcher =
             map_rule_type(rule_type, mmdb.clone(), geodata.clone(), None);
-        raw_rules.push(rule_matcher);
+        raw_rules.push(format!(
+            "{},{}",
+            rule_matcher.type_name(),
+            rule_matcher.payload()
+        ));
     }
 
     let domain_keywords_ac = if !keywords.is_empty() {
