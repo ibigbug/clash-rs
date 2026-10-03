@@ -88,6 +88,9 @@ pub trait ClashResolver: Sync + Send {
     /// Called under memory pressure to free RSS.  Default no-op for resolvers
     /// that don't cache (e.g. SystemResolver).
     async fn clear_cache(&self) {}
+
+    /// Clear all fake-ip mappings. Default no-op for resolvers without fake-ip.
+    async fn flush_fakeip(&self) {}
 }
 
 /// Returns the IP address if `host` is a valid IP literal, otherwise `None`.

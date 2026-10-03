@@ -143,6 +143,7 @@ impl Runner for ApiRunner {
                     handlers::connection::routes(components.clone()),
                 )
                 .nest("/flows", handlers::flows::routes(components.clone()))
+                .nest("/cache", handlers::cache::routes(components.clone()))
                 .nest("/dns", handlers::dns::routes(components))
                 .layer(middleware::from_fn(
                     middlewares::fix_json_content_type::fix_content_type,
