@@ -341,13 +341,14 @@ pub async fn start(
 
             let new_controller_cfg = config.general.controller.clone();
 
-            let new_components = match create_components(cwd_clone.clone(), config).await {
-                Ok(c) => Arc::new(c),
-                Err(e) => {
-                    error!("failed to reload config: {}", e);
-                    continue;
-                }
-            };
+            let new_components =
+                match create_components(cwd_clone.clone(), config).await {
+                    Ok(c) => Arc::new(c),
+                    Err(e) => {
+                        error!("failed to reload config: {}", e);
+                        continue;
+                    }
+                };
 
             let old_components = {
                 let mut lock = shared_components.write().unwrap();
@@ -358,6 +359,7 @@ pub async fn start(
 
             old_components.stop_all().await;
             new_components.start_all();
+            tokio::task::yield_now().await;
             {
                 let mut g = global_state.lock().await;
                 #[cfg(feature = "tun")]

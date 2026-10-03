@@ -19,8 +19,8 @@ use crate::{
 // State
 // ---------------------------------------------------------------------------
 
-use std::sync::RwLock;
 use crate::RuntimeComponents;
+use std::sync::RwLock;
 
 #[derive(Clone)]
 pub(crate) struct FlowState {
@@ -307,8 +307,7 @@ pub async fn handle(
     let include_closed = q.include_closed.unwrap_or(true);
 
     let mgr = state.components.read().unwrap().statistics_manager.clone();
-    let records =
-        build_flow_records(&mgr, top, include_closed).await;
+    let records = build_flow_records(&mgr, top, include_closed).await;
     Json(records).into_response()
 }
 
@@ -337,9 +336,7 @@ pub async fn ws_handle(
         loop {
             ticker.tick().await;
             let mgr = state.statistics_manager();
-            let records =
-                build_flow_records(&mgr, top, include_closed)
-                    .await;
+            let records = build_flow_records(&mgr, top, include_closed).await;
             let body = match serde_json::to_string(&records) {
                 Ok(s) => s,
                 Err(e) => {

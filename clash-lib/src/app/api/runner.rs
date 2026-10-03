@@ -125,22 +125,19 @@ impl Runner for ApiRunner {
                 .nest("/ws", websocket::routes(app_state.clone()))
                 .nest(
                     "/configs",
-                    handlers::config::routes(
-                        components.clone(),
-                        global_state,
-                    ),
+                    handlers::config::routes(components.clone(), global_state),
                 )
                 .nest("/rules", handlers::rule::routes(components.clone()))
                 .nest("/group", handlers::group::routes(components.clone()))
-                .nest(
-                    "/proxies",
-                    handlers::proxy::routes(components.clone()),
-                )
+                .nest("/proxies", handlers::proxy::routes(components.clone()))
                 .nest(
                     "/providers/proxies",
                     handlers::provider::routes(components.clone()),
                 )
-                .nest("/providers/rules", handlers::provider::rule_routes(components.clone()))
+                .nest(
+                    "/providers/rules",
+                    handlers::provider::rule_routes(components.clone()),
+                )
                 .nest(
                     "/connections",
                     handlers::connection::routes(components.clone()),

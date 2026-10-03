@@ -276,7 +276,8 @@ async fn test_config_reload_same_controller_hot_swap_immediately_available() {
         "expected allow-lan=true before reload"
     );
 
-    // Reload with same external-controller, but adding my-socks5 and allow-lan=false
+    // Reload with same external-controller, but adding my-socks5 and
+    // allow-lan=false
     let new_payload = format!(
         r#"
 socks-port: {}
@@ -322,25 +323,32 @@ proxy-groups:
         "PUT /configs should return 204 No Content"
     );
 
-    // ZERO SLEEP: The API server must be immediately accessible on the SAME port,
-    // and must already be serving the new components!
+    // ZERO SLEEP: The API server must be immediately accessible on the SAME
+    // port, and must already be serving the new components!
     assert!(
         !get_allow_lan(port_base).await,
         "expected allow-lan=false immediately after reload"
     );
 
     let all_proxies_url = format!("http://127.0.0.1:{}/proxies", port_base);
-    let all_proxies_res = send_http_request(all_proxies_url.parse().unwrap(), auth_get(&all_proxies_url))
-        .await
-        .expect("API server should be immediately reachable");
+    let all_proxies_res = send_http_request(
+        all_proxies_url.parse().unwrap(),
+        auth_get(&all_proxies_url),
+    )
+    .await
+    .expect("API server should be immediately reachable");
     let all_json = parse_json(all_proxies_res).await;
     assert!(all_json["proxies"].get("my-socks5").is_some());
     assert!(all_json["proxies"].get("my-selector").is_some());
 
     let proxy_url = format!("http://127.0.0.1:{}/proxies/my-socks5", port_base);
-    let proxy_res = send_http_request(proxy_url.parse().unwrap(), auth_get(&proxy_url))
-        .await
-        .expect("API server should be immediately reachable without reconnection errors");
+    let proxy_res =
+        send_http_request(proxy_url.parse().unwrap(), auth_get(&proxy_url))
+            .await
+            .expect(
+                "API server should be immediately reachable without reconnection \
+                 errors",
+            );
     assert_eq!(
         proxy_res.status(),
         http::StatusCode::OK,
@@ -350,9 +358,13 @@ proxy-groups:
     assert_eq!(json["name"], "my-socks5");
 
     let group_url = format!("http://127.0.0.1:{}/proxies/my-selector", port_base);
-    let group_res = send_http_request(group_url.parse().unwrap(), auth_get(&group_url))
-        .await
-        .expect("API server should be immediately reachable without reconnection errors");
+    let group_res =
+        send_http_request(group_url.parse().unwrap(), auth_get(&group_url))
+            .await
+            .expect(
+                "API server should be immediately reachable without reconnection \
+                 errors",
+            );
     assert_eq!(
         group_res.status(),
         http::StatusCode::OK,

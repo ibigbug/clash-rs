@@ -12,7 +12,9 @@ struct RuleState {
     components: Arc<RwLock<Arc<RuntimeComponents>>>,
 }
 
-pub fn routes(components: Arc<RwLock<Arc<RuntimeComponents>>>) -> Router<Arc<AppState>> {
+pub fn routes(
+    components: Arc<RwLock<Arc<RuntimeComponents>>>,
+) -> Router<Arc<AppState>> {
     Router::new()
         .route("/", get(get_rules))
         .with_state(RuleState { components })
