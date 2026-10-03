@@ -226,6 +226,8 @@ etherparse = {version = "0.21", optional = true }
 tempfile = "3.27"
 notify = "8"
 percent-encoding = "2.3.2"
+radix_trie = "0.2"
+aho-corasick = "1.1"
 
 [dev-dependencies]
 mockall = "0.15.0"
