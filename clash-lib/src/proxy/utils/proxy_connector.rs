@@ -6,7 +6,7 @@ use std::{
 };
 use tracing::trace;
 
-use super::{new_tcp_stream, new_udp_socket};
+use super::{new_tcp_stream_happy_eyeballs, new_udp_socket};
 use crate::{
     app::{
         dispatcher::{
@@ -72,14 +72,31 @@ impl RemoteConnector for DirectConnector {
         iface: Option<&OutboundInterface>,
         #[cfg(target_os = "linux")] so_mark: Option<u32>,
     ) -> std::io::Result<AnyStream> {
-        let dial_addr = resolver
-            .resolve(address, false)
-            .await
-            .map_err(|v| new_io_error(format!("can't resolve dns: {v}")))?
-            .ok_or(new_io_error("no dns result"))?;
+        let addrs: Vec<SocketAddr> = if let Some(ip) =
+            crate::app::dns::parse_ip_literal(address)
+        {
+            vec![SocketAddr::new(ip, port)]
+        } else {
+            let ips = resolver
+                .resolve_all(address, false)
+                .await
+                .map_err(|v| new_io_error(format!("can't resolve dns: {v}")))?;
+            if ips.is_empty() {
+                let ip = resolver
+                    .resolve(address, false)
+                    .await
+                    .map_err(|v| new_io_error(format!("can't resolve dns: {v}")))?
+                    .ok_or(new_io_error("no dns result"))?;
+                vec![SocketAddr::new(ip, port)]
+            } else {
+                ips.into_iter()
+                    .map(|ip| SocketAddr::new(ip, port))
+                    .collect()
+            }
+        };
 
-        new_tcp_stream(
-            (dial_addr, port).into(),
+        new_tcp_stream_happy_eyeballs(
+            &addrs,
             iface,
             #[cfg(target_os = "linux")]
             so_mark,

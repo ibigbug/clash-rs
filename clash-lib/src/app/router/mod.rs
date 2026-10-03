@@ -25,7 +25,7 @@ use hyper::Uri;
 use rules::domain_regex::DomainRegex;
 use tracing::{error, info, trace};
 
-mod rules;
+pub(crate) mod rules;
 
 use crate::common::{geodata::GeoDataLookup, mmdb::MmdbLookup};
 pub use rules::RuleMatcher;
@@ -405,16 +405,34 @@ pub fn map_rule_type(
             .unwrap();
             Box::new(res) as _
         }
-        RuleKind::SRCPort { target, port, .. } => Box::new(rules::port::Port {
-            port,
+        RuleKind::SRCPort {
+            target,
+            ports,
+            raw_ports,
+            ..
+        } => Box::new(rules::port::Port {
+            ports,
+            raw: raw_ports,
             target,
             is_src: true,
         }),
-        RuleKind::DSTPort { target, port, .. } => Box::new(rules::port::Port {
-            port,
+        RuleKind::DSTPort {
+            target,
+            ports,
+            raw_ports,
+            ..
+        } => Box::new(rules::port::Port {
+            ports,
+            raw: raw_ports,
             target,
             is_src: false,
         }),
+        RuleKind::InType { in_type, target } => {
+            Box::new(rules::in_type::InType { in_type, target })
+        }
+        RuleKind::InUser { user, target } => {
+            Box::new(rules::in_user::InUser { user, target })
+        }
         RuleKind::ProcessName {
             process_name,
             target,

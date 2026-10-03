@@ -1,11 +1,11 @@
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     io,
     sync::{
         Mutex,
         atomic::{AtomicBool, AtomicU16, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use async_trait::async_trait;
@@ -31,35 +31,127 @@ use crate::{
 };
 
 // ============================================================================
-// 自适应 tolerance 配置常量
+// Passive Failure Circuit Breaker Configuration Constants & State
 // ============================================================================
 
-/// 连续多少轮无切换后检查是否需要降级 tolerance
+/// Number of consecutive passive connection failures required to trip the
+/// circuit breaker
+const CIRCUIT_BREAKER_FAILURES_THRESHOLD: u32 = 3;
+
+/// Circuit breaker cooldown period (30 seconds)
+const CIRCUIT_BREAKER_COOLDOWN: Duration = Duration::from_secs(30);
+
+/// Failure count expiration duration (60 seconds): if the interval between two
+/// failures exceeds this duration without tripping, reset consecutive failure
+/// count
+const CIRCUIT_BREAKER_FAILURE_EXPIRY: Duration = Duration::from_secs(60);
+
+#[derive(Debug, Clone)]
+struct NodeFailureRecord {
+    consecutive_failures: u32,
+    last_failure: Instant,
+    tripped_until: Option<Instant>,
+}
+
+#[derive(Debug, Default)]
+struct CircuitBreakerState {
+    nodes: HashMap<String, NodeFailureRecord>,
+}
+
+impl CircuitBreakerState {
+    fn new() -> Self {
+        Self {
+            nodes: HashMap::new(),
+        }
+    }
+
+    fn record_success(&mut self, name: &str) {
+        if let Some(record) = self.nodes.get_mut(name) {
+            record.consecutive_failures = 0;
+            record.tripped_until = None;
+        }
+    }
+
+    /// Record a passive connection failure. Returns true if this node just
+    /// tripped the circuit breaker (or tripped again during half-open
+    /// trial).
+    fn record_failure(&mut self, name: &str, now: Instant) -> bool {
+        let record = self.nodes.entry(name.to_string()).or_insert_with(|| {
+            NodeFailureRecord {
+                consecutive_failures: 0,
+                last_failure: now,
+                tripped_until: None,
+            }
+        });
+
+        let was_tripped = record.tripped_until.map(|t| now < t).unwrap_or(false);
+
+        // If the last failure occurred long ago without tripping, reset count
+        // to 1
+        if !was_tripped
+            && record.tripped_until.is_none()
+            && now.duration_since(record.last_failure)
+                > CIRCUIT_BREAKER_FAILURE_EXPIRY
+        {
+            record.consecutive_failures = 1;
+        } else {
+            record.consecutive_failures =
+                record.consecutive_failures.saturating_add(1);
+        }
+
+        record.last_failure = now;
+
+        if record.consecutive_failures >= CIRCUIT_BREAKER_FAILURES_THRESHOLD {
+            record.tripped_until = Some(now + CIRCUIT_BREAKER_COOLDOWN);
+            !was_tripped
+        } else {
+            false
+        }
+    }
+
+    fn is_tripped(&self, name: &str, now: Instant) -> bool {
+        self.nodes
+            .get(name)
+            .and_then(|record| record.tripped_until)
+            .is_some_and(|tripped_until| now < tripped_until)
+    }
+}
+
+// ============================================================================
+// Adaptive Tolerance Configuration Constants
+// ============================================================================
+
+/// Number of consecutive rounds without switching before checking if tolerance
+/// should be downgraded
 const ADAPTIVE_ROUNDS_THRESHOLD: u32 = 12;
 
-/// 降级条件: 每轮 (当前延迟 - 最低延迟) 的平均值超过此阈值(ms)才降级
+/// Downgrade condition: average (current_delay - min_delay) per round exceeds
+/// this threshold (ms)
 const ADAPTIVE_DIFF_THRESHOLD_MS: u64 = 20;
 
-/// 降级后的 tolerance (ms)
+/// Downgraded tolerance (ms)
 const ADAPTIVE_LOW_TOLERANCE: u16 = 20;
 
-/// 流量跳过阈值: 全局流量(含直连) > 此值(bytes/sec)时跳过此轮切换
-/// 250 KB/s = 256000 bytes/sec
+/// Traffic skip threshold: global traffic (including direct) > this value
+/// (bytes/sec) skips switching round 250 KB/s = 256000 bytes/sec
 const TRAFFIC_SKIP_THRESHOLD_BPS: u64 = 250 * 1024;
 
 // ============================================================================
-// 自适应 tolerance 状态
+// Adaptive Tolerance State
 // ============================================================================
 
-/// 记录自适应 tolerance 的运行时状态
+/// Tracks runtime state for adaptive tolerance
 struct AdaptiveState {
-    /// 自上次节点切换以来的轮数 (每检测到新 check_round 递增)
+    /// Number of rounds since last node switch (incremented when a new
+    /// check_round is detected)
     rounds_since_switch: u32,
-    /// 每轮的 (当前延迟 - 最低延迟) 差值(ms), 用于计算平均值
+    /// Per-round (current_delay - min_delay) difference (ms), used to compute
+    /// average
     delay_diffs: VecDeque<u64>,
-    /// 当前生效的 tolerance (ms), 可能被自适应逻辑降低
+    /// Currently effective tolerance (ms), may be decreased by adaptive logic
     current_tolerance: u16,
-    /// 上次处理的 check_round 值, 用于检测新一轮 healthcheck
+    /// Last processed check_round value, used to detect a new round of
+    /// healthcheck
     last_seen_round: u64,
 }
 
@@ -73,11 +165,12 @@ impl AdaptiveState {
         }
     }
 
-    /// 记录一轮的延迟差值, 并检查是否触发降级
-    /// 返回 true 表示发生了切换 (调用方应重置状态)
+    /// Record delay difference for a round and check if tolerance downgrade
+    /// should trigger. Returns true if a switch occurred (caller should
+    /// reset state).
     fn record_round(&mut self, diff_ms: u64, switched: bool, base_tolerance: u16) {
         if switched {
-            // 发生了切换: 重置状态, 恢复基础 tolerance
+            // Switched: reset state, restore base tolerance
             self.rounds_since_switch = 0;
             self.delay_diffs.clear();
             self.current_tolerance = base_tolerance;
@@ -90,12 +183,13 @@ impl AdaptiveState {
 
         self.rounds_since_switch = self.rounds_since_switch.saturating_add(1);
         self.delay_diffs.push_back(diff_ms);
-        // 只保留最近 ADAPTIVE_ROUNDS_THRESHOLD 轮的数据
+        // Only keep data for the most recent ADAPTIVE_ROUNDS_THRESHOLD rounds
         if self.delay_diffs.len() > ADAPTIVE_ROUNDS_THRESHOLD as usize {
             self.delay_diffs.pop_front();
         }
 
-        // 检查降级条件: 连续 N 轮无切换 且 平均差值 > 阈值
+        // Check downgrade condition: N consecutive rounds without switch and
+        // avg diff > threshold
         if self.rounds_since_switch >= ADAPTIVE_ROUNDS_THRESHOLD
             && self.delay_diffs.len() >= ADAPTIVE_ROUNDS_THRESHOLD as usize
         {
@@ -129,21 +223,25 @@ pub struct HandlerOptions {
 
 pub struct Handler {
     opts: HandlerOptions,
-    /// 基础 tolerance (配置值, 如 30ms), 切换后恢复到此值
+    /// Base tolerance (configured value, e.g. 30ms), restored upon switching
     base_tolerance: u16,
     providers: Vec<ArcProxyProvider>,
     proxy_manager: ProxyManager,
     fastest_proxy_index: AtomicU16,
-    /// 自适应 tolerance 运行时状态
-    /// PoisonError 时 lock() 返回 Err, if let Ok 静默降级到 base_tolerance
-    /// (概率极低, 临界区仅算术操作, 降级行为可接受)
+    /// Adaptive tolerance runtime state.
+    /// On PoisonError lock() returns Err; if let Ok silently falls back to
+    /// base_tolerance (very rare, critical section is only arithmetic,
+    /// fallback is safe).
     adaptive_state: Mutex<AdaptiveState>,
-    /// 手动测速后强制切换标志 (API 调用 force_fastest() 设置)
+    /// Force switch flag set after manual healthcheck (via force_fastest() API)
     force_switch: AtomicBool,
-    /// 手动锁定节点名称 (用户通过 PUT /proxies/AUTO 手动选择节点时设置)
-    /// Some(name) = 锁定到指定节点名称, fastest() 返回该节点不自动切换
-    /// None = 自动模式 (默认)
+    /// Manually locked node name (set when user manually selects a node via PUT
+    /// /proxies/AUTO) Some(name) = locked to specified proxy name,
+    /// fastest() returns it without auto-switching None = auto mode
+    /// (default)
     manual_lock: Mutex<Option<String>>,
+    /// Passive failure circuit breaker state
+    circuit_breaker: Mutex<CircuitBreakerState>,
 }
 
 impl std::fmt::Debug for Handler {
@@ -171,6 +269,36 @@ impl Handler {
             adaptive_state: Mutex::new(AdaptiveState::new(tolerance)),
             force_switch: AtomicBool::new(false),
             manual_lock: Mutex::new(None),
+            circuit_breaker: Mutex::new(CircuitBreakerState::new()),
+        }
+    }
+
+    pub(crate) fn record_failure(&self, name: &str) {
+        if let Ok(mut cb) = self.circuit_breaker.lock() {
+            let newly_tripped = cb.record_failure(name, Instant::now());
+            if newly_tripped {
+                warn!(
+                    proxy = name,
+                    group = self.name(),
+                    cooldown_secs = CIRCUIT_BREAKER_COOLDOWN.as_secs(),
+                    "circuit breaker tripped for proxy after consecutive failures"
+                );
+            }
+        }
+    }
+
+    pub(crate) fn record_success(&self, name: &str) {
+        if let Ok(mut cb) = self.circuit_breaker.lock() {
+            cb.record_success(name);
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_tripped(&self, name: &str) -> bool {
+        if let Ok(cb) = self.circuit_breaker.lock() {
+            cb.is_tripped(name, Instant::now())
+        } else {
+            false
         }
     }
 
@@ -178,17 +306,21 @@ impl Handler {
         get_proxies_from_providers(&self.providers, touch).await
     }
 
-    /// 选择最快节点, 包含自适应 tolerance + 流量跳过 + 强制切换逻辑
+    /// Select fastest node, including adaptive tolerance + traffic skip + force
+    /// switch logic.
     ///
-    /// # 切换决策优先级
-    /// 1. **强制切换** (force_switch=true): 手动测速后,
-    ///    忽略所有条件直接选最低延迟
-    /// 2. **流量跳过**: 代理流量 > 250KB/s 时, 跳过此轮切换 (保持当前节点)
-    /// 3. **自适应 tolerance**:
-    ///    - 基础 tolerance = 30ms (配置值)
-    ///    - 连续 12 轮无切换 且 平均延迟差 > 20ms → 降到 20ms
-    ///    - 发生切换后恢复 30ms
-    /// 4. **正常 tolerance 逻辑**: 当前延迟 > (最低延迟 + tolerance) 才切换
+    /// # Switch Decision Priority
+    /// 1. **Force switch** (force_switch=true): After manual healthcheck,
+    ///    ignore all conditions and directly pick lowest latency.
+    /// 2. **Traffic skip**: When proxy traffic > 250KB/s, skip switching round
+    ///    (keep current node).
+    /// 3. **Adaptive tolerance**:
+    ///    - Base tolerance = 30ms (configured)
+    ///    - 12 consecutive rounds without switch and avg delay diff > 20ms ->
+    ///      drop to 20ms
+    ///    - Restores to 30ms after a switch occurs
+    /// 4. **Normal tolerance logic**: Current delay > (fastest delay +
+    ///    tolerance) before switching.
     async fn fastest(&self, touch: bool) -> Option<AnyOutboundHandler> {
         let proxy_manager = self.proxy_manager.clone();
 
@@ -197,9 +329,10 @@ impl Handler {
             return None;
         }
 
-        // --- 检查手动锁定 (用户通过 PUT /proxies/AUTO 手动选择节点) ---
-        // 锁定时: 返回锁定的节点, 不进行自动切换
-        // 若锁定的节点已被移除, 则清除锁定并恢复自动选择
+        // --- Check manual lock (user manually selects node via PUT
+        // /proxies/AUTO) --- When locked: return locked node without
+        // auto-switching. If locked node was removed, clear lock and
+        // resume auto selection.
         if let Ok(mut lock) = self.manual_lock.lock()
             && let Some(locked_name) = lock.clone()
         {
@@ -227,14 +360,24 @@ impl Handler {
             proxies.len() as u16 - 1,
         ) as usize;
 
-        let mut fastest = None;
+        let now = Instant::now();
+        let mut fastest_untripped = None;
+        let mut fastest_any = None;
         let mut current_alive = false;
+        let mut current_tripped = false;
         let mut current_delay = Duration::MAX;
         for (index, proxy) in proxies.iter().enumerate() {
             let (alive, delay) =
                 proxy_manager.alive_and_last_delay(proxy.name()).await;
+            let is_tripped = if let Ok(cb) = self.circuit_breaker.lock() {
+                cb.is_tripped(proxy.name(), now)
+            } else {
+                false
+            };
+
             if index == current_fastest_index {
                 current_alive = alive;
+                current_tripped = is_tripped;
             }
             if !alive {
                 continue;
@@ -244,15 +387,26 @@ impl Handler {
             if index == current_fastest_index {
                 current_delay = delay;
             }
-            if match fastest {
+            if match fastest_any {
                 None => true,
                 Some((_, fastest_delay)) => delay < fastest_delay,
             } {
-                fastest = Some((index, delay));
+                fastest_any = Some((index, delay));
+            }
+
+            if !is_tripped
+                && match fastest_untripped {
+                    None => true,
+                    Some((_, fastest_delay)) => delay < fastest_delay,
+                }
+            {
+                fastest_untripped = Some((index, delay));
             }
         }
 
-        // --- 检查强制切换标志 (手动测速触发) ---
+        let fastest = fastest_untripped.or(fastest_any);
+
+        // --- Check force switch flag (triggered by manual healthcheck) ---
         // Fix(2026-08-04): when every proxy failed the manual test (fastest is
         // None), do NOT force-switch to index 0 (possibly dead) - keep current.
         let force_switch = self.force_switch.swap(false, Ordering::Relaxed);
@@ -266,7 +420,7 @@ impl Handler {
                 );
                 self.fastest_proxy_index
                     .store(fastest_index as u16, Ordering::Relaxed);
-                // 重置自适应状态
+                // Reset adaptive state
                 if let Ok(mut state) = self.adaptive_state.lock() {
                     state.rounds_since_switch = 0;
                     state.delay_diffs.clear();
@@ -284,20 +438,22 @@ impl Handler {
 
         let (fastest_index, fastest_delay) = fastest.unwrap_or((0, Duration::MAX));
 
-        // --- 检查全局流量速率, 决定是否跳过此轮切换 ---
+        // --- Check global traffic rate to determine whether to skip switching
+        // round ---
         let traffic_rate = get_global_traffic_rate();
         let traffic_skip = traffic_rate > TRAFFIC_SKIP_THRESHOLD_BPS;
 
-        // --- 获取当前 tolerance (可能被自适应降低) ---
+        // --- Get current tolerance (may be reduced by adaptive logic) ---
         let effective_tolerance = if let Ok(state) = self.adaptive_state.lock() {
             state.current_tolerance
         } else {
             self.base_tolerance
         };
 
-        // --- 检测是否是新一轮 healthcheck ---
-        // 流量高时不更新 last_seen_round, 等流量降低后再处理该轮次
-        // (避免流量跳过导致自适应数据永久丢失)
+        // --- Detect whether this is a new round of healthcheck ---
+        // Do not update last_seen_round when traffic is high; process this
+        // round after traffic drops (avoids permanent loss of adaptive
+        // data due to traffic skip)
         let current_round = proxy_manager
             .last_test_round_for(proxies.iter().map(|p| p.name()))
             .await;
@@ -316,21 +472,22 @@ impl Handler {
             false
         };
 
-        // --- tolerance 切换决策 ---
+        // --- Tolerance switch decision ---
         let tolerance = Duration::from_millis(effective_tolerance as u64);
         let switch_threshold = fastest_delay
             .checked_add(tolerance)
             .unwrap_or(Duration::MAX);
 
-        // 是否应该切换到最快节点 (基于 tolerance 逻辑)
+        // Whether we should switch to fastest node (based on tolerance or node
+        // dead/tripped)
+        let current_effective_alive = current_alive && !current_tripped;
         let should_switch_by_tolerance =
-            !current_alive || current_delay > switch_threshold;
+            !current_effective_alive || current_delay > switch_threshold;
 
-        // 流量高时跳过切换 (但仍然更新 fastest_proxy_index 用于查询)
+        // Skip switching when traffic is high (unless current node is dead or
+        // tripped)
         let selected_index = if traffic_skip {
-            // 流量 > 250KB/s: 跳过此轮切换, 保持当前节点
-            // (除非当前节点已死亡, 此时必须切换)
-            if !current_alive {
+            if !current_effective_alive {
                 fastest_index
             } else {
                 current_fastest_index
@@ -341,21 +498,23 @@ impl Handler {
             current_fastest_index
         };
 
-        // --- 检测是否发生了切换 ---
+        // --- Detect if switch occurred ---
         let switched = selected_index != current_fastest_index;
 
-        // --- 发生切换时重置自适应状态 (无论是否 traffic_skip) ---
-        // 修复: traffic_skip + 当前死亡时的 emergency 切换也需要重置, 否则
-        // rounds_since_switch 不归零会导致后续过早降级 tolerance
+        // --- Reset adaptive state on switch (regardless of traffic_skip) ---
+        // Emergency switch when traffic_skip + current dead/tripped also needs
+        // reset, otherwise rounds_since_switch does not reset, causing
+        // premature tolerance downgrade later.
         if switched && let Ok(mut state) = self.adaptive_state.lock() {
             state.rounds_since_switch = 0;
             state.delay_diffs.clear();
             state.current_tolerance = self.base_tolerance;
         }
 
-        // --- 记录自适应状态 (仅在新一轮 healthcheck 且非流量跳过时) ---
+        // --- Record adaptive state (only on new healthcheck round and not
+        // skipped by traffic) ---
         if is_new_round && !traffic_skip {
-            // 计算当前延迟与最低延迟的差值(ms)
+            // Compute difference between current delay and lowest delay (ms)
             let diff_ms = if current_delay != Duration::MAX
                 && fastest_delay != Duration::MAX
             {
@@ -380,13 +539,21 @@ impl Handler {
         };
 
         if traffic_skip && switched {
-            // 流量高但当前节点死亡, 紧急切换到最快节点
+            // High traffic but current node died or tripped, emergency switch
+            // to fastest node
             debug!(
                 from = %proxies[current_fastest_index].name(),
                 to = %selected.name(),
                 delay = ?selected_delay,
                 traffic_rate_kibps = traffic_rate / 1024,
-                "traffic skip but current died, emergency switch to fastest"
+                "traffic skip but current died or tripped, emergency switch to fastest"
+            );
+        } else if current_tripped && switched {
+            warn!(
+                from = %proxies[current_fastest_index].name(),
+                to = %selected.name(),
+                delay = ?selected_delay,
+                "circuit breaker: current node tripped, bypassing to fastest available node"
             );
         } else if traffic_skip {
             trace!(
@@ -447,11 +614,17 @@ impl OutboundHandler for Handler {
         let fastest = self.fastest(false).await.ok_or_else(|| {
             io::Error::other(format!("no proxy found for {}", self.name()))
         })?;
-        let s = fastest.connect_stream(sess, resolver).await?;
-
-        s.append_to_chain(self.name()).await;
-
-        Ok(s)
+        match fastest.connect_stream(sess, resolver).await {
+            Ok(s) => {
+                self.record_success(fastest.name());
+                s.append_to_chain(self.name()).await;
+                Ok(s)
+            }
+            Err(e) => {
+                self.record_failure(fastest.name());
+                Err(e)
+            }
+        }
     }
 
     async fn connect_datagram(
@@ -462,11 +635,17 @@ impl OutboundHandler for Handler {
         let fastest = self.fastest(false).await.ok_or_else(|| {
             io::Error::other(format!("no proxy found for {}", self.name()))
         })?;
-        let d = fastest.connect_datagram(sess, resolver).await?;
-
-        d.append_to_chain(self.name()).await;
-
-        Ok(d)
+        match fastest.connect_datagram(sess, resolver).await {
+            Ok(d) => {
+                self.record_success(fastest.name());
+                d.append_to_chain(self.name()).await;
+                Ok(d)
+            }
+            Err(e) => {
+                self.record_failure(fastest.name());
+                Err(e)
+            }
+        }
     }
 
     async fn support_connector(&self) -> ConnectorType {
@@ -482,17 +661,23 @@ impl OutboundHandler for Handler {
         resolver: ThreadSafeDNSResolver,
         connector: &dyn RemoteConnector,
     ) -> io::Result<BoxedInstrumentedStream> {
-        let s = self
-            .fastest(true)
-            .await
-            .ok_or_else(|| {
-                io::Error::other(format!("no proxy found for {}", self.name()))
-            })?
+        let fastest = self.fastest(true).await.ok_or_else(|| {
+            io::Error::other(format!("no proxy found for {}", self.name()))
+        })?;
+        match fastest
             .connect_stream_with_connector(sess, resolver, connector)
-            .await?;
-
-        s.append_to_chain(self.name()).await;
-        Ok(s)
+            .await
+        {
+            Ok(s) => {
+                self.record_success(fastest.name());
+                s.append_to_chain(self.name()).await;
+                Ok(s)
+            }
+            Err(e) => {
+                self.record_failure(fastest.name());
+                Err(e)
+            }
+        }
     }
 
     async fn connect_datagram_with_connector(
@@ -501,13 +686,22 @@ impl OutboundHandler for Handler {
         resolver: ThreadSafeDNSResolver,
         connector: &dyn RemoteConnector,
     ) -> io::Result<BoxedInstrumentedDatagram> {
-        self.fastest(true)
-            .await
-            .ok_or_else(|| {
-                io::Error::other(format!("no proxy found for {}", self.name()))
-            })?
+        let fastest = self.fastest(true).await.ok_or_else(|| {
+            io::Error::other(format!("no proxy found for {}", self.name()))
+        })?;
+        match fastest
             .connect_datagram_with_connector(sess, resolver, connector)
             .await
+        {
+            Ok(d) => {
+                self.record_success(fastest.name());
+                Ok(d)
+            }
+            Err(e) => {
+                self.record_failure(fastest.name());
+                Err(e)
+            }
+        }
     }
 
     fn try_as_group_handler(&self) -> Option<&dyn GroupProxyAPIResponse> {
@@ -533,8 +727,9 @@ impl GroupProxyAPIResponse for Handler {
         self.opts.common_opts.icon.clone()
     }
 
-    /// 手动测速后设置强制切换标志
-    /// 下次 fastest() 调用时将忽略 tolerance, 直接选择最低延迟节点
+    /// Set force switch flag after manual healthcheck.
+    /// Next fastest() call will ignore tolerance and directly choose lowest
+    /// latency node.
     fn force_fastest(&self) {
         self.force_switch.store(true, Ordering::Relaxed);
         warn!("force_fastest: flag set, will switch on next fastest() call");
@@ -543,10 +738,11 @@ impl GroupProxyAPIResponse for Handler {
 
 #[async_trait]
 impl SelectorControl for Handler {
-    /// 手动选择节点 (锁定到指定节点)
-    /// PUT /proxies/AUTO {"name": "JP01"} 会调用此方法
-    /// 锁定后 fastest() 将始终返回该节点, 不自动切换
-    /// 传入空字符串 "" 或不存在的 "auto"/"default" 恢复自动模式
+    /// Manually select node (lock to specified node).
+    /// PUT /proxies/AUTO {"name": "JP01"} invokes this method.
+    /// Once locked, fastest() will always return this node without
+    /// auto-switching. Pass empty string "" or non-existent
+    /// "auto"/"default" to restore automatic mode.
     async fn select(&self, name: &str) -> Result<(), Error> {
         let proxies = self.get_proxies(false).await;
         if name.is_empty()
@@ -691,7 +887,7 @@ mod tests {
         });
 
         let proxy_manager = ProxyManager::new(Arc::new(NoopResolver), None);
-        // a=100ms, b=110ms, tolerance=50ms → 正常不切换, 选 a
+        // a=100ms, b=110ms, tolerance=50ms -> normal: no switch, pick a
         proxy_manager
             .report_delay("a", true, Duration::from_millis(100))
             .await;
@@ -708,16 +904,16 @@ mod tests {
             proxy_manager.clone(),
         );
 
-        // 初始选择 a (延迟最低)
+        // Initially select a (lowest latency)
         assert_eq!(handler.get_active_proxy().await.unwrap().name(), "a");
 
-        // b 变成 95ms (差值 5ms < tolerance 50ms, 正常不切换)
+        // b becomes 95ms (diff 5ms < tolerance 50ms, normal: no switch)
         proxy_manager
             .report_delay("b", true, Duration::from_millis(95))
             .await;
         assert_eq!(handler.get_active_proxy().await.unwrap().name(), "a");
 
-        // 手动测速触发强制切换 → 选 b (现在最快)
+        // Manual healthcheck triggers force switch -> choose b (now fastest)
         handler.force_fastest();
         assert_eq!(handler.get_active_proxy().await.unwrap().name(), "b");
     }
@@ -768,5 +964,73 @@ mod tests {
         // Unlock by selecting empty string or "auto"
         handler.select("").await.unwrap();
         assert_eq!(handler.get_active_proxy().await.unwrap().name(), "b");
+    }
+
+    #[tokio::test]
+    async fn test_circuit_breaker_bypasses_failing_node() {
+        let proxies: Vec<AnyOutboundHandler> = vec![
+            Arc::new(NoopOutboundHandler { name: "a".into() }),
+            Arc::new(NoopOutboundHandler { name: "b".into() }),
+        ];
+        let mut provider = MockDummyProxyProvider::new();
+        provider.expect_proxies().returning({
+            let proxies = proxies.clone();
+            move || proxies.clone()
+        });
+
+        let proxy_manager = ProxyManager::new(Arc::new(NoopResolver), None);
+        // a=20ms, b=50ms -> a is faster
+        proxy_manager
+            .report_delay("a", true, Duration::from_millis(20))
+            .await;
+        proxy_manager
+            .report_delay("b", true, Duration::from_millis(50))
+            .await;
+        let handler = super::Handler::new(
+            super::HandlerOptions {
+                name: "url-test".to_owned(),
+                ..Default::default()
+            },
+            20,
+            vec![Arc::new(provider)],
+            proxy_manager.clone(),
+        );
+
+        // Initially "a" is chosen because it has lower delay
+        assert_eq!(handler.get_active_proxy().await.unwrap().name(), "a");
+        assert!(!handler.is_tripped("a"));
+
+        // Simulate 2 passive failures on "a" - threshold is 3, so not tripped
+        // yet
+        handler.record_failure("a");
+        assert!(!handler.is_tripped("a"));
+        assert_eq!(handler.get_active_proxy().await.unwrap().name(), "a");
+
+        handler.record_failure("a");
+        assert!(!handler.is_tripped("a"));
+        assert_eq!(handler.get_active_proxy().await.unwrap().name(), "a");
+
+        // 3rd failure trips the circuit breaker on "a"
+        handler.record_failure("a");
+        assert!(handler.is_tripped("a"));
+
+        // Now "a" is tripped, so fastest() bypasses "a" and selects "b"!
+        assert_eq!(handler.get_active_proxy().await.unwrap().name(), "b");
+
+        // If "b" also trips, circuit breaker falls back gracefully to fastest
+        // available node
+        handler.record_failure("b");
+        handler.record_failure("b");
+        handler.record_failure("b");
+        assert!(handler.is_tripped("b"));
+        // Both tripped: falls back to fastest available (a has 20ms < 50ms)
+        // without returning None
+        assert!(handler.get_active_proxy().await.is_some());
+
+        // Once "a" succeeds (half-open recovery), it resets consecutive
+        // failures
+        handler.record_success("a");
+        assert!(!handler.is_tripped("a"));
+        assert_eq!(handler.get_active_proxy().await.unwrap().name(), "a");
     }
 }

@@ -27,19 +27,26 @@ use tracing::{error, info, warn};
 use crate::proxy::shadowsocks::inbound::{InboundOptions, ShadowsocksInbound};
 use std::sync::Arc;
 
+use crate::app::dns::ThreadSafeDNSResolver;
+
 pub(crate) fn build_network_listeners(
     inbound_opts: &InboundOpts,
     dispatcher: Arc<Dispatcher>,
     authenticator: ThreadSafeAuthenticator,
     users_rx: Option<tokio::sync::watch::Receiver<Vec<InboundUser>>>,
+    dns_resolver: Option<ThreadSafeDNSResolver>,
 ) -> Option<Vec<BoxFuture<'static, Result<(), crate::Error>>>> {
     let name = &inbound_opts.common_opts().name;
     let addr = inbound_opts.common_opts().listen.0;
     let port = inbound_opts.common_opts().port;
 
-    if let Some(handler) =
-        build_handler(inbound_opts, dispatcher, authenticator, users_rx)
-    {
+    if let Some(handler) = build_handler(
+        inbound_opts,
+        dispatcher,
+        authenticator,
+        users_rx,
+        dns_resolver,
+    ) {
         let mut runners: Vec<BoxFuture<'static, Result<(), crate::Error>>> =
             Vec::new();
 
@@ -91,6 +98,7 @@ fn build_handler(
     #[allow(unused)] users_rx: Option<
         tokio::sync::watch::Receiver<Vec<InboundUser>>,
     >,
+    #[allow(unused)] dns_resolver: Option<ThreadSafeDNSResolver>,
 ) -> Option<Arc<dyn InboundHandlerTrait>> {
     let fw_mark = listener.common_opts().fw_mark;
     match listener {
@@ -120,6 +128,8 @@ fn build_handler(
         InboundOpts::TProxy {
             #[cfg(target_os = "linux")]
             common_opts,
+            #[cfg(target_os = "linux")]
+            dns_hijack,
             ..
         } => {
             #[cfg(target_os = "linux")]
@@ -129,6 +139,8 @@ fn build_handler(
                     common_opts.allow_lan,
                     dispatcher,
                     fw_mark,
+                    dns_resolver,
+                    *dns_hijack,
                 )))
             }
 
