@@ -30,6 +30,7 @@ use tor_rtcompat::RuntimeSubstExt as _;
 struct CustomTcpProvider<T> {
     inner: T,
     iface: Option<crate::app::net::OutboundInterface>,
+    #[allow(dead_code)]
     so_mark: Option<u32>,
 }
 
