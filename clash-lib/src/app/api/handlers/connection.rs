@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use axum::{
     Json, Router,
@@ -13,21 +13,32 @@ use http::HeaderMap;
 use serde::Deserialize;
 use tracing::{debug, warn};
 
-use crate::app::{
-    api::{AppState, handlers::utils::is_request_websocket},
-    dispatcher::StatisticsManager,
+use crate::{
+    RuntimeComponents,
+    app::{
+        api::{AppState, handlers::utils::is_request_websocket},
+        dispatcher::StatisticsManager,
+    },
 };
 
 #[derive(Clone)]
 struct ConnectionState {
-    statistics_manager: Arc<StatisticsManager>,
+    components: Arc<RwLock<Arc<RuntimeComponents>>>,
 }
 
-pub fn routes(statistics_manager: Arc<StatisticsManager>) -> Router<Arc<AppState>> {
+impl ConnectionState {
+    fn statistics_manager(&self) -> Arc<StatisticsManager> {
+        self.components.read().unwrap().statistics_manager.clone()
+    }
+}
+
+pub fn routes(
+    components: Arc<RwLock<Arc<RuntimeComponents>>>,
+) -> Router<Arc<AppState>> {
     Router::new()
         .route("/", get(get_connections).delete(close_all_connection))
         .route("/{id}", delete(close_connection))
-        .with_state(ConnectionState { statistics_manager })
+        .with_state(ConnectionState { components })
 }
 
 #[derive(Deserialize)]
@@ -42,7 +53,7 @@ async fn get_connections(
     req: Request<Body>,
 ) -> impl IntoResponse {
     if !is_request_websocket(&headers) {
-        let mgr = state.statistics_manager.clone();
+        let mgr = state.statistics_manager();
         let snapshot = mgr.snapshot().await;
         return Json(snapshot).into_response();
     }
@@ -61,7 +72,7 @@ async fn get_connections(
     .on_upgrade(move |mut socket| async move {
         let interval = q.interval;
 
-        let mgr = state.statistics_manager.clone();
+        let mgr = state.statistics_manager();
 
         loop {
             let snapshot = mgr.snapshot().await;
@@ -91,7 +102,7 @@ async fn close_connection(
     State(state): State<ConnectionState>,
     Path(id): Path<uuid::Uuid>,
 ) -> impl IntoResponse {
-    let mgr = state.statistics_manager;
+    let mgr = state.statistics_manager();
     mgr.close(id).await;
     format!("connection {id} closed").into_response()
 }
@@ -99,7 +110,7 @@ async fn close_connection(
 async fn close_all_connection(
     State(state): State<ConnectionState>,
 ) -> impl IntoResponse {
-    let mgr = state.statistics_manager;
+    let mgr = state.statistics_manager();
     mgr.close_all().await;
     "all connections closed".into_response()
 }

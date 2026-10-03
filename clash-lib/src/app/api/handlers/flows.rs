@@ -19,15 +19,20 @@ use crate::{
 // State
 // ---------------------------------------------------------------------------
 
+use std::sync::RwLock;
+use crate::RuntimeComponents;
+
 #[derive(Clone)]
 pub(crate) struct FlowState {
-    pub statistics_manager: Arc<StatisticsManager>,
+    pub components: Arc<RwLock<Arc<RuntimeComponents>>>,
 }
 
-pub fn routes(statistics_manager: Arc<StatisticsManager>) -> Router<Arc<AppState>> {
+pub fn routes(
+    components: Arc<RwLock<Arc<RuntimeComponents>>>,
+) -> Router<Arc<AppState>> {
     Router::new()
         .route("/", get(handle))
-        .with_state(FlowState { statistics_manager })
+        .with_state(FlowState { components })
 }
 
 // ---------------------------------------------------------------------------
@@ -301,8 +306,9 @@ pub async fn handle(
     let top = q.top.unwrap_or(20).clamp(1, 500);
     let include_closed = q.include_closed.unwrap_or(true);
 
+    let mgr = state.components.read().unwrap().statistics_manager.clone();
     let records =
-        build_flow_records(&state.statistics_manager, top, include_closed).await;
+        build_flow_records(&mgr, top, include_closed).await;
     Json(records).into_response()
 }
 
@@ -330,8 +336,9 @@ pub async fn ws_handle(
         let mut ticker = tokio::time::interval(Duration::from_secs(interval_secs));
         loop {
             ticker.tick().await;
+            let mgr = state.statistics_manager();
             let records =
-                build_flow_records(&state.statistics_manager, top, include_closed)
+                build_flow_records(&mgr, top, include_closed)
                     .await;
             let body = match serde_json::to_string(&records) {
                 Ok(s) => s,

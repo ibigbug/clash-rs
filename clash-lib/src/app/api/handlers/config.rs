@@ -1,4 +1,7 @@
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    path::PathBuf,
+    sync::{Arc, RwLock},
+};
 
 use axum::{
     Json, Router,
@@ -13,12 +16,10 @@ use serde_json::json;
 use tokio::sync::Mutex;
 
 use crate::{
-    GlobalState,
+    GlobalState, RuntimeComponents,
     app::{
         api::AppState,
-        dispatcher,
-        dns::{ThreadSafeDNSResolver, config::DNSListenAddr},
-        inbound::manager::{InboundEndpoint, InboundManager, Ports},
+        inbound::manager::{InboundEndpoint, Ports},
     },
     config::{def, internal::config::BindAddress},
 };
@@ -39,21 +40,13 @@ struct DnsListenInfo {
 
 #[derive(Clone)]
 struct ConfigState {
-    inbound_manager: Arc<InboundManager>,
-    dispatcher: Arc<dispatcher::Dispatcher>,
+    components: Arc<RwLock<Arc<RuntimeComponents>>>,
     global_state: Arc<Mutex<GlobalState>>,
-    dns_resolver: ThreadSafeDNSResolver,
-    dns_listen_addr: DNSListenAddr,
-    dns_enabled: bool,
 }
 
 pub fn routes(
-    inbound_manager: Arc<InboundManager>,
-    dispatcher: Arc<dispatcher::Dispatcher>,
+    components: Arc<RwLock<Arc<RuntimeComponents>>>,
     global_state: Arc<Mutex<GlobalState>>,
-    dns_resolver: ThreadSafeDNSResolver,
-    dns_listen_addr: DNSListenAddr,
-    dns_enabled: bool,
 ) -> Router<Arc<AppState>> {
     Router::new()
         .route(
@@ -61,22 +54,19 @@ pub fn routes(
             get(get_configs).put(update_configs).patch(patch_configs),
         )
         .with_state(ConfigState {
-            inbound_manager,
-            dispatcher,
+            components,
             global_state,
-            dns_resolver,
-            dns_listen_addr,
-            dns_enabled,
         })
 }
 
 async fn get_configs(State(state): State<ConfigState>) -> impl IntoResponse {
-    let run_mode = state.dispatcher.get_mode().await;
+    let components = state.components.read().unwrap().clone();
+    let run_mode = components.dispatcher.get_mode().await;
     let log_level = {
         let global_state = state.global_state.lock().await;
         global_state.log_level
     };
-    let inbound_manager = state.inbound_manager.clone();
+    let inbound_manager = components.inbound_manager.clone();
 
     let ports = inbound_manager.get_ports().await;
     let allow_lan = inbound_manager.get_allow_lan().await;
@@ -108,8 +98,8 @@ async fn get_configs(State(state): State<ConfigState>) -> impl IntoResponse {
         None
     };
 
-    let dns_listen = if state.dns_enabled {
-        let addr = &state.dns_listen_addr;
+    let dns_listen = if components.dns_enabled {
+        let addr = &components.dns_listen;
         Some(DnsListenInfo {
             udp: addr.udp.map(|a| a.to_string()),
             tcp: addr.tcp.map(|a| a.to_string()),
@@ -130,7 +120,7 @@ async fn get_configs(State(state): State<ConfigState>) -> impl IntoResponse {
         bind_address: Some(bind_address),
         mode: Some(run_mode),
         log_level: Some(log_level),
-        ipv6: Some(state.dns_resolver.ipv6()),
+        ipv6: Some(components.dns_resolver.ipv6()),
         allow_lan: Some(allow_lan),
         listeners: Some(listeners),
         lan_ips,
@@ -266,7 +256,8 @@ async fn patch_configs(
     State(state): State<ConfigState>,
     Json(payload): Json<PatchConfigRequest>,
 ) -> impl IntoResponse {
-    let inbound_manager = state.inbound_manager.clone();
+    let components = state.components.read().unwrap().clone();
+    let inbound_manager = components.inbound_manager.clone();
     let mut need_restart = false;
     if let Some(bind_address) = payload.bind_address.clone() {
         match bind_address.parse::<BindAddress>() {
@@ -308,7 +299,7 @@ async fn patch_configs(
     // Apply mode change before restarting listeners so that new connections
     // established after the restart immediately use the updated mode.
     if let Some(mode) = payload.mode {
-        state.dispatcher.set_mode(mode).await;
+        components.dispatcher.set_mode(mode).await;
     }
 
     if need_restart {
@@ -316,7 +307,7 @@ async fn patch_configs(
     }
 
     if let Some(ipv6) = payload.ipv6 {
-        state.dns_resolver.set_ipv6(ipv6);
+        components.dns_resolver.set_ipv6(ipv6);
     }
 
     // Only lock global_state for the small section that actually needs it.

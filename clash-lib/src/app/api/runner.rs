@@ -1,6 +1,6 @@
 use std::{
     path::PathBuf,
-    sync::{Arc, Mutex as StdMutex},
+    sync::{Arc, Mutex as StdMutex, RwLock},
 };
 
 use axum::{
@@ -19,16 +19,10 @@ use tower_http::{
 use tracing::{debug, error, info, warn};
 
 use crate::{
-    GlobalState,
+    GlobalState, RuntimeComponents,
     app::{
         api::{AppState, handlers, ipc, middlewares, websocket},
-        dispatcher::{self, StatisticsManager},
-        dns::{ThreadSafeDNSResolver, config::DNSListenAddr},
-        inbound::manager::InboundManager,
         logging::LogEvent,
-        outbound::manager::ThreadSafeOutboundManager,
-        profile::ThreadSafeCacheFile,
-        router::ArcRouter,
     },
     config::config::Controller,
     runner::Runner,
@@ -37,74 +31,45 @@ use crate::{
 pub struct ApiRunner {
     controller_cfg: Controller,
     log_source: Sender<LogEvent>,
-    inbound_manager: Arc<InboundManager>,
-    dispatcher: Arc<dispatcher::Dispatcher>,
+    components: Arc<RwLock<Arc<RuntimeComponents>>>,
     global_state: Arc<Mutex<GlobalState>>,
-    dns_resolver: ThreadSafeDNSResolver,
-    outbound_manager: ThreadSafeOutboundManager,
-    statistics_manager: Arc<StatisticsManager>,
-    cache_store: ThreadSafeCacheFile,
-    router: ArcRouter,
     cwd: String,
 
     cancellation_token: tokio_util::sync::CancellationToken,
-    dns_listen_addr: DNSListenAddr,
-    dns_enabled: bool,
     task_handle: StdMutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl ApiRunner {
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         controller_cfg: Controller,
         log_source: Sender<LogEvent>,
-        inbound_manager: Arc<InboundManager>,
-        dispatcher: Arc<dispatcher::Dispatcher>,
+        components: Arc<RwLock<Arc<RuntimeComponents>>>,
         global_state: Arc<Mutex<GlobalState>>,
-        dns_resolver: ThreadSafeDNSResolver,
-        outbound_manager: ThreadSafeOutboundManager,
-        statistics_manager: Arc<StatisticsManager>,
-        cache_store: ThreadSafeCacheFile,
-        router: ArcRouter,
         cwd: String,
         cancellation_token: Option<tokio_util::sync::CancellationToken>,
-        dns_listen_addr: DNSListenAddr,
-        dns_enabled: bool,
     ) -> Self {
         Self {
             controller_cfg,
             log_source,
-            inbound_manager,
-            dispatcher,
+            components,
             global_state,
-            dns_resolver,
-            outbound_manager,
-            statistics_manager,
-            cache_store,
-            router,
             cwd,
             cancellation_token: cancellation_token.unwrap_or_default(),
-            dns_listen_addr,
-            dns_enabled,
             task_handle: StdMutex::new(None),
         }
+    }
+
+    pub fn update_components(&self, new_components: Arc<RuntimeComponents>) {
+        *self.components.write().unwrap() = new_components;
     }
 }
 
 impl Runner for ApiRunner {
     fn run_async(&self) {
-        let inbound_manager = self.inbound_manager.clone();
-        let dispatcher = self.dispatcher.clone();
+        let components = self.components.clone();
         let global_state = self.global_state.clone();
-        let dns_resolver = self.dns_resolver.clone();
-        let outbound_manager = self.outbound_manager.clone();
-        let statistics_manager = self.statistics_manager.clone();
-        let cache_store = self.cache_store.clone();
         let controller_cfg = self.controller_cfg.clone();
-        let router = self.router.clone();
         let cwd = self.cwd.clone();
-        let dns_listen_addr = self.dns_listen_addr.clone();
-        let dns_enabled = self.dns_enabled;
 
         let ipc_addr = controller_cfg.external_controller_ipc;
         let tcp_addr = controller_cfg.external_controller;
@@ -145,7 +110,7 @@ impl Runner for ApiRunner {
 
         let app_state = Arc::new(AppState {
             log_source_tx: self.log_source.clone(),
-            statistics_manager: statistics_manager.clone(),
+            components: components.clone(),
         });
         let cancellation_token = self.cancellation_token.clone();
         let handle = tokio::spawn(async move {
@@ -161,31 +126,27 @@ impl Runner for ApiRunner {
                 .nest(
                     "/configs",
                     handlers::config::routes(
-                        inbound_manager,
-                        dispatcher,
+                        components.clone(),
                         global_state,
-                        dns_resolver.clone(),
-                        dns_listen_addr,
-                        dns_enabled,
                     ),
                 )
-                .nest("/rules", handlers::rule::routes(router.clone()))
-                .nest("/group", handlers::group::routes(outbound_manager.clone()))
+                .nest("/rules", handlers::rule::routes(components.clone()))
+                .nest("/group", handlers::group::routes(components.clone()))
                 .nest(
                     "/proxies",
-                    handlers::proxy::routes(outbound_manager.clone(), cache_store),
+                    handlers::proxy::routes(components.clone()),
                 )
                 .nest(
                     "/providers/proxies",
-                    handlers::provider::routes(outbound_manager),
+                    handlers::provider::routes(components.clone()),
                 )
-                .nest("/providers/rules", handlers::provider::rule_routes(router))
+                .nest("/providers/rules", handlers::provider::rule_routes(components.clone()))
                 .nest(
                     "/connections",
-                    handlers::connection::routes(statistics_manager.clone()),
+                    handlers::connection::routes(components.clone()),
                 )
-                .nest("/flows", handlers::flows::routes(statistics_manager))
-                .nest("/dns", handlers::dns::routes(dns_resolver))
+                .nest("/flows", handlers::flows::routes(components.clone()))
+                .nest("/dns", handlers::dns::routes(components))
                 .layer(middleware::from_fn(
                     middlewares::fix_json_content_type::fix_content_type,
                 ))

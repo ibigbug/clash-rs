@@ -1,4 +1,8 @@
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    sync::{Arc, RwLock},
+    time::Duration,
+};
 
 use axum::{
     Json, Router,
@@ -14,6 +18,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::{
+    RuntimeComponents,
     app::{
         api::{
             AppState,
@@ -27,18 +32,27 @@ use crate::{
 
 #[derive(Clone)]
 pub struct ProxyState {
-    outbound_manager: ThreadSafeOutboundManager,
-    cache_store: ThreadSafeCacheFile,
+    components: Arc<RwLock<Arc<RuntimeComponents>>>,
+}
+
+impl ProxyState {
+    fn components(&self) -> Arc<RuntimeComponents> {
+        self.components.read().unwrap().clone()
+    }
+
+    fn outbound_manager(&self) -> ThreadSafeOutboundManager {
+        self.components().outbound_manager.clone()
+    }
+
+    fn cache_store(&self) -> ThreadSafeCacheFile {
+        self.components().cache_store.clone()
+    }
 }
 
 pub fn routes(
-    outbound_manager: ThreadSafeOutboundManager,
-    cache_store: ThreadSafeCacheFile,
+    components: Arc<RwLock<Arc<RuntimeComponents>>>,
 ) -> Router<Arc<AppState>> {
-    let state = ProxyState {
-        outbound_manager,
-        cache_store,
-    };
+    let state = ProxyState { components };
     Router::new()
         .route("/", get(get_proxies))
         .nest(
@@ -56,7 +70,7 @@ pub fn routes(
 }
 
 async fn get_proxies(State(state): State<ProxyState>) -> impl IntoResponse {
-    let outbound_manager = state.outbound_manager.clone();
+    let outbound_manager = state.outbound_manager();
     let mut res = HashMap::new();
     let proxies = outbound_manager.get_proxies().await;
     res.insert("proxies".to_owned(), proxies);
@@ -69,7 +83,7 @@ async fn find_proxy_by_name(
     mut req: Request<axum::body::Body>,
     next: Next,
 ) -> Response {
-    let outbound_manager = state.outbound_manager.clone();
+    let outbound_manager = state.outbound_manager();
     match outbound_manager.get_outbound(&name).await {
         Some(proxy) => {
             req.extensions_mut().insert(proxy);
@@ -84,7 +98,7 @@ async fn get_proxy(
     Extension(proxy): Extension<AnyOutboundHandler>,
     State(state): State<ProxyState>,
 ) -> impl IntoResponse {
-    let outbound_manager = state.outbound_manager.clone();
+    let outbound_manager = state.outbound_manager();
     axum::response::Json(outbound_manager.get_proxy(&proxy).await)
 }
 
@@ -99,11 +113,11 @@ async fn update_proxy(
     Extension(proxy): Extension<AnyOutboundHandler>,
     Json(payload): Json<UpdateProxyRequest>,
 ) -> impl IntoResponse {
-    let outbound_manager = state.outbound_manager.clone();
+    let outbound_manager = state.outbound_manager();
     match outbound_manager.get_selector_control(proxy.name()) {
         Some(ctrl) => match ctrl.select(&payload.name).await {
             Ok(_) => {
-                let cache_store = state.cache_store;
+                let cache_store = state.cache_store();
                 cache_store.set_selected(proxy.name(), &payload.name).await;
                 (
                     StatusCode::ACCEPTED,
@@ -137,7 +151,7 @@ async fn get_proxy_delay(
     Extension(proxy): Extension<AnyOutboundHandler>,
     Query(q): Query<DelayRequest>,
 ) -> impl IntoResponse {
-    let outbound_manager = state.outbound_manager.clone();
+    let outbound_manager = state.outbound_manager();
     let timeout = Duration::from_millis(q.timeout.into());
     let name = proxy.name().to_owned();
     let mut headers = HeaderMap::new();

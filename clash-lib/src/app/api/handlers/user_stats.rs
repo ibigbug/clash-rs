@@ -11,7 +11,7 @@ use crate::app::{api::AppState, dispatcher::StatisticsManager};
 ///
 /// Response: `{ "<user_id>": { "upload": <bytes>, "download": <bytes> }, … }`
 pub async fn handle(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
-    let mgr: Arc<StatisticsManager> = state.statistics_manager.clone();
+    let mgr: Arc<StatisticsManager> = state.statistics_manager();
     let stats = mgr.drain_user_stats().await;
     Json(
         serde_json::to_value(stats)

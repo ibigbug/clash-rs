@@ -24,9 +24,8 @@ pub async fn handle(
         warn!("ws upgrade error: {} with {}", e, addr);
     })
     .on_upgrade(move |mut socket| async move {
-        let mgr = state.statistics_manager.clone();
         loop {
-            let (up, down) = mgr.now();
+            let (up, down) = state.statistics_manager().now();
             let res = TrafficResponse { up, down };
             let j_str = match serde_json::to_string(&res) {
                 Ok(s) => s,

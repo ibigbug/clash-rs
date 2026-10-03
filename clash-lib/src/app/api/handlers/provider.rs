@@ -17,7 +17,10 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+use std::sync::RwLock;
+
 use crate::{
+    RuntimeComponents,
     app::{
         api::AppState, outbound::manager::ThreadSafeOutboundManager,
         remote_content_manager::providers::proxy_provider::ArcProxyProvider,
@@ -28,11 +31,19 @@ use crate::{
 };
 #[derive(Clone)]
 struct ProviderState {
-    outbound_manager: ThreadSafeOutboundManager,
+    components: Arc<RwLock<Arc<RuntimeComponents>>>,
 }
 
-pub fn routes(outbound_manager: ThreadSafeOutboundManager) -> Router<Arc<AppState>> {
-    let state = ProviderState { outbound_manager };
+impl ProviderState {
+    fn outbound_manager(&self) -> ThreadSafeOutboundManager {
+        self.components.read().unwrap().outbound_manager.clone()
+    }
+}
+
+pub fn routes(
+    components: Arc<RwLock<Arc<RuntimeComponents>>>,
+) -> Router<Arc<AppState>> {
+    let state = ProviderState { components };
     Router::new()
         .route("/", get(get_providers))
         .nest(
@@ -61,7 +72,7 @@ pub fn routes(outbound_manager: ThreadSafeOutboundManager) -> Router<Arc<AppStat
 }
 
 async fn get_providers(State(state): State<ProviderState>) -> impl IntoResponse {
-    let outbound_manager = state.outbound_manager.clone();
+    let outbound_manager = state.outbound_manager();
     let mut res = HashMap::new();
 
     let mut providers = HashMap::new();
@@ -90,7 +101,7 @@ async fn find_proxy_provider_by_name(
     mut req: Request<axum::body::Body>,
     next: Next,
 ) -> Response {
-    let outbound_manager = state.outbound_manager.clone();
+    let outbound_manager = state.outbound_manager();
     match outbound_manager.get_proxy_provider(&provider_name) {
         Some(provider) => {
             req.extensions_mut().insert(provider);
@@ -175,7 +186,7 @@ async fn get_proxy(
     Extension(proxy): Extension<AnyOutboundHandler>,
     State(state): State<ProviderState>,
 ) -> impl IntoResponse {
-    let outbound_manager = state.outbound_manager.clone();
+    let outbound_manager = state.outbound_manager();
     axum::response::Json(outbound_manager.get_proxy(&proxy).await)
 }
 
@@ -189,7 +200,7 @@ async fn get_proxy_delay(
     Extension(proxy): Extension<AnyOutboundHandler>,
     Query(q): Query<DelayRequest>,
 ) -> impl IntoResponse {
-    let outbound_manager = state.outbound_manager.clone();
+    let outbound_manager = state.outbound_manager();
     let timeout = Duration::from_millis(q.timeout.into());
     let n = proxy.name().to_owned();
     let result = outbound_manager
@@ -214,11 +225,19 @@ async fn get_proxy_delay(
 
 #[derive(Clone)]
 struct RuleProviderState {
-    router: ArcRouter,
+    components: Arc<RwLock<Arc<RuntimeComponents>>>,
 }
 
-pub fn rule_routes(router: ArcRouter) -> Router<Arc<AppState>> {
-    let state = RuleProviderState { router };
+impl RuleProviderState {
+    fn router(&self) -> ArcRouter {
+        self.components.read().unwrap().router.clone()
+    }
+}
+
+pub fn rule_routes(
+    components: Arc<RwLock<Arc<RuntimeComponents>>>,
+) -> Router<Arc<AppState>> {
+    let state = RuleProviderState { components };
     Router::new()
         .route("/", get(get_rule_providers))
         .route(
@@ -234,7 +253,7 @@ async fn get_rule_providers(
     State(state): State<RuleProviderState>,
 ) -> impl IntoResponse {
     let mut providers = HashMap::new();
-    for (name, p) in state.router.get_rule_providers() {
+    for (name, p) in state.router().get_rule_providers() {
         providers.insert(name.clone(), p.as_map().await);
     }
     let mut res = HashMap::new();
@@ -251,7 +270,7 @@ async fn get_rule_provider(
     State(state): State<RuleProviderState>,
     Path(RuleProviderNamePath { provider_name }): Path<RuleProviderNamePath>,
 ) -> impl IntoResponse {
-    match state.router.get_rule_providers().get(&provider_name) {
+    match state.router().get_rule_providers().get(&provider_name) {
         Some(p) => axum::response::Json(p.as_map().await).into_response(),
         None => (
             StatusCode::NOT_FOUND,
@@ -265,7 +284,7 @@ async fn update_rule_provider(
     State(state): State<RuleProviderState>,
     Path(RuleProviderNamePath { provider_name }): Path<RuleProviderNamePath>,
 ) -> impl IntoResponse {
-    match state.router.get_rule_providers().get(&provider_name) {
+    match state.router().get_rule_providers().get(&provider_name) {
         Some(p) => match p.update().await {
             Ok(_) => (
                 StatusCode::ACCEPTED,
@@ -292,7 +311,7 @@ async fn get_rule_provider_rules(
     State(state): State<RuleProviderState>,
     Path(RuleProviderNamePath { provider_name }): Path<RuleProviderNamePath>,
 ) -> impl IntoResponse {
-    match state.router.get_rule_providers().get(&provider_name) {
+    match state.router().get_rule_providers().get(&provider_name) {
         Some(p) => {
             let rules = p.list_rules(500).await;
             let mut res = HashMap::new();
@@ -323,7 +342,8 @@ async fn match_rule_provider(
     Path(RuleProviderNamePath { provider_name }): Path<RuleProviderNamePath>,
     Query(q): Query<MatchQuery>,
 ) -> impl IntoResponse {
-    let Some(p) = state.router.get_rule_providers().get(&provider_name) else {
+    let router = state.router();
+    let Some(p) = router.get_rule_providers().get(&provider_name) else {
         return (
             StatusCode::NOT_FOUND,
             format!("rule provider {provider_name} not found"),

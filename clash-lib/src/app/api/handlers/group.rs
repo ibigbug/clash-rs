@@ -1,4 +1,8 @@
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    sync::{Arc, RwLock},
+    time::Duration,
+};
 
 use axum::{
     Json, Router,
@@ -13,6 +17,7 @@ use http::StatusCode;
 use tracing::instrument;
 
 use crate::{
+    RuntimeComponents,
     app::{
         api::{
             AppState,
@@ -25,11 +30,19 @@ use crate::{
 
 #[derive(Clone)]
 pub struct GroupState {
-    outbound_manager: ThreadSafeOutboundManager,
+    components: Arc<RwLock<Arc<RuntimeComponents>>>,
 }
 
-pub fn routes(outbound_manager: ThreadSafeOutboundManager) -> Router<Arc<AppState>> {
-    let state = GroupState { outbound_manager };
+impl GroupState {
+    fn outbound_manager(&self) -> ThreadSafeOutboundManager {
+        self.components.read().unwrap().outbound_manager.clone()
+    }
+}
+
+pub fn routes(
+    components: Arc<RwLock<Arc<RuntimeComponents>>>,
+) -> Router<Arc<AppState>> {
+    let state = GroupState { components };
     Router::new()
         .nest(
             "/{name}",
@@ -50,7 +63,7 @@ async fn find_group_by_name(
     mut req: Request<axum::body::Body>,
     next: Next,
 ) -> Response {
-    let outbound_manager = state.outbound_manager.clone();
+    let outbound_manager = state.outbound_manager();
     match outbound_manager.get_outbound(&name).await {
         Some(proxy) => {
             req.extensions_mut().insert(proxy);
@@ -67,7 +80,7 @@ async fn get_group_delay(
     Extension(proxy): Extension<AnyOutboundHandler>,
     Query(q): Query<DelayRequest>,
 ) -> impl IntoResponse {
-    let outbound_manager = state.outbound_manager.clone();
+    let outbound_manager = state.outbound_manager();
     let timeout = Duration::from_millis(q.timeout.into());
     let name = proxy.name().to_owned();
 

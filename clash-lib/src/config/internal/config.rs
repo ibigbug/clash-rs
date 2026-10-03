@@ -190,7 +190,7 @@ impl FromStr for BindAddress {
     }
 }
 
-#[derive(Serialize, Deserialize, Default, Clone)]
+#[derive(Serialize, Deserialize, Default, Clone, PartialEq, Eq)]
 pub struct Controller {
     pub external_controller: Option<String>,
     pub external_controller_ipc: Option<String>,

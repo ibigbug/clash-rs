@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use axum::{
     Json, Router,
@@ -14,15 +14,26 @@ use http::StatusCode;
 use serde::Deserialize;
 use serde_json::{Map, Value};
 
-use crate::app::{api::AppState, dns::ThreadSafeDNSResolver};
+use crate::{
+    RuntimeComponents,
+    app::{api::AppState, dns::ThreadSafeDNSResolver},
+};
 
 #[derive(Clone)]
 struct DNSState {
-    resolver: ThreadSafeDNSResolver,
+    components: Arc<RwLock<Arc<RuntimeComponents>>>,
 }
 
-pub fn routes(resolver: ThreadSafeDNSResolver) -> Router<Arc<AppState>> {
-    let state = DNSState { resolver };
+impl DNSState {
+    fn resolver(&self) -> ThreadSafeDNSResolver {
+        self.components.read().unwrap().dns_resolver.clone()
+    }
+}
+
+pub fn routes(
+    components: Arc<RwLock<Arc<RuntimeComponents>>>,
+) -> Router<Arc<AppState>> {
+    let state = DNSState { components };
     Router::new()
         .route("/query", get(query_dns))
         .with_state(state)
@@ -39,7 +50,8 @@ async fn query_dns(
     State(state): State<DNSState>,
     q: Query<DnsQuery>,
 ) -> impl IntoResponse {
-    if let crate::app::dns::ResolverKind::System = state.resolver.kind() {
+    let resolver = state.resolver();
+    if let crate::app::dns::ResolverKind::System = resolver.kind() {
         return (StatusCode::BAD_REQUEST, "Clash resolver is not enabled.")
             .into_response();
     }
@@ -54,7 +66,7 @@ async fn query_dns(
 
     m.add_query(hickory_proto::op::Query::query(name.unwrap(), typ));
 
-    match state.resolver.exchange(&m).await {
+    match resolver.exchange(&m).await {
         Ok(response) => {
             let mut resp = Map::new();
             resp.insert(

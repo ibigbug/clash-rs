@@ -42,7 +42,7 @@ pub async fn connections(
 
         loop {
             interval.tick().await;
-            let snapshot = state.statistics_manager.snapshot().await;
+            let snapshot = state.statistics_manager().snapshot().await;
 
             let body = match serde_json::to_string(&snapshot) {
                 Ok(body) => body,
@@ -75,7 +75,7 @@ pub async fn traffic(
 
         loop {
             interval.tick().await;
-            let (up, down) = state.statistics_manager.now();
+            let (up, down) = state.statistics_manager().now();
             let response = json!({
                 "up": up,
                 "down": down,
@@ -108,7 +108,7 @@ pub async fn memory(
         loop {
             interval.tick().await;
             let snapshot = GetMemoryResponse {
-                inuse: state.statistics_manager.memory_usage(),
+                inuse: state.statistics_manager().memory_usage(),
                 oslimit: 0,
             };
 

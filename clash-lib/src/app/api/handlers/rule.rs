@@ -1,22 +1,26 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::HashMap,
+    sync::{Arc, RwLock},
+};
 
 use axum::{Router, extract::State, response::IntoResponse, routing::get};
 
-use crate::app::{api::AppState, router::ArcRouter};
+use crate::{RuntimeComponents, app::api::AppState};
 
 #[derive(Clone)]
 struct RuleState {
-    router: ArcRouter,
+    components: Arc<RwLock<Arc<RuntimeComponents>>>,
 }
 
-pub fn routes(router: ArcRouter) -> Router<Arc<AppState>> {
+pub fn routes(components: Arc<RwLock<Arc<RuntimeComponents>>>) -> Router<Arc<AppState>> {
     Router::new()
         .route("/", get(get_rules))
-        .with_state(RuleState { router })
+        .with_state(RuleState { components })
 }
 
 async fn get_rules(State(state): State<RuleState>) -> impl IntoResponse {
-    let rules = state.router.get_all_rules();
+    let comps = state.components.read().unwrap().clone();
+    let rules = comps.router.get_all_rules();
     let mut r = HashMap::new();
     r.insert(
         "rules",
