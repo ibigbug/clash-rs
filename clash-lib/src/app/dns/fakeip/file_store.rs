@@ -45,4 +45,8 @@ impl Store for FileStore {
     async fn copy_to(&self, #[allow(unused)] store: &mut Box<dyn Store>) {
         // NO-OP
     }
+
+    async fn flush(&mut self) {
+        self.0.flush_fake_ip().await;
+    }
 }
