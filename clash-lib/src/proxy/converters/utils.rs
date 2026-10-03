@@ -80,9 +80,15 @@ impl TryFrom<(&XhttpOpt, &CommonConfigOptions)> for XhttpClient {
         let (x, common) = pair;
         let host = x
             .host
-            .as_deref()
-            .unwrap_or(common.server.as_str())
-            .to_owned();
+            .clone()
+            .or_else(|| {
+                x.headers.as_ref().and_then(|h| {
+                    h.iter()
+                        .find(|(k, _)| k.eq_ignore_ascii_case("host"))
+                        .map(|(_, v)| v.clone())
+                })
+            })
+            .unwrap_or_else(|| common.server.clone());
         let path_str = x.path.as_deref().unwrap_or("/");
         let path = if path_str.starts_with('/') {
             path_str.to_owned()

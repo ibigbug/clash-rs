@@ -240,7 +240,7 @@ mod tests {
     use super::*;
     use crate::{
         proxy::{
-            transport::{TlsClient, TransportLayer, WsClient},
+            transport::{TlsClient, TransportLayer, WsClient, XhttpClient},
             utils::test_utils::{
                 Suite,
                 docker_utils::{
@@ -387,6 +387,104 @@ mod tests {
             udp: true,
             tls: tls_client(None),
             transport: Some(TransportLayer::Ws(ws_client)),
+            flow: None,
+        };
+        let handler = Arc::new(Handler::new(opts));
+
+        run_test_suites_and_cleanup(handler, runner, Suite::all()).await
+    }
+
+    const VLESS_XHTTP_SERVER_CONFIG: &str = r#"{
+    "log": {
+        "loglevel": "debug"
+    },
+    "inbounds": [
+        {
+            "port": 10002,
+            "protocol": "vless",
+            "settings": {
+                "clients": [
+                    {
+                        "id": "b831381d-6324-4d53-ad4f-8cda48b30811",
+                        "level": 0
+                    }
+                ],
+                "decryption": "none"
+            },
+            "streamSettings": {
+                "network": "xhttp",
+                "security": "tls",
+                "tlsSettings": {
+                    "alpn": [
+                        "h2"
+                    ],
+                    "certificates": [
+                        {
+                            "certificateFile": "/etc/ssl/v2ray/fullchain.pem",
+                            "keyFile": "/etc/ssl/v2ray/privkey.pem"
+                        }
+                    ]
+                },
+                "xhttpSettings": {
+                    "path": "/xhttp",
+                    "host": "example.org",
+                    "mode": "auto"
+                }
+            }
+        }
+    ],
+    "outbounds": [
+        {
+            "protocol": "freedom"
+        }
+    ]
+}"#;
+
+    async fn get_xhttp_runner(host_port: u16) -> anyhow::Result<DockerTestRunner> {
+        let test_config_dir = test_config_base_dir();
+        let cert = test_config_dir.join("certs/example.org.pem");
+        let key = test_config_dir.join("certs/example.org-key.pem");
+
+        let mut tmp = tempfile::NamedTempFile::new()?;
+        tmp.write_all(VLESS_XHTTP_SERVER_CONFIG.as_bytes())?;
+
+        let result = DockerTestRunnerBuilder::new()
+            .image(IMAGE_XRAY)
+            .host_port(host_port, 10002)
+            .mounts(&[
+                (tmp.path().to_str().unwrap(), "/etc/xray/config.json"),
+                (cert.to_str().unwrap(), "/etc/ssl/v2ray/fullchain.pem"),
+                (key.to_str().unwrap(), "/etc/ssl/v2ray/privkey.pem"),
+            ])
+            .build()
+            .await;
+        drop(tmp);
+        result
+    }
+
+    #[tokio::test]
+    async fn test_vless_xhttp() -> anyhow::Result<()> {
+        initialize();
+        let span = tracing::info_span!("test_vless_xhttp");
+        let _enter = span.enter();
+        let host_port = alloc_docker_port();
+        let xhttp_client = XhttpClient::new(
+            "example.org".to_owned(),
+            "/xhttp".try_into()?,
+            "auto".to_owned(),
+            HashMap::new(),
+            None,
+        );
+        let runner = get_xhttp_runner(host_port).await?;
+        let opts = HandlerOptions {
+            name: "test-vless-xhttp".into(),
+            common_opts: Default::default(),
+            server: runner.container_ip().unwrap_or(LOCAL_ADDR.to_owned()),
+            port: 10002,
+            uuid: "b831381d-6324-4d53-ad4f-8cda48b30811".into(),
+            udp: true,
+            tls: tls_client(Some(vec!["h2".to_owned()])),
+            transport: Some(TransportLayer::Xhttp(xhttp_client)),
             flow: None,
         };
         let handler = Arc::new(Handler::new(opts));

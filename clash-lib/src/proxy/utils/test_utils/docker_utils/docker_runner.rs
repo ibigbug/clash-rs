@@ -576,6 +576,7 @@ impl DockerTestRunnerBuilder {
         self
     }
 
+    #[allow(dead_code)]
     pub fn port(mut self, port: u16) -> Self {
         self._server_port = port;
         self.exposed_ports = vec![format!("{}/tcp", port), format!("{}/udp", port)];

@@ -57,7 +57,9 @@ impl Client {
             request = request.header("X-Padding", padding);
         }
 
-        Ok(request.body(()).expect("build xhttp request"))
+        request
+            .body(())
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
     }
 }
 
@@ -76,7 +78,14 @@ impl Transport for Client {
             }
         });
 
-        let recv_stream = resp.await.map_err(map_io_error)?.into_body();
+        let response = resp.await.map_err(map_io_error)?;
+        if !response.status().is_success() {
+            return Err(std::io::Error::other(format!(
+                "xhttp request failed with status: {}",
+                response.status()
+            )));
+        }
+        let recv_stream = response.into_body();
 
         Ok(Box::new(Http2Stream::new(recv_stream, send_stream)))
     }
