@@ -24,14 +24,70 @@ use super::{
 use erased_serde::Serialize as ErasedSerialize;
 use std::collections::HashMap;
 
+use tor_rtcompat::RuntimeSubstExt as _;
+
+#[derive(Clone)]
+struct CustomTcpProvider<T> {
+    inner: T,
+    iface: Option<crate::app::net::OutboundInterface>,
+    so_mark: Option<u32>,
+}
+
+#[async_trait]
+impl<T> tor_rtcompat::NetStreamProvider for CustomTcpProvider<T>
+where
+    T: tor_rtcompat::NetStreamProvider,
+    T::Stream: From<tokio::net::TcpStream>,
+{
+    type ConnectOptions = T::ConnectOptions;
+    type ListenOptions = T::ListenOptions;
+    type Listener = T::Listener;
+    type Stream = T::Stream;
+
+    async fn connect(
+        &self,
+        addr: &std::net::SocketAddr,
+        _options: &Self::ConnectOptions,
+    ) -> std::io::Result<Self::Stream> {
+        let stream = crate::proxy::utils::new_tcp_stream(
+            *addr,
+            self.iface.as_ref(),
+            #[cfg(target_os = "linux")]
+            self.so_mark,
+        )
+        .await?;
+        Ok(stream.into())
+    }
+
+    async fn listen(
+        &self,
+        addr: &std::net::SocketAddr,
+        options: &Self::ListenOptions,
+    ) -> std::io::Result<Self::Listener> {
+        self.inner.listen(addr, options).await
+    }
+}
+
+type TorRuntime = tor_rtcompat::CompoundRuntime<
+    tor_rtcompat::PreferredRuntime,
+    tor_rtcompat::PreferredRuntime,
+    tor_rtcompat::PreferredRuntime,
+    CustomTcpProvider<tor_rtcompat::PreferredRuntime>,
+    tor_rtcompat::PreferredRuntime,
+    tor_rtcompat::PreferredRuntime,
+    tor_rtcompat::PreferredRuntime,
+>;
+
 pub struct HandlerOptions {
     pub name: String,
+    pub interface: Option<String>,
+    pub routing_mark: Option<u32>,
 }
 
 pub struct Handler {
     opts: HandlerOptions,
 
-    client: std::sync::Arc<arti_client::TorClient<tor_rtcompat::PreferredRuntime>>,
+    client: std::sync::Arc<arti_client::TorClient<TorRuntime>>,
 }
 
 impl std::fmt::Debug for Handler {
@@ -41,15 +97,28 @@ impl std::fmt::Debug for Handler {
 }
 
 impl Handler {
-    pub fn new(opts: HandlerOptions) -> Self {
-        Self {
-            opts,
-            client: arti_client::TorClient::builder()
-                .config(TorClientConfig::default())
-                .bootstrap_behavior(arti_client::BootstrapBehavior::OnDemand)
-                .create_unbootstrapped()
-                .unwrap(),
-        }
+    pub fn new(opts: HandlerOptions) -> Result<Self, crate::Error> {
+        let rt =
+            tor_rtcompat::PreferredRuntime::current().map_err(crate::Error::Io)?;
+        let iface = opts
+            .interface
+            .as_deref()
+            .and_then(crate::app::net::get_interface_by_name);
+        let so_mark = opts.routing_mark;
+        let tcp_rt = CustomTcpProvider {
+            inner: rt.clone(),
+            iface,
+            so_mark,
+        };
+        let custom_rt = rt.with_tcp_provider(tcp_rt);
+
+        let client = arti_client::TorClient::with_runtime(custom_rt)
+            .config(TorClientConfig::default())
+            .bootstrap_behavior(arti_client::BootstrapBehavior::OnDemand)
+            .create_unbootstrapped()
+            .map_err(|e| crate::Error::Operation(e.to_string()))?;
+
+        Ok(Self { opts, client })
     }
 }
 
