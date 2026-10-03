@@ -299,6 +299,7 @@ async fn handle_inbound_datagram(
     let fut1 = tokio::spawn(handle_packet_from_dispatcher(l_rx));
 
     // tproxy -> dispatcher
+    let dns_limit = Arc::new(tokio::sync::Semaphore::new(256));
     let fut2 = tokio::spawn(async move {
         let mut buf = vec![0_u8; 1024 * 64];
         while let Ok(meta) = socket.recv_msg(&mut buf).await {
@@ -342,10 +343,20 @@ async fn handle_inbound_datagram(
                             );
                             match hickory_proto::op::Message::from_vec(&pkt.data) {
                                 Ok(msg) => {
+                                    let Ok(permit) =
+                                        dns_limit.clone().try_acquire_owned()
+                                    else {
+                                        warn!(
+                                            "too many in-flight hijacked dns \
+                                             queries, dropping query"
+                                        );
+                                        continue;
+                                    };
                                     let resolver = resolver.clone();
                                     let client_addr = meta.addr.to_canonical();
                                     let dns_server_addr = orig_dst.to_canonical();
                                     tokio::spawn(async move {
+                                        let _permit = permit;
                                         let mut resp = match exchange_with_resolver(
                                             &resolver, &msg, true,
                                         )
