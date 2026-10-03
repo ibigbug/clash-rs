@@ -125,7 +125,7 @@ impl FastClassicalRules {
             }
         }
 
-        if let Some(ip) = sess.destination.ip().or(sess.resolved_ip)
+        if let Some(ip) = sess.resolved_ip.or(sess.destination.ip())
             && self.ip_cidr.contains(ip)
         {
             return true;
