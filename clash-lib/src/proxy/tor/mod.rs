@@ -101,10 +101,18 @@ impl Handler {
     pub fn new(opts: HandlerOptions) -> Result<Self, crate::Error> {
         let rt =
             tor_rtcompat::PreferredRuntime::current().map_err(crate::Error::Io)?;
-        let iface = opts
-            .interface
-            .as_deref()
-            .and_then(crate::app::net::get_interface_by_name);
+        let iface = match opts.interface.as_deref() {
+            Some(name) => match crate::app::net::get_interface_by_name(name) {
+                Some(iface) => Some(iface),
+                None if cfg!(target_os = "android") => None,
+                None => {
+                    return Err(crate::Error::Operation(format!(
+                        "tor: could not resolve interface `{name}`"
+                    )));
+                }
+            },
+            None => None,
+        };
         let so_mark = opts.routing_mark;
         let tcp_rt = CustomTcpProvider {
             inner: rt.clone(),
