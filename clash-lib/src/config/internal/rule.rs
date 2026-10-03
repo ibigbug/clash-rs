@@ -1,7 +1,7 @@
 use crate::{Error, app::router::rules::port::PortRange};
 use std::{fmt::Display, str::FromStr};
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct RuleOptions {
     pub(crate) no_resolve: bool,
     pub(crate) interface: Option<String>,
@@ -44,11 +44,13 @@ impl RuleOptions {
     }
 }
 
+#[derive(Clone)]
 pub struct RuleType {
     kind: RuleKind,
     options: RuleOptions,
 }
 
+#[derive(Clone)]
 pub enum RuleKind {
     Domain {
         domain: String,
@@ -228,6 +230,14 @@ impl RuleType {
 
     pub fn interface(&self) -> Option<&str> {
         self.options.interface.as_deref()
+    }
+
+    pub fn kind(&self) -> &RuleKind {
+        &self.kind
+    }
+
+    pub fn options(&self) -> &RuleOptions {
+        &self.options
     }
 
     pub fn into_parts(self) -> (RuleKind, RuleOptions) {

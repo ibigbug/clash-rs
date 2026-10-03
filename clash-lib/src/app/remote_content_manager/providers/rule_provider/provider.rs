@@ -26,7 +26,7 @@ use crate::{
         errors::map_io_error, geodata::GeoDataLookup, mmdb::MmdbLookup,
         succinct_set, trie,
     },
-    config::internal::rule::RuleType,
+    config::internal::rule::{RuleKind, RuleType},
     session::Session,
 };
 
@@ -79,7 +79,70 @@ pub enum RuleContent {
     // the left will converted into a right
     Domain(succinct_set::DomainSet),
     Ipcidr(Box<CidrTrie>),
-    Classical(Vec<Box<dyn RuleMatcher>>),
+    Classical(Box<FastClassicalRules>),
+}
+
+pub struct FastClassicalRules {
+    raw_rules: Vec<String>,
+    exact_domains: std::collections::HashSet<String>,
+    domain_suffix_trie: crate::common::domain_trie::DomainSuffixTrie<()>,
+    domain_keywords_ac: Option<aho_corasick::AhoCorasick>,
+    ip_cidr: CidrTrie,
+    other_rules: Vec<Box<dyn RuleMatcher>>,
+}
+
+impl Default for FastClassicalRules {
+    fn default() -> Self {
+        Self::empty()
+    }
+}
+
+impl FastClassicalRules {
+    pub fn empty() -> Self {
+        Self {
+            raw_rules: Vec::new(),
+            exact_domains: std::collections::HashSet::new(),
+            domain_suffix_trie: crate::common::domain_trie::DomainSuffixTrie::new(),
+            domain_keywords_ac: None,
+            ip_cidr: CidrTrie::new(),
+            other_rules: Vec::new(),
+        }
+    }
+
+    pub fn search(&self, sess: &Session) -> bool {
+        if let Some(domain) = sess.destination.domain() {
+            let domain_lower = domain.to_ascii_lowercase();
+            if self.exact_domains.contains(&domain_lower) {
+                return true;
+            }
+            if self.domain_suffix_trie.search(domain).is_some() {
+                return true;
+            }
+            if let Some(ref ac) = self.domain_keywords_ac
+                && ac.is_match(domain)
+            {
+                return true;
+            }
+        }
+
+        if let Some(ip) = sess.resolved_ip.or(sess.destination.ip())
+            && self.ip_cidr.contains(ip)
+        {
+            return true;
+        }
+
+        for rule in &self.other_rules {
+            if rule.apply(sess) {
+                return true;
+            }
+        }
+
+        false
+    }
+
+    pub fn list_rules(&self, limit: usize) -> Vec<String> {
+        self.raw_rules.iter().take(limit).cloned().collect()
+    }
 }
 
 struct Inner {
@@ -140,7 +203,7 @@ impl RuleProviderImpl {
                 RuleSetBehavior::Ipcidr => {
                     RuleContent::Ipcidr(Box::new(CidrTrie::new()))
                 }
-                RuleSetBehavior::Classical => RuleContent::Classical(vec![]),
+                RuleSetBehavior::Classical => RuleContent::Classical(Box::default()),
             },
         }));
 
@@ -281,14 +344,7 @@ impl RuleProvider for RuleProviderImpl {
                         .ip()
                         .unwrap_or(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0))),
                 ),
-                RuleContent::Classical(rules) => {
-                    for rule in rules.iter() {
-                        if rule.apply(sess) {
-                            return true;
-                        }
-                    }
-                    false
-                }
+                RuleContent::Classical(fast) => fast.search(sess),
             },
             Err(_) => {
                 debug!("rule provider {} is busy", self.name());
@@ -308,11 +364,7 @@ impl RuleProvider for RuleProviderImpl {
     async fn list_rules(&self, limit: usize) -> Vec<String> {
         let inner = self.inner.read().await;
         match &inner.content {
-            RuleContent::Classical(rules) => rules
-                .iter()
-                .take(limit)
-                .map(|r| format!("{},{}", r.type_name(), r.payload()))
-                .collect(),
+            RuleContent::Classical(fast) => fast.list_rules(limit),
             _ => vec![],
         }
     }
@@ -435,9 +487,9 @@ fn make_rules(
         RuleSetBehavior::Ipcidr => {
             Ok(RuleContent::Ipcidr(Box::new(make_ip_cidr_rules(rules)?)))
         }
-        RuleSetBehavior::Classical => Ok(RuleContent::Classical(
+        RuleSetBehavior::Classical => Ok(RuleContent::Classical(Box::new(
             make_classical_rules(rules, mmdb, geodata)?,
-        )),
+        ))),
     }
 }
 
@@ -461,8 +513,14 @@ fn make_classical_rules(
     rules: Vec<String>,
     mmdb: Option<MmdbLookup>,
     geodata: Option<GeoDataLookup>,
-) -> Result<Vec<Box<dyn RuleMatcher>>, Error> {
-    let mut rv = vec![];
+) -> Result<FastClassicalRules, Error> {
+    let mut raw_rules = Vec::new();
+    let mut exact_domains = std::collections::HashSet::new();
+    let mut domain_suffix_trie = crate::common::domain_trie::DomainSuffixTrie::new();
+    let mut keywords = Vec::new();
+    let mut ip_cidr = CidrTrie::new();
+    let mut other_rules = Vec::new();
+
     for rule in rules {
         let parts = rule.split(',').map(str::trim).collect::<Vec<&str>>();
 
@@ -477,11 +535,59 @@ fn make_classical_rules(
             _ => Err(Error::InvalidConfig(format!("invalid rule line: {rule}"))),
         }?;
 
+        let options = rule_type.options();
+        match rule_type.kind() {
+            RuleKind::Domain { domain, .. } => {
+                exact_domains.insert(domain.to_ascii_lowercase());
+            }
+            RuleKind::DomainSuffix { domain_suffix, .. } => {
+                domain_suffix_trie.insert(domain_suffix, ());
+            }
+            RuleKind::DomainKeyword { domain_keyword, .. } => {
+                keywords.push(domain_keyword.clone());
+            }
+            RuleKind::IpCidr { ipnet, .. } if !options.no_resolve => {
+                ip_cidr.insert(&ipnet.to_string());
+            }
+            _ => {
+                let rule_matcher =
+                    map_rule_type(rule_type, mmdb.clone(), geodata.clone(), None);
+                raw_rules.push(format!(
+                    "{},{}",
+                    rule_matcher.type_name(),
+                    rule_matcher.payload()
+                ));
+                other_rules.push(rule_matcher);
+                continue;
+            }
+        }
+
         let rule_matcher =
             map_rule_type(rule_type, mmdb.clone(), geodata.clone(), None);
-        rv.push(rule_matcher);
+        raw_rules.push(format!(
+            "{},{}",
+            rule_matcher.type_name(),
+            rule_matcher.payload()
+        ));
     }
-    Ok(rv)
+
+    let domain_keywords_ac = if !keywords.is_empty() {
+        aho_corasick::AhoCorasickBuilder::new()
+            .ascii_case_insensitive(true)
+            .build(&keywords)
+            .ok()
+    } else {
+        None
+    };
+
+    Ok(FastClassicalRules {
+        raw_rules,
+        exact_domains,
+        domain_suffix_trie,
+        domain_keywords_ac,
+        ip_cidr,
+        other_rules,
+    })
 }
 
 #[cfg(test)]
@@ -654,5 +760,80 @@ mod tests {
             !provider.search(&sess_twitter),
             "twitter.com should NOT match after file update"
         );
+    }
+
+    #[tokio::test]
+    async fn test_classical_rule_provider() {
+        let mock_mmdb = MockMmdbLookupTrait::new();
+        let mock_geodata = MockGeoDataLookupTrait::new();
+
+        let rules = vec![
+            "DOMAIN,google.com".to_string(),
+            "DOMAIN-SUFFIX,apple.com".to_string(),
+            "DOMAIN-KEYWORD,twitter".to_string(),
+            "IP-CIDR,192.168.1.0/24".to_string(),
+        ];
+
+        let provider = RuleProviderImpl::new(
+            "classical-test".to_string(),
+            RuleSetBehavior::Classical,
+            RuleSetFormat::Yaml,
+            None,
+            None,
+            Some(Arc::new(mock_mmdb)),
+            Some(Arc::new(mock_geodata)),
+            Some(rules),
+        );
+
+        assert_ok!(provider.initialize().await);
+
+        // DOMAIN match
+        assert!(provider.search(&Session {
+            destination: SocksAddr::Domain("google.com".to_owned(), 443),
+            ..Default::default()
+        }));
+        // DOMAIN should not match subdomain or prefix
+        assert!(!provider.search(&Session {
+            destination: SocksAddr::Domain("sub.google.com".to_owned(), 443),
+            ..Default::default()
+        }));
+
+        // DOMAIN-SUFFIX match
+        assert!(provider.search(&Session {
+            destination: SocksAddr::Domain("apple.com".to_owned(), 443),
+            ..Default::default()
+        }));
+        assert!(provider.search(&Session {
+            destination: SocksAddr::Domain("store.apple.com".to_owned(), 443),
+            ..Default::default()
+        }));
+        assert!(!provider.search(&Session {
+            destination: SocksAddr::Domain("fakeapple.com".to_owned(), 443),
+            ..Default::default()
+        }));
+
+        // DOMAIN-KEYWORD match
+        assert!(provider.search(&Session {
+            destination: SocksAddr::Domain("api.twitter.com".to_owned(), 443),
+            ..Default::default()
+        }));
+        assert!(provider.search(&Session {
+            destination: SocksAddr::Domain("mytwitter.org".to_owned(), 443),
+            ..Default::default()
+        }));
+
+        // IP-CIDR match
+        assert!(provider.search(&Session {
+            destination: SocksAddr::Ip("192.168.1.50:80".parse().unwrap()),
+            ..Default::default()
+        }));
+        assert!(!provider.search(&Session {
+            destination: SocksAddr::Ip("192.168.2.1:80".parse().unwrap()),
+            ..Default::default()
+        }));
+
+        // list_rules
+        let listed = provider.list_rules(10).await;
+        assert_eq!(listed.len(), 4);
     }
 }
