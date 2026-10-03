@@ -78,9 +78,12 @@ async fn find_proxy_by_name(
     mut req: Request<axum::body::Body>,
     next: Next,
 ) -> Response {
-    let outbound_manager = state.outbound_manager();
+    let components = state.components();
+    let outbound_manager = components.outbound_manager.clone();
     match outbound_manager.get_outbound(&name).await {
         Some(proxy) => {
+            req.extensions_mut().insert(components);
+            req.extensions_mut().insert(outbound_manager);
             req.extensions_mut().insert(proxy);
             next.run(req).await
         }
@@ -90,10 +93,9 @@ async fn find_proxy_by_name(
 }
 
 async fn get_proxy(
+    Extension(outbound_manager): Extension<ThreadSafeOutboundManager>,
     Extension(proxy): Extension<AnyOutboundHandler>,
-    State(state): State<ProxyState>,
 ) -> impl IntoResponse {
-    let outbound_manager = state.outbound_manager();
     axum::response::Json(outbound_manager.get_proxy(&proxy).await)
 }
 
@@ -104,11 +106,10 @@ struct UpdateProxyRequest {
 }
 
 async fn update_proxy(
-    State(state): State<ProxyState>,
+    Extension(components): Extension<Arc<RuntimeComponents>>,
     Extension(proxy): Extension<AnyOutboundHandler>,
     Json(payload): Json<UpdateProxyRequest>,
 ) -> impl IntoResponse {
-    let components = state.components();
     let outbound_manager = components.outbound_manager.clone();
     match outbound_manager.get_selector_control(proxy.name()) {
         Some(ctrl) => match ctrl.select(&payload.name).await {
@@ -143,11 +144,10 @@ async fn update_proxy(
 }
 
 async fn get_proxy_delay(
-    State(state): State<ProxyState>,
+    Extension(outbound_manager): Extension<ThreadSafeOutboundManager>,
     Extension(proxy): Extension<AnyOutboundHandler>,
     Query(q): Query<DelayRequest>,
 ) -> impl IntoResponse {
-    let outbound_manager = state.outbound_manager();
     let timeout = Duration::from_millis(q.timeout.into());
     let name = proxy.name().to_owned();
     let mut headers = HeaderMap::new();

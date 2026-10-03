@@ -350,16 +350,12 @@ pub async fn start(
                     }
                 };
 
-            let old_components = {
-                let mut lock = shared_components.write().unwrap();
-                let old = lock.clone();
-                *lock = new_components.clone();
-                old
-            };
+            let old_components = shared_components.read().unwrap().clone();
 
             old_components.stop_all().await;
             new_components.start_all();
             tokio::task::yield_now().await;
+            *shared_components.write().unwrap() = new_components.clone();
             {
                 let mut g = global_state.lock().await;
                 #[cfg(feature = "tun")]

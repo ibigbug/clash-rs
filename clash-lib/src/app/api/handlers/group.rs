@@ -66,6 +66,7 @@ async fn find_group_by_name(
     let outbound_manager = state.outbound_manager();
     match outbound_manager.get_outbound(&name).await {
         Some(proxy) => {
+            req.extensions_mut().insert(outbound_manager);
             req.extensions_mut().insert(proxy);
             next.run(req).await
         }
@@ -76,11 +77,10 @@ async fn find_group_by_name(
 
 #[instrument(skip_all, fields(name = %proxy.name()))]
 async fn get_group_delay(
-    State(state): State<GroupState>,
+    Extension(outbound_manager): Extension<ThreadSafeOutboundManager>,
     Extension(proxy): Extension<AnyOutboundHandler>,
     Query(q): Query<DelayRequest>,
 ) -> impl IntoResponse {
-    let outbound_manager = state.outbound_manager();
     let timeout = Duration::from_millis(q.timeout.into());
     let name = proxy.name().to_owned();
 
