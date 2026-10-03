@@ -23,11 +23,7 @@ fn create_tar_archive(source: &str, target: &str) -> anyhow::Result<Vec<u8>> {
     let mut ar = tar::Builder::new(Vec::new());
 
     // Remove leading slash for tar path
-    let tar_path = if target.starts_with('/') {
-        &target[1..]
-    } else {
-        target
-    };
+    let tar_path = target.strip_prefix('/').unwrap_or(target);
 
     let source_path = Path::new(source);
     let metadata = std::fs::metadata(source_path)?;
@@ -83,7 +79,7 @@ impl DockerTestRunner {
         image_conf: Option<CreateImageOptions>,
         mut container_conf: ContainerCreateBody,
     ) -> anyhow::Result<Self> {
-        let docker: Docker = if let Some(url) = std::env::var("DOCKER_HOST").ok() {
+        let docker: Docker = if let Ok(url) = std::env::var("DOCKER_HOST") {
             if url.starts_with("http://")
                 || url.starts_with("https://")
                 || url.starts_with("tcp://")
@@ -218,7 +214,7 @@ impl DockerTestRunner {
                     ]
                     .into_iter()
                     .find(|(gateway, _)| {
-                        gateway.as_ref().map_or(false, |g| !g.is_empty())
+                        gateway.as_ref().is_some_and(|g| !g.is_empty())
                     })
                     .and_then(|(_, ip)| ip.as_ref())
                     .filter(|ip| !ip.is_empty())
@@ -240,7 +236,7 @@ impl DockerTestRunner {
                     [(&j.gateway), (&j.ipv6_gateway)]
                         .into_iter()
                         .find(|gateway| {
-                            gateway.as_ref().map_or(false, |g| !g.is_empty())
+                            gateway.as_ref().is_some_and(|g| !g.is_empty())
                         })
                         .and_then(|gateway| gateway.as_ref())
                         .filter(|ip| !ip.is_empty())
@@ -714,7 +710,6 @@ impl DockerTestRunnerBuilder {
             },
         )
         .await
-        .map_err(Into::into)
     }
 }
 

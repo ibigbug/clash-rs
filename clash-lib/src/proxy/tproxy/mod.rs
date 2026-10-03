@@ -427,21 +427,6 @@ async fn handle_packet_from_dispatcher(
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::gro_chunk_size;
-
-    #[test]
-    fn gro_chunk_size_uses_len_when_stride_is_zero() {
-        assert_eq!(gro_chunk_size(1024, 0), 1024);
-    }
-
-    #[test]
-    fn gro_chunk_size_uses_stride_when_non_zero() {
-        assert_eq!(gro_chunk_size(1024, 128), 128);
-    }
-}
-
 // socket2 doesn't provide set_ip_transparent_v6
 // So we must implement it ourselves
 fn set_ip_transparent_v6(socket: &socket2::Socket) -> io::Result<()> {
@@ -476,4 +461,19 @@ fn set_socket_option(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::gro_chunk_size;
+
+    #[test]
+    fn gro_chunk_size_uses_len_when_stride_is_zero() {
+        assert_eq!(gro_chunk_size(1024, 0), 1024);
+    }
+
+    #[test]
+    fn gro_chunk_size_uses_stride_when_non_zero() {
+        assert_eq!(gro_chunk_size(1024, 128), 128);
+    }
 }

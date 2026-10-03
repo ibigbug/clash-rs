@@ -136,7 +136,7 @@ fn destination_list(gateway_ip: Option<String>) -> Vec<String> {
         debug!("gateway_ip Ip: {}", ip);
         destination_list.push(ip);
     }
-    if let Some(ip) = std::env::var("CLIENT_IP").ok() {
+    if let Ok(ip) = std::env::var("CLIENT_IP") {
         debug!("client Ip: {}", &ip);
         destination_list.insert(0, ip);
     } else {

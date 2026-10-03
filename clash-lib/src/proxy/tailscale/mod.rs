@@ -467,7 +467,7 @@ mod tests {
 
         let query = build_dns_query("login.tailscale.com", DNS_TEST_TXID);
         let pkt = UdpPacket {
-            data: query.into(),
+            data: query,
             src_addr: SocksAddr::Ip(std::net::SocketAddr::new(addr.into(), 0)),
             dst_addr: SocksAddr::Ip(udp_addr),
             inbound_user: None,
