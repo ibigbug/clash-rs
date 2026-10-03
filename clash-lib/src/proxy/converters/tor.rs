@@ -15,9 +15,10 @@ impl TryFrom<&OutboundTor> for Handler {
     type Error = crate::Error;
 
     fn try_from(s: &OutboundTor) -> Result<Self, Self::Error> {
-        let h = Handler::new(HandlerOptions {
+        Handler::new(HandlerOptions {
             name: s.name.to_owned(),
-        });
-        Ok(h)
+            interface: s.interface.clone(),
+            routing_mark: s.routing_mark,
+        })
     }
 }

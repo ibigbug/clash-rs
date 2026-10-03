@@ -69,6 +69,37 @@ pub trait ClashResolver: Sync + Send {
         enhanced: bool,
     ) -> anyhow::Result<Option<std::net::Ipv6Addr>>;
 
+    /// Resolve all IPv4 and IPv6 addresses for Happy Eyeballs dual-stack racing
+    /// (RFC 8305).
+    async fn resolve_all(
+        &self,
+        host: &str,
+        enhanced: bool,
+    ) -> anyhow::Result<Vec<std::net::IpAddr>> {
+        if let Some(ip) = parse_ip_literal(host) {
+            return Ok(vec![ip]);
+        }
+        if self.ipv6() {
+            let (v6, v4) = tokio::join!(
+                self.resolve_v6(host, enhanced),
+                self.resolve_v4(host, enhanced),
+            );
+            let mut addrs = Vec::new();
+            if let Ok(Some(v6)) = v6 {
+                addrs.push(std::net::IpAddr::V6(v6));
+            }
+            if let Ok(Some(v4)) = v4 {
+                addrs.push(std::net::IpAddr::V4(v4));
+            }
+            Ok(addrs)
+        } else {
+            match self.resolve_v4(host, enhanced).await? {
+                Some(v4) => Ok(vec![std::net::IpAddr::V4(v4)]),
+                None => Ok(Vec::new()),
+            }
+        }
+    }
+
     async fn cached_for(&self, ip: std::net::IpAddr) -> Option<String>;
 
     /// Used for DNS Server
@@ -88,6 +119,9 @@ pub trait ClashResolver: Sync + Send {
     /// Called under memory pressure to free RSS.  Default no-op for resolvers
     /// that don't cache (e.g. SystemResolver).
     async fn clear_cache(&self) {}
+
+    /// Clear all fake-ip mappings. Default no-op for resolvers without fake-ip.
+    async fn flush_fakeip(&self) {}
 }
 
 /// Returns the IP address if `host` is a valid IP literal, otherwise `None`.

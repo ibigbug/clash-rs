@@ -27,6 +27,7 @@ pub trait Store: Sync + Send {
     async fn del_by_ip(&mut self, ip: net::IpAddr);
     async fn exist(&mut self, ip: net::IpAddr) -> bool;
     async fn copy_to(&self, store: &mut Box<dyn Store>);
+    async fn flush(&mut self);
 }
 
 pub type ThreadSafeFakeDns = Arc<RwLock<FakeDns>>;
@@ -83,6 +84,12 @@ impl FakeDns {
         } else {
             None
         }
+    }
+
+    pub async fn flush(&mut self) {
+        let pool_size = self.max - self.min + 1;
+        self.offset = pool_size - 1;
+        self.store.flush().await;
     }
 
     pub fn should_skip(&self, domain: &str) -> bool {
@@ -354,5 +361,31 @@ mod tests {
             !pool.is_fake_ip(unallocated).await,
             "unallocated in-range IP must not be treated as a fake IP"
         );
+    }
+
+    #[tokio::test]
+    async fn test_fake_ip_flush() {
+        let store = Box::new(InMemStore::new(10));
+        let ipnet = "198.18.0.0/16".parse::<ipnet::IpNet>().unwrap();
+        let mut pool = FakeDns::new(Opts {
+            ipnet,
+            skipped_hostnames: None,
+            store,
+        })
+        .unwrap();
+
+        let ip1 = pool.lookup("foo.com").await;
+        assert!(pool.is_fake_ip(ip1).await);
+        assert_eq!(pool.reverse_lookup(ip1).await, Some("foo.com".to_string()));
+
+        pool.flush().await;
+
+        assert!(!pool.is_fake_ip(ip1).await);
+        assert_eq!(pool.reverse_lookup(ip1).await, None);
+
+        // After flush, offset resets so lookup allocates from beginning
+        let ip2 = pool.lookup("bar.com").await;
+        assert_eq!(ip1, ip2);
+        assert_eq!(pool.reverse_lookup(ip2).await, Some("bar.com".to_string()));
     }
 }
