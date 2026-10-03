@@ -1,7 +1,7 @@
 use super::platform::must_bind_socket_on_interface;
 use crate::app::net::OutboundInterface;
 
-use futures::io;
+use futures::{StreamExt, io, stream::FuturesUnordered};
 use socket2::TcpKeepalive;
 use std::{
     net::{Ipv4Addr, Ipv6Addr, SocketAddr},
@@ -88,6 +88,184 @@ pub async fn new_tcp_stream(
         TcpSocket::from_std_stream(socket.into()).connect(endpoint),
     )
     .await?
+}
+
+/// Default connection attempt delay for Happy Eyeballs v2 (RFC 8305 Section
+/// 5.2).
+pub const HAPPY_EYEBALLS_DELAY: Duration = Duration::from_millis(200);
+
+/// Sorts socket addresses according to RFC 8305 Section 5 (Happy Eyeballs v2).
+///
+/// IPv6 and IPv4 addresses are interleaved, starting with IPv6:
+/// `[v6_0, v4_0, v6_1, v4_1, ...]`
+pub fn sort_addrs_happy_eyeballs(addrs: &[SocketAddr]) -> Vec<SocketAddr> {
+    let mut v6 = Vec::new();
+    let mut v4 = Vec::new();
+
+    for &addr in addrs {
+        if addr.is_ipv6() {
+            v6.push(addr);
+        } else {
+            v4.push(addr);
+        }
+    }
+
+    if v6.is_empty() {
+        return v4;
+    }
+    if v4.is_empty() {
+        return v6;
+    }
+
+    let mut result = Vec::with_capacity(addrs.len());
+    let mut v6_iter = v6.into_iter();
+    let mut v4_iter = v4.into_iter();
+
+    loop {
+        match (v6_iter.next(), v4_iter.next()) {
+            (Some(a6), Some(a4)) => {
+                result.push(a6);
+                result.push(a4);
+            }
+            (Some(a6), None) => {
+                result.push(a6);
+                result.extend(v6_iter);
+                break;
+            }
+            (None, Some(a4)) => {
+                result.push(a4);
+                result.extend(v4_iter);
+                break;
+            }
+            (None, None) => break,
+        }
+    }
+
+    result
+}
+
+/// Connects to one of the candidate endpoints using Happy Eyeballs v2 (RFC
+/// 8305).
+///
+/// Addresses are sorted and interleaved (IPv6 first). The preferred address is
+/// dialed immediately. If the first attempt does not connect within
+/// [`HAPPY_EYEBALLS_DELAY`], subsequent candidates are dialed in parallel.
+/// Whichever TCP connection succeeds first is returned immediately,
+/// and the remaining in-flight attempts are aborted.
+#[instrument(skip(so_mark))]
+pub async fn new_tcp_stream_happy_eyeballs(
+    endpoints: &[SocketAddr],
+    iface: Option<&OutboundInterface>,
+    #[cfg(target_os = "linux")] so_mark: Option<u32>,
+) -> std::io::Result<TcpStream> {
+    if endpoints.is_empty() {
+        return Err(std::io::Error::other("no destination address provided"));
+    }
+    if endpoints.len() == 1 {
+        return new_tcp_stream(
+            endpoints[0],
+            iface,
+            #[cfg(target_os = "linux")]
+            so_mark,
+        )
+        .await;
+    }
+
+    async fn connect_candidate(
+        addr: SocketAddr,
+        iface: Option<OutboundInterface>,
+        #[cfg(target_os = "linux")] so_mark: Option<u32>,
+    ) -> (std::io::Result<TcpStream>, SocketAddr) {
+        let res = new_tcp_stream(
+            addr,
+            iface.as_ref(),
+            #[cfg(target_os = "linux")]
+            so_mark,
+        )
+        .await;
+        (res, addr)
+    }
+
+    let sorted = sort_addrs_happy_eyeballs(endpoints);
+    let mut candidate_idx = 0;
+    let mut in_flight = FuturesUnordered::new();
+    let mut last_error = None;
+
+    // Start dialing the first candidate immediately
+    let first_addr = sorted[candidate_idx];
+    candidate_idx += 1;
+    in_flight.push(connect_candidate(
+        first_addr,
+        iface.cloned(),
+        #[cfg(target_os = "linux")]
+        so_mark,
+    ));
+
+    let mut delay_timer = Some(Box::pin(tokio::time::sleep(HAPPY_EYEBALLS_DELAY)));
+
+    loop {
+        tokio::select! {
+            res = in_flight.next() => {
+                match res {
+                    Some((Ok(stream), addr)) => {
+                        trace!(addr = %addr, "happy eyeballs: connection established");
+                        return Ok(stream);
+                    }
+                    Some((Err(err), addr)) => {
+                        trace!(addr = %addr, error = %err, "happy eyeballs: connection attempt failed");
+                        last_error = Some(err);
+                        // If no other connections are currently in flight and more candidates remain,
+                        // start the next candidate immediately (RFC 8305 Section 5.2)
+                        if in_flight.is_empty() && candidate_idx < sorted.len() {
+                            let next_addr = sorted[candidate_idx];
+                            candidate_idx += 1;
+                            in_flight.push(connect_candidate(
+                                next_addr,
+                                iface.cloned(),
+                                #[cfg(target_os = "linux")]
+                                so_mark,
+                            ));
+                            delay_timer = if candidate_idx < sorted.len() {
+                                Some(Box::pin(tokio::time::sleep(HAPPY_EYEBALLS_DELAY)))
+                            } else {
+                                None
+                            };
+                        }
+                    }
+                    None => {
+                        if candidate_idx >= sorted.len() {
+                            break;
+                        }
+                    }
+                }
+            }
+
+            _ = async {
+                if let Some(ref mut timer) = delay_timer {
+                    timer.as_mut().await
+                } else {
+                    futures::future::pending::<()>().await
+                }
+            }, if delay_timer.is_some() && candidate_idx < sorted.len() => {
+                let next_addr = sorted[candidate_idx];
+                candidate_idx += 1;
+                in_flight.push(connect_candidate(
+                    next_addr,
+                    iface.cloned(),
+                    #[cfg(target_os = "linux")]
+                    so_mark,
+                ));
+                delay_timer = if candidate_idx < sorted.len() {
+                    Some(Box::pin(tokio::time::sleep(HAPPY_EYEBALLS_DELAY)))
+                } else {
+                    None
+                };
+            }
+        }
+    }
+
+    Err(last_error
+        .unwrap_or_else(|| std::io::Error::other("all connection attempts failed")))
 }
 
 #[instrument(skip(so_mark))]
@@ -407,6 +585,50 @@ mod tests {
             local.port(),
             0,
             "socket must have a non-zero local port even when iface is set"
+        );
+    }
+
+    #[test]
+    fn test_sort_addrs_happy_eyeballs() {
+        let v4_1: SocketAddr = "1.1.1.1:80".parse().unwrap();
+        let v4_2: SocketAddr = "2.2.2.2:80".parse().unwrap();
+        let v6_1: SocketAddr = "[2001:db8::1]:80".parse().unwrap();
+        let v6_2: SocketAddr = "[2001:db8::2]:80".parse().unwrap();
+
+        // Dual-stack: should interleave starting with IPv6
+        let sorted = super::sort_addrs_happy_eyeballs(&[v4_1, v4_2, v6_1, v6_2]);
+        assert_eq!(sorted, vec![v6_1, v4_1, v6_2, v4_2]);
+
+        // Single family IPv4
+        let sorted_v4 = super::sort_addrs_happy_eyeballs(&[v4_1, v4_2]);
+        assert_eq!(sorted_v4, vec![v4_1, v4_2]);
+
+        // Single family IPv6
+        let sorted_v6 = super::sort_addrs_happy_eyeballs(&[v6_1, v6_2]);
+        assert_eq!(sorted_v6, vec![v6_1, v6_2]);
+    }
+
+    #[tokio::test]
+    async fn test_happy_eyeballs_races_and_connects_to_working_address() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let working_addr = listener.local_addr().unwrap();
+
+        // First address is a port on localhost that is not listening
+        let non_listening_port = working_addr.port().wrapping_add(100);
+        let dummy_addr: SocketAddr =
+            format!("127.0.0.1:{non_listening_port}").parse().unwrap();
+
+        let stream = super::new_tcp_stream_happy_eyeballs(
+            &[dummy_addr, working_addr],
+            None,
+            #[cfg(target_os = "linux")]
+            None,
+        )
+        .await;
+
+        assert!(
+            stream.is_ok(),
+            "Happy Eyeballs should connect to the working address"
         );
     }
 }

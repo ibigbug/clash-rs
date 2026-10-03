@@ -91,6 +91,27 @@ impl ClashResolver for SystemResolver {
         Ok(response.into_iter().choose(&mut rand::rng()))
     }
 
+    async fn resolve_all(
+        &self,
+        host: &str,
+        _: bool,
+    ) -> anyhow::Result<Vec<std::net::IpAddr>> {
+        if let Some(ip) = parse_ip_literal(host) {
+            return Ok(vec![ip]);
+        }
+        let response = tokio::net::lookup_host(format!("{host}:0"))
+            .await?
+            .filter_map(|x| {
+                if self.ipv6() || x.is_ipv4() {
+                    Some(x.ip())
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        Ok(response)
+    }
+
     async fn cached_for(&self, _: std::net::IpAddr) -> Option<String> {
         None
     }
