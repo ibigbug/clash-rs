@@ -342,43 +342,51 @@ async fn handle_inbound_datagram(
                             );
                             match hickory_proto::op::Message::from_vec(&pkt.data) {
                                 Ok(msg) => {
-                                    let mut resp = match exchange_with_resolver(
-                                        resolver, &msg, true,
-                                    )
-                                    .await
-                                    {
-                                        Ok(resp) => resp,
-                                        Err(e) => {
-                                            warn!(
-                                                "failed to exchange dns message: {}",
-                                                e
-                                            );
-                                            continue;
-                                        }
-                                    };
-                                    resp.metadata.id = msg.metadata.id;
-                                    trace!("tproxy hijack dns response: {:?}", resp);
+                                    let resolver = resolver.clone();
                                     let client_addr = meta.addr.to_canonical();
                                     let dns_server_addr = orig_dst.to_canonical();
-                                    if let Ok(data) = resp.to_vec()
-                                        && let Ok(socket_raw) = new_unbound_socket(
-                                            dns_server_addr,
-                                            fw_mark,
-                                        )
-                                        && let Err(e) = sendto_with_src(
-                                            &socket_raw,
-                                            &data,
-                                            client_addr,
-                                            dns_server_addr,
+                                    tokio::spawn(async move {
+                                        let mut resp = match exchange_with_resolver(
+                                            &resolver, &msg, true,
                                         )
                                         .await
-                                    {
-                                        warn!(
-                                            "failed to send hijacked dns response: \
-                                             {}",
-                                            e
+                                        {
+                                            Ok(resp) => resp,
+                                            Err(e) => {
+                                                warn!(
+                                                    "failed to exchange dns \
+                                                     message: {}",
+                                                    e
+                                                );
+                                                return;
+                                            }
+                                        };
+                                        resp.metadata.id = msg.metadata.id;
+                                        trace!(
+                                            "tproxy hijack dns response: {:?}",
+                                            resp
                                         );
-                                    }
+                                        if let Ok(data) = resp.to_vec()
+                                            && let Ok(socket_raw) =
+                                                new_unbound_socket(
+                                                    dns_server_addr,
+                                                    fw_mark,
+                                                )
+                                            && let Err(e) = sendto_with_src(
+                                                &socket_raw,
+                                                &data,
+                                                client_addr,
+                                                dns_server_addr,
+                                            )
+                                            .await
+                                        {
+                                            warn!(
+                                                "failed to send hijacked dns \
+                                                 response: {}",
+                                                e
+                                            );
+                                        }
+                                    });
                                 }
                                 Err(e) => {
                                     warn!("failed to parse dns packet: {}", e);
