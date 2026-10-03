@@ -704,6 +704,7 @@ async fn create_components(
             authenticator,
             config.listeners,
             Some(cancellation_token.child_token()),
+            Some(dns_resolver.clone()),
         )
         .await,
     );

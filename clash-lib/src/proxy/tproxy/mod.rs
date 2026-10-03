@@ -16,11 +16,15 @@ use std::{io, net::SocketAddr, os::fd::AsRawFd, sync::Arc, task::Poll};
 use tokio::net::TcpListener;
 use tracing::{trace, warn};
 
+use crate::app::dns::{ThreadSafeDNSResolver, exchange_with_resolver};
+
 pub struct TproxyInbound {
     addr: SocketAddr,
     allow_lan: bool,
     dispatcher: Arc<Dispatcher>,
     fw_mark: Option<u32>,
+    dns_resolver: Option<ThreadSafeDNSResolver>,
+    dns_hijack: bool,
 }
 
 impl Drop for TproxyInbound {
@@ -35,12 +39,16 @@ impl TproxyInbound {
         allow_lan: bool,
         dispatcher: Arc<Dispatcher>,
         fw_mark: Option<u32>,
+        dns_resolver: Option<ThreadSafeDNSResolver>,
+        dns_hijack: bool,
     ) -> Self {
         Self {
             addr,
             allow_lan,
             dispatcher,
             fw_mark,
+            dns_resolver,
+            dns_hijack,
         }
     }
 }
@@ -162,6 +170,8 @@ impl InboundHandlerTrait for TproxyInbound {
             self.fw_mark,
             Arc::new(listener),
             self.dispatcher.clone(),
+            self.dns_resolver.clone(),
+            self.dns_hijack,
         )
         .await
     }
@@ -258,6 +268,8 @@ async fn handle_inbound_datagram(
     fw_mark: Option<u32>,
     socket: Arc<unix_udp_sock::UdpSocket>,
     dispatcher: Arc<Dispatcher>,
+    dns_resolver: Option<ThreadSafeDNSResolver>,
+    dns_hijack: bool,
 ) -> std::io::Result<()> {
     // dispatcher <-> tproxy communications
     let (l_tx, l_rx) = tokio::sync::mpsc::channel(32);
@@ -305,13 +317,6 @@ async fn handle_inbound_datagram(
                         orig_dst,
                         socket.local_addr()
                     );
-                    // if !allow_lan
-                    //     && let Ok(local_addr) = socket.local_addr()
-                    //     && meta.addr.ip() != local_addr.ip()
-                    // {
-                    //     warn!("Connection from {} is not allowed",
-                    // meta.addr);     continue;
-                    // }
                     let chunk_size = gro_chunk_size(meta.len, meta.stride);
                     if chunk_size == 0 {
                         continue;
@@ -323,6 +328,59 @@ async fn handle_inbound_datagram(
                             dst_addr: orig_dst.to_canonical().into(),
                             inbound_user: None,
                         };
+
+                        if dns_hijack
+                            && orig_dst.port() == 53
+                            && let Some(ref resolver) = dns_resolver
+                        {
+                            trace!(
+                                "tproxy got dns packet: {:?}, returning from Clash \
+                                 DNS server",
+                                pkt
+                            );
+                            match hickory_proto::op::Message::from_vec(&pkt.data) {
+                                Ok(msg) => {
+                                    let mut resp = match exchange_with_resolver(
+                                        resolver, &msg, true,
+                                    )
+                                    .await
+                                    {
+                                        Ok(resp) => resp,
+                                        Err(e) => {
+                                            warn!(
+                                                "failed to exchange dns message: {}",
+                                                e
+                                            );
+                                            continue;
+                                        }
+                                    };
+                                    resp.metadata.id = msg.metadata.id;
+                                    trace!("tproxy hijack dns response: {:?}", resp);
+                                    if let Ok(data) = resp.to_vec()
+                                        && let Ok(socket_raw) =
+                                            new_unbound_socket(meta.addr, fw_mark)
+                                        && let Err(e) = sendto_with_src(
+                                            &socket_raw,
+                                            &data,
+                                            meta.addr,
+                                            orig_dst,
+                                        )
+                                        .await
+                                    {
+                                        warn!(
+                                            "failed to send hijacked dns response: \
+                                             {}",
+                                            e
+                                        );
+                                    }
+                                }
+                                Err(e) => {
+                                    warn!("failed to parse dns packet: {}", e);
+                                }
+                            }
+                            continue;
+                        }
+
                         trace!("tproxy -> dispatcher: {:?}", pkt);
                         match d_tx.send(pkt).await {
                             Ok(_) => {}
@@ -427,21 +485,6 @@ async fn handle_packet_from_dispatcher(
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::gro_chunk_size;
-
-    #[test]
-    fn gro_chunk_size_uses_len_when_stride_is_zero() {
-        assert_eq!(gro_chunk_size(1024, 0), 1024);
-    }
-
-    #[test]
-    fn gro_chunk_size_uses_stride_when_non_zero() {
-        assert_eq!(gro_chunk_size(1024, 128), 128);
-    }
-}
-
 // socket2 doesn't provide set_ip_transparent_v6
 // So we must implement it ourselves
 fn set_ip_transparent_v6(socket: &socket2::Socket) -> io::Result<()> {
@@ -476,4 +519,19 @@ fn set_socket_option(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::gro_chunk_size;
+
+    #[test]
+    fn gro_chunk_size_uses_len_when_stride_is_zero() {
+        assert_eq!(gro_chunk_size(1024, 0), 1024);
+    }
+
+    #[test]
+    fn gro_chunk_size_uses_stride_when_non_zero() {
+        assert_eq!(gro_chunk_size(1024, 128), 128);
+    }
 }
