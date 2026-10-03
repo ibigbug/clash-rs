@@ -207,6 +207,8 @@ async fn sendto_with_src(
     dst: SocketAddr,
     src: SocketAddr,
 ) -> io::Result<()> {
+    let src = src.to_canonical();
+    let dst = dst.to_canonical();
     let mut packet: Vec<u8>;
     let builder;
     match (src, dst) {
@@ -356,14 +358,18 @@ async fn handle_inbound_datagram(
                                     };
                                     resp.metadata.id = msg.metadata.id;
                                     trace!("tproxy hijack dns response: {:?}", resp);
+                                    let client_addr = meta.addr.to_canonical();
+                                    let dns_server_addr = orig_dst.to_canonical();
                                     if let Ok(data) = resp.to_vec()
-                                        && let Ok(socket_raw) =
-                                            new_unbound_socket(meta.addr, fw_mark)
+                                        && let Ok(socket_raw) = new_unbound_socket(
+                                            dns_server_addr,
+                                            fw_mark,
+                                        )
                                         && let Err(e) = sendto_with_src(
                                             &socket_raw,
                                             &data,
-                                            meta.addr,
-                                            orig_dst,
+                                            client_addr,
+                                            dns_server_addr,
                                         )
                                         .await
                                     {
