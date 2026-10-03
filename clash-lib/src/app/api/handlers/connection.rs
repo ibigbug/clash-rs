@@ -72,10 +72,8 @@ async fn get_connections(
     .on_upgrade(move |mut socket| async move {
         let interval = q.interval;
 
-        let mgr = state.statistics_manager();
-
         loop {
-            let snapshot = mgr.snapshot().await;
+            let snapshot = state.statistics_manager().snapshot().await;
             let body = match serde_json::to_string(&snapshot) {
                 Ok(s) => s,
                 Err(e) => {

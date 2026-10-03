@@ -25,7 +25,6 @@ use crate::{
             handlers::utils::{DelayRequest, group_url_test},
         },
         outbound::manager::ThreadSafeOutboundManager,
-        profile::ThreadSafeCacheFile,
     },
     proxy::AnyOutboundHandler,
 };
@@ -42,10 +41,6 @@ impl ProxyState {
 
     fn outbound_manager(&self) -> ThreadSafeOutboundManager {
         self.components().outbound_manager.clone()
-    }
-
-    fn cache_store(&self) -> ThreadSafeCacheFile {
-        self.components().cache_store.clone()
     }
 }
 
@@ -113,11 +108,12 @@ async fn update_proxy(
     Extension(proxy): Extension<AnyOutboundHandler>,
     Json(payload): Json<UpdateProxyRequest>,
 ) -> impl IntoResponse {
-    let outbound_manager = state.outbound_manager();
+    let components = state.components();
+    let outbound_manager = components.outbound_manager.clone();
     match outbound_manager.get_selector_control(proxy.name()) {
         Some(ctrl) => match ctrl.select(&payload.name).await {
             Ok(_) => {
-                let cache_store = state.cache_store();
+                let cache_store = components.cache_store.clone();
                 cache_store.set_selected(proxy.name(), &payload.name).await;
                 (
                     StatusCode::ACCEPTED,
