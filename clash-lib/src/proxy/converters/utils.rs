@@ -3,8 +3,8 @@ use http::uri::InvalidUri;
 
 use crate::{
     Error,
-    config::proxy::{CommonConfigOptions, GrpcOpt, H2Opt, WsOpt},
-    proxy::transport::{self, GrpcClient, H2Client, WsClient},
+    config::proxy::{CommonConfigOptions, GrpcOpt, H2Opt, WsOpt, XhttpOpt},
+    proxy::transport::{self, GrpcClient, H2Client, WsClient, XhttpClient},
 };
 
 impl TryFrom<(&WsOpt, &CommonConfigOptions)> for WsClient {
@@ -67,6 +67,38 @@ impl TryFrom<(&H2Opt, &CommonConfigOptions)> for H2Client {
             std::collections::HashMap::new(),
             http::Method::GET,
             path.try_into()?,
+        ))
+    }
+}
+
+impl TryFrom<(&XhttpOpt, &CommonConfigOptions)> for XhttpClient {
+    type Error = InvalidUri;
+
+    fn try_from(
+        pair: (&XhttpOpt, &CommonConfigOptions),
+    ) -> Result<Self, Self::Error> {
+        let (x, common) = pair;
+        let host = x
+            .host
+            .as_deref()
+            .unwrap_or(common.server.as_str())
+            .to_owned();
+        let path_str = x.path.as_deref().unwrap_or("/");
+        let path = if path_str.starts_with('/') {
+            path_str.to_owned()
+        } else {
+            format!("/{path_str}")
+        };
+        let mode = x.mode.clone().unwrap_or_else(|| "auto".to_owned());
+        let headers = x.headers.clone().unwrap_or_default();
+        let x_padding_bytes = x.x_padding_bytes.clone();
+
+        Ok(transport::XhttpClient::new(
+            host,
+            path.try_into()?,
+            mode,
+            headers,
+            x_padding_bytes,
         ))
     }
 }

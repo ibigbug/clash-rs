@@ -238,6 +238,16 @@ pub struct GrpcOpt {
     pub grpc_service_name: Option<String>,
 }
 
+#[derive(serde::Serialize, serde::Deserialize, Debug, Default, Clone)]
+#[serde(rename_all = "kebab-case")]
+pub struct XhttpOpt {
+    pub path: Option<String>,
+    pub host: Option<String>,
+    pub mode: Option<String>,
+    pub headers: Option<HashMap<String, String>>,
+    pub x_padding_bytes: Option<String>,
+}
+
 #[derive(serde::Serialize, serde::Deserialize, Debug, Default)]
 #[serde(rename_all = "kebab-case")]
 pub struct RealityOpt {
@@ -312,6 +322,8 @@ pub struct OutboundVmess {
     pub ws_opts: Option<WsOpt>,
     pub h2_opts: Option<H2Opt>,
     pub grpc_opts: Option<GrpcOpt>,
+    #[serde(alias = "splithttp-opts")]
+    pub xhttp_opts: Option<XhttpOpt>,
     /// File path or inline PEM client certificate for mTLS.
     /// Must be set together with `tls-key`.
     pub tls_cert: Option<String>,
@@ -335,6 +347,8 @@ pub struct OutboundVless {
     pub ws_opts: Option<WsOpt>,
     pub h2_opts: Option<H2Opt>,
     pub grpc_opts: Option<GrpcOpt>,
+    #[serde(alias = "splithttp-opts")]
+    pub xhttp_opts: Option<XhttpOpt>,
     pub reality_opts: Option<RealityOpt>,
     pub flow: Option<String>,
     pub client_fingerprint: Option<String>,

@@ -5,7 +5,9 @@ use crate::{
     config::internal::proxy::OutboundVmess,
     proxy::{
         HandlerCommonOptions,
-        transport::{GrpcClient, H2Client, TlsClient, TransportLayer, WsClient},
+        transport::{
+            GrpcClient, H2Client, TlsClient, TransportLayer, WsClient, XhttpClient,
+        },
         vmess::{Handler, HandlerOptions},
     },
 };
@@ -83,6 +85,17 @@ impl TryFrom<&OutboundVmess> for Handler {
                         .ok_or(Error::InvalidConfig(
                             "grpc_opts is required for grpc".to_owned(),
                         )),
+                    "xhttp" | "splithttp" => {
+                        let default_opts = Default::default();
+                        let opts = s.xhttp_opts.as_ref().unwrap_or(&default_opts);
+                        let client: XhttpClient =
+                            (opts, &s.common_opts).try_into().map_err(|e| {
+                                Error::InvalidConfig(format!(
+                                    "invalid xhttp options: {e}"
+                                ))
+                            })?;
+                        Ok(TransportLayer::Xhttp(client))
+                    }
                     _ => Err(Error::InvalidConfig(format!(
                         "unsupported network: {x}"
                     ))),
@@ -100,6 +113,19 @@ impl TryFrom<&OutboundVmess> for Handler {
                                     h.cloned()
                                 })
                             })
+                            .or_else(|| {
+                                s.xhttp_opts.as_ref().and_then(|x| {
+                                    x.host.clone().or_else(|| {
+                                        x.headers.as_ref().and_then(|h| {
+                                            h.iter()
+                                                .find(|(k, _)| {
+                                                    k.eq_ignore_ascii_case("host")
+                                                })
+                                                .map(|(_, v)| v.clone())
+                                        })
+                                    })
+                                })
+                            })
                             .unwrap_or(s.common_opts.server.to_owned()),
                     ),
                     s.network
@@ -107,7 +133,9 @@ impl TryFrom<&OutboundVmess> for Handler {
                         .map(|x| match x.as_str() {
                             "ws" => Ok(vec!["http/1.1".to_owned()]),
                             "http" => Ok(vec![]),
-                            "h2" | "grpc" => Ok(vec!["h2".to_owned()]),
+                            "h2" | "grpc" | "xhttp" | "splithttp" => {
+                                Ok(vec!["h2".to_owned()])
+                            }
                             _ => Err(Error::InvalidConfig(format!(
                                 "unsupported network: {x}"
                             ))),
@@ -123,5 +151,46 @@ impl TryFrom<&OutboundVmess> for Handler {
             },
         });
         Ok(h)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::internal::proxy::{CommonConfigOptions, XhttpOpt};
+
+    #[test]
+    fn test_vmess_network_xhttp() {
+        crate::setup_default_crypto_provider();
+        let config = OutboundVmess {
+            common_opts: CommonConfigOptions {
+                name: "test-vmess-xhttp".to_string(),
+                server: "example.com".to_string(),
+                port: 443,
+                ..Default::default()
+            },
+            uuid: "test-uuid".to_string(),
+            alter_id: 0,
+            cipher: Some("auto".to_string()),
+            udp: Some(true),
+            tls: Some(true),
+            skip_cert_verify: Some(true),
+            server_name: Some("example.com".to_string()),
+            network: Some("xhttp".to_string()),
+            xhttp_opts: Some(XhttpOpt {
+                path: Some("/vmess-xhttp".to_string()),
+                host: Some("example.com".to_string()),
+                mode: Some("auto".to_string()),
+                headers: None,
+                x_padding_bytes: Some("50-100".to_string()),
+            }),
+            ..Default::default()
+        };
+
+        let handler = Handler::try_from(&config);
+        assert!(
+            handler.is_ok(),
+            "VMess handler with xhttp network should parse successfully"
+        );
     }
 }

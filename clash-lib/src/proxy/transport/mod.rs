@@ -10,6 +10,7 @@ mod tls;
 #[cfg(feature = "shadowsocks")]
 mod v2ray;
 mod ws;
+mod xhttp;
 
 pub use grpc::Client as GrpcClient;
 pub use h2::Client as H2Client;
@@ -25,6 +26,7 @@ pub use tls::Client as TlsClient;
 #[cfg(feature = "shadowsocks")]
 pub use v2ray::{V2RayOBFSOption, V2rayWsClient};
 pub use ws::Client as WsClient;
+pub use xhttp::Client as XhttpClient;
 
 #[async_trait::async_trait]
 pub trait Transport: Send + Sync {
@@ -58,6 +60,7 @@ pub enum TransportLayer {
     Grpc(GrpcClient),
     H2(H2Client),
     Ws(WsClient),
+    Xhttp(XhttpClient),
     #[cfg(feature = "shadowsocks")]
     ShadowTls(Shadowtls),
     #[cfg(feature = "shadowsocks")]
@@ -79,6 +82,7 @@ impl TransportLayer {
             Self::Grpc(t) => Transport::proxy_stream(t, stream).await,
             Self::H2(t) => Transport::proxy_stream(t, stream).await,
             Self::Ws(t) => Transport::proxy_stream(t, stream).await,
+            Self::Xhttp(t) => Transport::proxy_stream(t, stream).await,
             #[cfg(feature = "shadowsocks")]
             Self::ShadowTls(t) => Transport::proxy_stream(t, stream).await,
             #[cfg(feature = "shadowsocks")]
