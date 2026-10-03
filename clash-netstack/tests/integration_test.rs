@@ -5,9 +5,10 @@ mod common;
 mod mock_tun;
 
 use common::{
-    build_tcp_ack, build_tcp_syn_packet, build_tcp_syn_packet_with_port,
-    build_udp_packet, init, is_rst, is_syn_ack, parse_server_isn, parse_tcp_data,
-    tcp_dst_port,
+    build_icmpv4_echo_request, build_icmpv6_echo_request, build_tcp_ack,
+    build_tcp_syn_packet, build_tcp_syn_packet_with_port, build_udp_packet, init,
+    is_icmpv4_echo_reply, is_icmpv6_echo_reply, is_rst, is_syn_ack,
+    parse_server_isn, parse_tcp_data, tcp_dst_port,
 };
 use mock_tun::MockTun;
 
@@ -388,4 +389,95 @@ async fn test_new_connection_during_active_transfer() {
     assert_eq!(relay1_res.unwrap(), CONN1_BYTES, "relay1 bytes mismatch");
     assert_eq!(client1_res.unwrap(), CONN1_BYTES, "client1 bytes mismatch");
     client2_res.unwrap(); // panics if client2 saw RST or timed out
+}
+
+#[tokio::test]
+async fn test_stack_icmpv4_echo_reply() {
+    init();
+
+    let (mut mock_tun, tun_in, _) = MockTun::new();
+    let (stack, _tcp_listener, _udp_socket) = NetStack::new();
+    let (mut stack_sink, mut stack_stream) = stack.split();
+
+    // Forward packets from mock_tun to stack_sink (TUN -> NetStack)
+    tokio::spawn(async move {
+        while let Some(pkt) = mock_tun.next().await {
+            let packet = Packet::new(pkt);
+            if stack_sink.send(packet).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    // Send an ICMPv4 Echo Request packet to any IP
+    let icmp_req = build_icmpv4_echo_request(
+        [192, 168, 1, 100],
+        [1, 1, 1, 1],
+        0x1234,
+        0x0001,
+        b"ping test payload 1234",
+    );
+    tun_in.send(icmp_req).unwrap();
+
+    let reply = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        stack_stream.next().await
+    })
+    .await
+    .expect("timed out waiting for ICMPv4 Echo Reply")
+    .expect("no packet received from stack")
+    .expect("error receiving packet");
+
+    assert!(
+        is_icmpv4_echo_reply(reply.data(), 0x1234, 0x0001),
+        "Expected ICMPv4 Echo Reply"
+    );
+}
+
+#[tokio::test]
+async fn test_stack_icmpv6_echo_reply() {
+    init();
+
+    let (mut mock_tun, tun_in, _) = MockTun::new();
+    let (stack, _tcp_listener, _udp_socket) = NetStack::new();
+    let (mut stack_sink, mut stack_stream) = stack.split();
+
+    // Forward packets from mock_tun to stack_sink (TUN -> NetStack)
+    tokio::spawn(async move {
+        while let Some(pkt) = mock_tun.next().await {
+            let packet = Packet::new(pkt);
+            if stack_sink.send(packet).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    let src_ip: [u8; 16] = [
+        0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01,
+    ];
+    let dst_ip: [u8; 16] = [
+        0x26, 0x06, 0x47, 0x00, 0x47, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0x11, 0x11,
+    ];
+
+    // Send an ICMPv6 Echo Request packet
+    let icmp_req = build_icmpv6_echo_request(
+        src_ip,
+        dst_ip,
+        0x5678,
+        0x0002,
+        b"ping v6 test payload",
+    );
+    tun_in.send(icmp_req).unwrap();
+
+    let reply = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        stack_stream.next().await
+    })
+    .await
+    .expect("timed out waiting for ICMPv6 Echo Reply")
+    .expect("no packet received from stack")
+    .expect("error receiving packet");
+
+    assert!(
+        is_icmpv6_echo_reply(reply.data(), 0x5678, 0x0002),
+        "Expected ICMPv6 Echo Reply"
+    );
 }

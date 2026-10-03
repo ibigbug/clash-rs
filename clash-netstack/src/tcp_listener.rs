@@ -346,6 +346,7 @@ impl TcpListener {
             Arc<TcpStreamHandle>,
         > = HashMap::new();
         let mut next_poll = None;
+        let mut poll_requested = false;
 
         loop {
             trace!(
@@ -354,20 +355,22 @@ impl TcpListener {
                 socket_maps.len()
             );
 
-            let should_poll_now = match (next_poll, socket_maps.len()) {
-                (None, 0) => {
-                    trace!("No sockets to poll, waiting indefinitely");
-                    false
-                }
-                (None, _) => {
-                    trace!("Polling sockets with no delay");
-                    true
-                }
-                (Some(dur), _) => {
-                    trace!("Polling sockets with delay: {dur:?}");
-                    false
-                }
-            };
+            let should_poll_now = poll_requested
+                || match (next_poll, socket_maps.len()) {
+                    (None, 0) => {
+                        trace!("No sockets to poll, waiting indefinitely");
+                        false
+                    }
+                    (None, _) => {
+                        trace!("Polling sockets with no delay");
+                        true
+                    }
+                    (Some(dur), _) => {
+                        trace!("Polling sockets with delay: {dur:?}");
+                        false
+                    }
+                };
+            poll_requested = false;
             let now = smoltcp::time::Instant::now();
 
             if should_poll_now {
@@ -561,8 +564,9 @@ impl TcpListener {
             } else {
                 tokio::select! {
                     Some(event) = notifier_rx.recv() => {
-                        trace!("Received iface event, will poll sockets");
+                        trace!("Received iface event: {event:?}, will poll sockets");
                         next_poll = None; // reset the next poll time
+                        poll_requested = true;
                         match event {
                             IfaceEvent::TcpStream(stream) => {
                                 let socket_handle = sockets.add(stream.0);
@@ -586,6 +590,7 @@ impl TcpListener {
                     _ = tokio::time::sleep(next_poll.unwrap_or(Duration::MAX)) => {
                         trace!("Woke up to poll sockets after delay");
                         next_poll = None; // reset the next poll time
+                        poll_requested = true;
                     }
                 }
             }
