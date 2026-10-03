@@ -102,6 +102,7 @@ pub(super) fn convert(
                 fw_mark: c.routing_mark,
             },
             udp: true,
+            dns_hijack: true,
         })
     {
         warn!("Duplicate TPROXY inbound listener found: {}", tproxy_port);
