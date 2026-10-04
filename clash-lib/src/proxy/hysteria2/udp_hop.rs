@@ -20,6 +20,7 @@ struct HopState {
     cur_conn: Arc<dyn AsyncUdpSocket>,
     last_hop_at: Instant,
     cur_port: u16,
+    recv_waker: Option<std::task::Waker>,
 }
 
 #[derive(Debug)]
@@ -92,6 +93,7 @@ impl UdpHop {
             cur_conn,
             last_hop_at: now,
             cur_port,
+            recv_waker: None,
         };
 
         Ok(Self {
@@ -120,6 +122,7 @@ impl UdpHop {
             cur_conn,
             last_hop_at: now,
             cur_port,
+            recv_waker: None,
         };
 
         Self {
@@ -186,6 +189,9 @@ impl UdpHop {
                     state.cur_conn = new_conn;
                     state.cur_port = new_port;
                     state.last_hop_at = now;
+                    if let Some(waker) = state.recv_waker.take() {
+                        waker.wake();
+                    }
                 }
                 Err(e) => {
                     tracing::error!(
@@ -245,6 +251,7 @@ impl AsyncUdpSocket for UdpHop {
             if state.prev_conn.is_some() && now >= state.prev_retire_at {
                 state.prev_conn = None;
             }
+            state.recv_waker = Some(cx.waker().clone());
             (state.prev_conn.clone(), state.cur_conn.clone())
         };
 
@@ -502,9 +509,13 @@ mod tests {
         assert_ne!(initial_local_addr, new_local_addr);
 
         // 2. Send packet from server to the PREVIOUS socket
-        server_sock
-            .send_to(b"prev_packet", initial_local_addr)
-            .unwrap();
+        // Note: the socket was bound to 0.0.0.0:XYZ (INADDR_ANY); sending to
+        // 0.0.0.0 fails on macOS/Darwin with EHOSTUNREACH ("No route to
+        // host"), so we send to server_addr.ip() (127.0.0.1) with the
+        // target socket's port.
+        let prev_target =
+            SocketAddr::new(server_addr.ip(), initial_local_addr.port());
+        server_sock.send_to(b"prev_packet", prev_target).unwrap();
 
         let mut buf = [0u8; 64];
         let mut io_slices = [io::IoSliceMut::new(&mut buf)];
@@ -543,7 +554,8 @@ mod tests {
         }
 
         // 3. Send packet from server to the CURRENT socket
-        server_sock.send_to(b"cur_packet", new_local_addr).unwrap();
+        let cur_target = SocketAddr::new(server_addr.ip(), new_local_addr.port());
+        server_sock.send_to(b"cur_packet", cur_target).unwrap();
 
         let mut buf2 = [0u8; 64];
         let mut io_slices2 = [io::IoSliceMut::new(&mut buf2)];
@@ -579,5 +591,58 @@ mod tests {
             }
             other => panic!("expected Poll::Ready(Ok(1)), got {:?}", other),
         }
+    }
+
+    #[tokio::test]
+    async fn test_check_hop_wakes_recv_driver() {
+        use std::sync::atomic::AtomicBool;
+
+        struct TestWaker(Arc<AtomicBool>);
+        impl std::task::Wake for TestWaker {
+            fn wake(self: Arc<Self>) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
+        let port_gen = PortGenerator::new(443)
+            .parse_ports_str("1000-1005")
+            .unwrap();
+        let hop = UdpHop::new(
+            SocketAddr::from(([127, 0, 0, 1], 443)),
+            port_gen,
+            Some(Duration::from_millis(10)),
+            None,
+            #[cfg(target_os = "linux")]
+            None,
+        )
+        .unwrap();
+
+        let woken = Arc::new(AtomicBool::new(false));
+        let waker = Waker::from(Arc::new(TestWaker(woken.clone())));
+        let mut cx = Context::from_waker(&waker);
+
+        let mut buf = [0u8; 16];
+        let mut io_slices = [io::IoSliceMut::new(&mut buf)];
+        let mut metas = [quinn::udp::RecvMeta {
+            addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            len: 0,
+            stride: 0,
+            dst_ip: None,
+            ecn: None,
+        }];
+
+        // Poll recv to register the waker
+        assert!(
+            hop.poll_recv(&mut cx, &mut io_slices, &mut metas)
+                .is_pending()
+        );
+        assert!(!woken.load(Ordering::SeqCst));
+
+        // Advance time past hop interval and check hop
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        hop.check_hop();
+
+        // The receive waker must have been triggered!
+        assert!(woken.load(Ordering::SeqCst));
     }
 }
