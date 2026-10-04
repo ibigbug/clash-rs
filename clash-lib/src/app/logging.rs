@@ -170,28 +170,38 @@ fn setup_logging_inner(
     #[cfg(feature = "telemetry")]
     let tracer_provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
         // Customize sampling strategy
-        .with_sampler(opentelemetry_sdk::trace::Sampler::ParentBased(Box::new(opentelemetry_sdk::trace::Sampler::TraceIdRatioBased(
-            if cfg!(debug_assertions) {
-                1.0 // 100% sampling in development
-            } else {
-                0.1 // 10% sampling in production
-            },
-        ))))
+        .with_sampler(opentelemetry_sdk::trace::Sampler::ParentBased(Box::new(
+            opentelemetry_sdk::trace::Sampler::TraceIdRatioBased(
+                if cfg!(debug_assertions) {
+                    1.0 // 100% sampling in development
+                } else {
+                    0.1 // 10% sampling in production
+                },
+            ),
+        )))
         .with_id_generator(opentelemetry_sdk::trace::RandomIdGenerator::default())
-        .with_resource(opentelemetry_sdk::Resource::builder()
-            .with_service_name(env!("CARGO_PKG_NAME"))
-            .with_schema_url(
-                [
-                    opentelemetry::KeyValue::new(SERVICE_VERSION, env!("CARGO_PKG_VERSION")),
-                    opentelemetry::KeyValue::new(DEPLOYMENT_ENVIRONMENT_NAME,  if cfg!(debug_assertions) {
-                        "development"
-                    } else {
-                        "production"
-                    }),
-            ],
-            SCHEMA_URL,
+        .with_resource(
+            opentelemetry_sdk::Resource::builder()
+                .with_service_name(env!("CARGO_PKG_NAME"))
+                .with_schema_url(
+                    [
+                        opentelemetry::KeyValue::new(
+                            SERVICE_VERSION,
+                            env!("CARGO_PKG_VERSION"),
+                        ),
+                        opentelemetry::KeyValue::new(
+                            DEPLOYMENT_ENVIRONMENT_NAME,
+                            if cfg!(debug_assertions) {
+                                "development"
+                            } else {
+                                "production"
+                            },
+                        ),
+                    ],
+                    SCHEMA_URL,
+                )
+                .build(),
         )
-        .build())
         .with_batch_exporter(exporter)
         .build();
     #[cfg(feature = "telemetry")]
@@ -247,19 +257,20 @@ fn setup_logging_inner(
         #[cfg(feature = "telemetry")]
         {
             subscriber
-        .with(filter) // Global filter
-        .with(tracing_chrome)
-        .with(OpenTelemetryLayer::new(tracer))
-        .with(collector.with_filter(exclude.clone()))
-        .with(log_to_file_layer)
-        .with(log_stdout_layer)
+                .with(filter) // Global filter
+                .with(tracing_chrome)
+                .with(OpenTelemetryLayer::new(tracer))
+                .with(collector.with_filter(exclude.clone()))
+                .with(log_to_file_layer)
+                .with(log_stdout_layer)
         }
         #[cfg(not(feature = "telemetry"))]
         {
-            subscriber.with(filter) // Global filter
-        .with(collector.with_filter(exclude.clone()))
-        .with(log_to_file_layer)
-        .with(log_stdout_layer)
+            subscriber
+                .with(filter) // Global filter
+                .with(collector.with_filter(exclude.clone()))
+                .with(log_to_file_layer)
+                .with(log_stdout_layer)
         }
     };
 

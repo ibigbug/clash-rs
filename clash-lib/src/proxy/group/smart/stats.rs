@@ -306,7 +306,9 @@ impl TrafficStatsCollector {
             .unwrap_or(0.0);
 
         // Calculate request frequency (requests per second)
-        let request_frequency = self.request_counts.get(session_id)
+        let request_frequency = self
+            .request_counts
+            .get(session_id)
             .map(|requests| requests.len() as f64 / 60.0) // requests per minute -> per second
             .unwrap_or(0.0);
 
