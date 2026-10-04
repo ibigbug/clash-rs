@@ -385,6 +385,8 @@ pub struct OutboundWireguard {
 #[serde(rename_all = "kebab-case")]
 pub struct OutboundTor {
     pub name: String,
+    pub interface: Option<String>,
+    pub routing_mark: Option<u32>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Debug, Default)]

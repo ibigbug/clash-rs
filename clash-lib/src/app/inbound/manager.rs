@@ -78,6 +78,7 @@ pub struct InboundEndpoint {
 pub struct InboundManager {
     dispatcher: Arc<Dispatcher>,
     authenticator: ThreadSafeAuthenticator,
+    dns_resolver: Option<ThreadSafeDNSResolver>,
 
     /// Inbound options for each inbound type -> listening Task
     inbound_handlers: Arc<RwLock<HashMap<InboundOpts, StaticHandleEntry>>>,
@@ -98,6 +99,7 @@ impl Runner for InboundManager {
         let dispatcher = self.dispatcher.clone();
         let authenticator = self.authenticator.clone();
         let cancellation_token = self.cancellation_token.clone();
+        let dns_resolver = self.dns_resolver.clone();
 
         tokio::spawn(async move {
             Self::start_all_listeners(
@@ -105,6 +107,7 @@ impl Runner for InboundManager {
                 authenticator,
                 inbound_handlers,
                 cancellation_token,
+                dns_resolver,
             )
             .await;
         });
@@ -124,6 +127,7 @@ impl InboundManager {
         authenticator: ThreadSafeAuthenticator,
         inbounds_opt: HashSet<InboundOpts>,
         cancellation_token: Option<tokio_util::sync::CancellationToken>,
+        dns_resolver: Option<ThreadSafeDNSResolver>,
     ) -> Self {
         Self {
             inbound_handlers: Arc::new(RwLock::new(
@@ -144,6 +148,7 @@ impl InboundManager {
             inbound_providers: Arc::new(RwLock::new(HashMap::new())),
             dispatcher,
             authenticator,
+            dns_resolver,
             cancellation_token: cancellation_token.unwrap_or_default(),
         }
     }
@@ -198,6 +203,7 @@ impl InboundManager {
             let authenticator = self.authenticator.clone();
             let cancellation_token = self.cancellation_token.clone();
             let provider_name = name.clone();
+            let dns_resolver = dns_resolver.clone();
 
             let on_update = move |new_opts: Vec<InboundOpts>| {
                 let provider_handles = provider_handles.clone();
@@ -205,6 +211,7 @@ impl InboundManager {
                 let authenticator = authenticator.clone();
                 let cancellation_token = cancellation_token.clone();
                 let provider_name = provider_name.clone();
+                let dns_resolver = dns_resolver.clone();
 
                 Box::pin(async move {
                     let mut provider_handles_guard = provider_handles.write().await;
@@ -326,6 +333,7 @@ impl InboundManager {
                             dispatcher.clone(),
                             authenticator.clone(),
                             users_rx,
+                            Some(dns_resolver.clone()),
                         )
                         .map(|runners| {
                             tokio::spawn(async move {
@@ -380,6 +388,7 @@ impl InboundManager {
         authenticator: ThreadSafeAuthenticator,
         inbound_handlers: Arc<RwLock<HashMap<InboundOpts, StaticHandleEntry>>>,
         cancellation_token: tokio_util::sync::CancellationToken,
+        dns_resolver: Option<ThreadSafeDNSResolver>,
     ) {
         for (opts, entry) in inbound_handlers.write().await.iter_mut() {
             let cancellation_token = cancellation_token.clone();
@@ -414,6 +423,7 @@ impl InboundManager {
                 dispatcher.clone(),
                 authenticator.clone(),
                 users_rx,
+                dns_resolver.clone(),
             )
             .map(|r| {
                 tokio::spawn(async move {
@@ -497,11 +507,13 @@ impl InboundManager {
         let dispatcher = self.dispatcher.clone();
         let authenticator = self.authenticator.clone();
         let cancellation_token = self.cancellation_token.clone();
+        let dns_resolver = self.dns_resolver.clone();
         Self::start_all_listeners(
             dispatcher,
             authenticator,
             inbound_handlers,
             cancellation_token,
+            dns_resolver,
         )
         .await;
         Ok(())

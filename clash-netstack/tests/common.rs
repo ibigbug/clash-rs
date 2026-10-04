@@ -257,3 +257,142 @@ pub fn is_syn_ack(packet: &[u8]) -> bool {
     let flags = packet[tcp_offset + 13];
     (flags & 0x12) == 0x12 // SYN and ACK bits set
 }
+
+pub fn build_icmpv4_echo_request(
+    src_ip: [u8; 4],
+    dst_ip: [u8; 4],
+    ident: u16,
+    seq: u16,
+    payload: &[u8],
+) -> Bytes {
+    let total_len = 20 + 8 + payload.len();
+    let mut buf = BytesMut::with_capacity(total_len);
+    // IPv4 header
+    buf.put_slice(&[
+        0x45,
+        0x00,
+        (total_len >> 8) as u8,
+        (total_len & 0xFF) as u8,
+        0x00,
+        0x00,
+        0x40,
+        0x00, // ID, Flags/Frag
+        0x40,
+        0x01,
+        0x00,
+        0x00, // TTL=64, Proto=1 (ICMP), Checksum=0
+        src_ip[0],
+        src_ip[1],
+        src_ip[2],
+        src_ip[3],
+        dst_ip[0],
+        dst_ip[1],
+        dst_ip[2],
+        dst_ip[3],
+    ]);
+    let ip_sum = ipv4_checksum(&buf[..20]);
+    buf[10..12].copy_from_slice(&ip_sum.to_be_bytes());
+
+    // ICMPv4 Echo Request
+    let icmp_start = buf.len();
+    buf.put_u8(0x08); // Echo Request
+    buf.put_u8(0x00); // Code 0
+    buf.put_u16(0x0000); // Checksum placeholder
+    buf.put_u16(ident);
+    buf.put_u16(seq);
+    buf.put_slice(payload);
+
+    let icmp_sum = ipv4_checksum(&buf[icmp_start..]);
+    buf[icmp_start + 2..icmp_start + 4].copy_from_slice(&icmp_sum.to_be_bytes());
+    buf.freeze()
+}
+
+pub fn is_icmpv4_echo_reply(
+    packet: &[u8],
+    expected_ident: u16,
+    expected_seq: u16,
+) -> bool {
+    if packet.len() < 28 || packet[9] != 0x01 {
+        return false;
+    }
+    let ihl = (packet[0] & 0x0F) as usize * 4;
+    if packet.len() < ihl + 8 {
+        return false;
+    }
+    let icmp_type = packet[ihl];
+    let icmp_code = packet[ihl + 1];
+    let ident = u16::from_be_bytes([packet[ihl + 4], packet[ihl + 5]]);
+    let seq = u16::from_be_bytes([packet[ihl + 6], packet[ihl + 7]]);
+    icmp_type == 0
+        && icmp_code == 0
+        && ident == expected_ident
+        && seq == expected_seq
+}
+
+pub fn build_icmpv6_echo_request(
+    src_ip: [u8; 16],
+    dst_ip: [u8; 16],
+    ident: u16,
+    seq: u16,
+    payload: &[u8],
+) -> Bytes {
+    let icmp_len = 8 + payload.len();
+    let mut buf = BytesMut::with_capacity(40 + icmp_len);
+    // IPv6 Header (40 bytes)
+    buf.put_u32(0x60000000); // Version 6, Traffic Class 0, Flow Label 0
+    buf.put_u16(icmp_len as u16); // Payload Length
+    buf.put_u8(58); // Next Header: ICMPv6
+    buf.put_u8(64); // Hop Limit
+    buf.put_slice(&src_ip);
+    buf.put_slice(&dst_ip);
+
+    // ICMPv6 Echo Request
+    let icmp_start = buf.len();
+    buf.put_u8(128); // Type 128 (Echo Request)
+    buf.put_u8(0); // Code 0
+    buf.put_u16(0); // Checksum placeholder
+    buf.put_u16(ident);
+    buf.put_u16(seq);
+    buf.put_slice(payload);
+
+    // Compute ICMPv6 checksum with IPv6 pseudo-header
+    let mut sum = 0u32;
+    for i in (0..16).step_by(2) {
+        sum += u16::from_be_bytes([src_ip[i], src_ip[i + 1]]) as u32;
+        sum += u16::from_be_bytes([dst_ip[i], dst_ip[i + 1]]) as u32;
+    }
+    sum += (icmp_len as u32) & 0xFFFF;
+    sum += 58u32;
+    let mut i = icmp_start;
+    while i + 1 < buf.len() {
+        sum += u16::from_be_bytes([buf[i], buf[i + 1]]) as u32;
+        i += 2;
+    }
+    if i < buf.len() {
+        sum += (buf[i] as u32) << 8;
+    }
+    while (sum >> 16) != 0 {
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    }
+    let icmp6_sum = !(sum as u16);
+    buf[icmp_start + 2..icmp_start + 4].copy_from_slice(&icmp6_sum.to_be_bytes());
+    buf.freeze()
+}
+
+pub fn is_icmpv6_echo_reply(
+    packet: &[u8],
+    expected_ident: u16,
+    expected_seq: u16,
+) -> bool {
+    if packet.len() < 48 || packet[6] != 58 {
+        return false;
+    }
+    let icmp_type = packet[40];
+    let icmp_code = packet[41];
+    let ident = u16::from_be_bytes([packet[44], packet[45]]);
+    let seq = u16::from_be_bytes([packet[46], packet[47]]);
+    icmp_type == 129
+        && icmp_code == 0
+        && ident == expected_ident
+        && seq == expected_seq
+}

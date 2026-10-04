@@ -1,8 +1,24 @@
 use crate::{app::router::rules::RuleMatcher, session::Session};
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PortRange {
+    Single(u16),
+    Range(u16, u16),
+}
+
+impl PortRange {
+    pub fn contains(&self, port: u16) -> bool {
+        match self {
+            Self::Single(p) => *p == port,
+            Self::Range(start, end) => port >= *start && port <= *end,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct Port {
-    pub port: u16,
+    pub ports: Vec<PortRange>,
+    pub raw: String,
     pub target: String,
     pub is_src: bool,
 }
@@ -14,18 +30,19 @@ impl std::fmt::Display for Port {
             "{} {} port {}",
             self.target,
             if self.is_src { "src" } else { "dst" },
-            self.port
+            self.raw
         )
     }
 }
 
 impl RuleMatcher for Port {
     fn apply(&self, sess: &Session) -> bool {
-        if self.is_src {
-            sess.source.port() == self.port
+        let p = if self.is_src {
+            sess.source.port()
         } else {
-            sess.destination.port() == self.port
-        }
+            sess.destination.port()
+        };
+        self.ports.iter().any(|range| range.contains(p))
     }
 
     fn target(&self) -> &str {
@@ -33,10 +50,29 @@ impl RuleMatcher for Port {
     }
 
     fn payload(&self) -> String {
-        self.port.to_string()
+        self.raw.clone()
     }
 
     fn type_name(&self) -> &str {
-        "Port"
+        if self.is_src { "SRC-PORT" } else { "DST-PORT" }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_port_range_contains() {
+        let single = PortRange::Single(80);
+        assert!(single.contains(80));
+        assert!(!single.contains(81));
+
+        let range = PortRange::Range(8000, 8080);
+        assert!(range.contains(8000));
+        assert!(range.contains(8050));
+        assert!(range.contains(8080));
+        assert!(!range.contains(7999));
+        assert!(!range.contains(8081));
     }
 }

@@ -45,6 +45,8 @@ pub enum InboundOpts {
         common_opts: CommonInboundOpts,
         #[serde(default = "default_bool_true")]
         udp: bool,
+        #[serde(default = "default_bool_true")]
+        dns_hijack: bool,
     },
     #[cfg(feature = "redir")]
     #[serde(alias = "redir")]
@@ -155,12 +157,14 @@ impl PartialEq for InboundOpts {
                 InboundOpts::TProxy {
                     common_opts: a,
                     udp: ua,
+                    dns_hijack: da,
                 },
                 InboundOpts::TProxy {
                     common_opts: b,
                     udp: ub,
+                    dns_hijack: db,
                 },
-            ) => a == b && ua == ub,
+            ) => a == b && ua == ub && da == db,
             #[cfg(feature = "redir")]
             (
                 InboundOpts::Redir { common_opts: a },
@@ -250,9 +254,14 @@ impl std::hash::Hash for InboundOpts {
                 udp.hash(state);
             }
             #[cfg(feature = "tproxy")]
-            InboundOpts::TProxy { common_opts, udp } => {
+            InboundOpts::TProxy {
+                common_opts,
+                udp,
+                dns_hijack,
+            } => {
                 common_opts.hash(state);
                 udp.hash(state);
+                dns_hijack.hash(state);
             }
             #[cfg(feature = "redir")]
             InboundOpts::Redir { common_opts } => common_opts.hash(state),

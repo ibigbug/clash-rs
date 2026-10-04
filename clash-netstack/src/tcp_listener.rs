@@ -561,7 +561,7 @@ impl TcpListener {
             } else {
                 tokio::select! {
                     Some(event) = notifier_rx.recv() => {
-                        trace!("Received iface event, will poll sockets");
+                        trace!("Received iface event: {event:?}, will poll sockets");
                         next_poll = None; // reset the next poll time
                         match event {
                             IfaceEvent::TcpStream(stream) => {
@@ -580,6 +580,13 @@ impl TcpListener {
                             }
                             IfaceEvent::Icmp => {
                                 trace!("ICMP packet received, will poll sockets");
+                                if socket_maps.is_empty() {
+                                    iface.poll(
+                                        smoltcp::time::Instant::now(),
+                                        device,
+                                        &mut sockets,
+                                    );
+                                }
                             }
                         }
                     }

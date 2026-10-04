@@ -16,7 +16,7 @@ use crate::{
     proxy::{
         OutboundHandler,
         direct::datagram::OutboundDatagramImpl,
-        utils::{new_dual_stack_udp_socket, new_tcp_stream},
+        utils::{new_dual_stack_udp_socket, new_tcp_stream_happy_eyeballs},
     },
     session::Session,
 };
@@ -70,14 +70,32 @@ impl OutboundHandler for Handler {
         sess: &Session,
         resolver: ThreadSafeDNSResolver,
     ) -> std::io::Result<BoxedInstrumentedStream> {
-        let remote_ip = resolver
-            .resolve(sess.destination.host().as_str(), false)
-            .map_err(map_io_error)
-            .await?
-            .ok_or_else(|| std::io::Error::other("no dns result"))?;
+        let port = sess.destination.port();
+        let addrs: Vec<std::net::SocketAddr> =
+            if let Some(ip) = sess.destination.ip() {
+                vec![std::net::SocketAddr::new(ip, port)]
+            } else {
+                let host = sess.destination.host();
+                let ips = resolver
+                    .resolve_all(host.as_str(), false)
+                    .map_err(map_io_error)
+                    .await?;
+                if ips.is_empty() {
+                    let ip = resolver
+                        .resolve(host.as_str(), false)
+                        .map_err(map_io_error)
+                        .await?
+                        .ok_or_else(|| std::io::Error::other("no dns result"))?;
+                    vec![std::net::SocketAddr::new(ip, port)]
+                } else {
+                    ips.into_iter()
+                        .map(|ip| std::net::SocketAddr::new(ip, port))
+                        .collect()
+                }
+            };
 
-        let s = new_tcp_stream(
-            (remote_ip, sess.destination.port()).into(),
+        let s = new_tcp_stream_happy_eyeballs(
+            &addrs,
             sess.iface.as_ref(),
             #[cfg(target_os = "linux")]
             sess.so_mark,
