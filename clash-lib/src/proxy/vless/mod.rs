@@ -426,7 +426,7 @@ mod tests {
                     ]
                 },
                 "xhttpSettings": {
-                    "path": "/xhttp",
+                    "path": "/xhttp/",
                     "host": "example.org",
                     "mode": "auto"
                 }
@@ -470,7 +470,7 @@ mod tests {
         let host_port = alloc_docker_port();
         let xhttp_client = XhttpClient::new(
             "example.org".to_owned(),
-            "/xhttp".try_into()?,
+            "/xhttp/".try_into()?,
             "auto".to_owned(),
             HashMap::new(),
             None,

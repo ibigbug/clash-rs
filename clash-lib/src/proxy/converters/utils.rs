@@ -90,10 +90,22 @@ impl TryFrom<(&XhttpOpt, &CommonConfigOptions)> for XhttpClient {
             })
             .unwrap_or_else(|| common.server.clone());
         let path_str = x.path.as_deref().unwrap_or("/");
-        let path = if path_str.starts_with('/') {
-            path_str.to_owned()
+        let (path_part, query_part) = match path_str.split_once('?') {
+            Some((p, q)) => (p, Some(q)),
+            None => (path_str, None),
+        };
+        let mut normalized = if path_part.starts_with('/') {
+            path_part.to_string()
         } else {
-            format!("/{path_str}")
+            format!("/{path_part}")
+        };
+        if !normalized.ends_with('/') {
+            normalized.push('/');
+        }
+        let path = if let Some(q) = query_part {
+            format!("{normalized}?{q}")
+        } else {
+            normalized
         };
         let mode = x.mode.clone().unwrap_or_else(|| "auto".to_owned());
         let headers = x.headers.clone().unwrap_or_default();
@@ -124,4 +136,36 @@ pub fn decode_base64_public_key(base64_public_key: &str) -> Result<[u8; 32], Err
 pub fn decode_short_id(hex_short_id: &str) -> Result<Vec<u8>, Error> {
     hex::decode(hex_short_id)
         .map_err(|e| Error::InvalidConfig(format!("reality short-id hex: {e}")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_xhttp_client_path_normalization() {
+        let opt = XhttpOpt {
+            path: Some("/xhttp".into()),
+            host: Some("example.org".into()),
+            mode: Some("auto".into()),
+            headers: None,
+            x_padding_bytes: None,
+        };
+        let common = CommonConfigOptions {
+            server: "fallback.org".into(),
+            ..Default::default()
+        };
+
+        let client =
+            XhttpClient::try_from((&opt, &common)).expect("valid xhttp client");
+        assert_eq!(client.path.as_str(), "/xhttp/");
+
+        let opt_with_query = XhttpOpt {
+            path: Some("xhttp?k=v".into()),
+            ..opt
+        };
+        let client_query = XhttpClient::try_from((&opt_with_query, &common))
+            .expect("valid xhttp client");
+        assert_eq!(client_query.path.as_str(), "/xhttp/?k=v");
+    }
 }
