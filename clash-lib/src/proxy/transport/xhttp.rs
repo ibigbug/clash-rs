@@ -63,16 +63,8 @@ impl Client {
                 .map(|(_, v)| v.as_str())
                 .unwrap_or("");
 
-            let referer = if base.is_empty() {
-                let path_str = self.path.as_str();
-                let sep = if path_str.contains('?') { '&' } else { '?' };
-                format!("https://{}{}{sep}x_padding={pad}", self.host, path_str)
-            } else if !base.contains("x_padding=") {
-                let sep = if base.contains('?') { '&' } else { '?' };
-                format!("{base}{sep}x_padding={pad}")
-            } else {
-                base.to_string()
-            };
+            let referer =
+                apply_padding_to_referer(base, &self.host, self.path.as_str(), pad);
             request = request.header(http::header::REFERER, referer);
         } else if let Some((_, v)) = self
             .headers
@@ -89,6 +81,38 @@ impl Client {
         request
             .body(())
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+    }
+}
+
+fn apply_padding_to_referer(
+    base: &str,
+    host: &str,
+    path: &str,
+    pad: &str,
+) -> String {
+    let raw = if base.is_empty() {
+        format!("https://{host}{path}")
+    } else {
+        base.to_string()
+    };
+
+    if let Ok(mut parsed) = url::Url::parse(&raw) {
+        let has_exact_x_padding = parsed
+            .query_pairs()
+            .any(|(k, v)| k == "x_padding" && !v.is_empty());
+        if !has_exact_x_padding {
+            let mut pairs: Vec<(String, String)> = parsed
+                .query_pairs()
+                .filter(|(k, _)| k != "x_padding")
+                .map(|(k, v)| (k.into_owned(), v.into_owned()))
+                .collect();
+            pairs.push(("x_padding".to_string(), pad.to_string()));
+            parsed.query_pairs_mut().clear().extend_pairs(pairs);
+        }
+        parsed.to_string()
+    } else {
+        let sep = if raw.contains('?') { '&' } else { '?' };
+        format!("{raw}{sep}x_padding={pad}")
     }
 }
 
@@ -109,10 +133,16 @@ fn get_padding(x_padding_bytes: Option<&str>) -> Option<String> {
                 if start == 0 && end == 0 {
                     None
                 } else if start <= end {
-                    let len = crate::common::utils::rand_range(start..=end);
-                    Some("X".repeat(len))
+                    let min_val = std::cmp::max(start, 1);
+                    if min_val <= end {
+                        let len = crate::common::utils::rand_range(min_val..=end);
+                        Some("X".repeat(len))
+                    } else {
+                        None
+                    }
                 } else {
-                    Some("X".repeat(start))
+                    let min_val = std::cmp::max(start, 1);
+                    Some("X".repeat(min_val))
                 }
             } else if let Ok(n) = s.parse::<usize>() {
                 if n == 0 { None } else { Some("X".repeat(n)) }
@@ -261,5 +291,34 @@ mod tests {
             req.headers().get("referer").unwrap(),
             "https://mycdn.net/prefix?existing=1&x_padding=abc"
         );
+    }
+
+    #[test]
+    fn test_xhttp_client_req_referer_with_fragment() {
+        let mut headers = HashMap::new();
+        headers.insert(
+            "Referer".into(),
+            "https://mycdn.net/prefix?existing=1#my-frag".into(),
+        );
+        let client = Client::new(
+            "example.com".into(),
+            "/xhttp-test".try_into().unwrap(),
+            "auto".into(),
+            headers,
+            Some("abc".into()),
+        );
+
+        let req = client.req().expect("request build succeeds");
+        assert_eq!(
+            req.headers().get("referer").unwrap(),
+            "https://mycdn.net/prefix?existing=1&x_padding=abc#my-frag"
+        );
+    }
+
+    #[test]
+    fn test_xhttp_client_req_zero_one_range_padding() {
+        let pad = get_padding(Some("0-1"));
+        assert!(pad.is_some());
+        assert_eq!(pad.unwrap().len(), 1);
     }
 }
