@@ -269,7 +269,7 @@ pub async fn new_tcp_stream_happy_eyeballs(
 }
 
 #[instrument(skip(so_mark))]
-pub async fn new_udp_socket(
+pub fn new_std_udp_socket(
     src: Option<SocketAddr>,
     iface: Option<&OutboundInterface>,
     #[cfg(target_os = "linux")] so_mark: Option<u32>,
@@ -277,7 +277,7 @@ pub async fn new_udp_socket(
     // If not provided, the family will be determined based on the source
     // address or interface.
     family_hint: Option<std::net::SocketAddr>,
-) -> std::io::Result<UdpSocket> {
+) -> std::io::Result<std::net::UdpSocket> {
     // Determine the socket family based on the source address or interface
     // logic:
     // - If family_hint is provided, use it.
@@ -367,7 +367,27 @@ pub async fn new_udp_socket(
     socket.set_broadcast(true)?;
     socket.set_nonblocking(true)?;
 
-    UdpSocket::from_std(socket.into())
+    Ok(socket.into())
+}
+
+#[instrument(skip(so_mark))]
+pub async fn new_udp_socket(
+    src: Option<SocketAddr>,
+    iface: Option<&OutboundInterface>,
+    #[cfg(target_os = "linux")] so_mark: Option<u32>,
+    // Optional family hint for the socket.
+    // If not provided, the family will be determined based on the source
+    // address or interface.
+    family_hint: Option<std::net::SocketAddr>,
+) -> std::io::Result<UdpSocket> {
+    let std_socket = new_std_udp_socket(
+        src,
+        iface,
+        #[cfg(target_os = "linux")]
+        so_mark,
+        family_hint,
+    )?;
+    UdpSocket::from_std(std_socket)
 }
 
 /// Convert ipv6 mapped ipv4 address back to ipv4. Other address remain

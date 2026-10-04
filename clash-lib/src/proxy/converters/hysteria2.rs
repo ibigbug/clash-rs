@@ -47,6 +47,24 @@ impl PortGenerator {
         }
     }
 
+    pub fn all_ports(&self) -> Vec<u16> {
+        let mut list =
+            Vec::with_capacity(1 + self.ports.len() + self.range.len() * 10);
+        list.push(self.default);
+        let mut other = Vec::new();
+        other.extend_from_slice(&self.ports);
+        for r in &self.range {
+            for p in r.clone() {
+                other.push(p);
+            }
+        }
+        other.sort_unstable();
+        other.dedup();
+        other.retain(|&p| p != self.default);
+        list.extend(other);
+        list
+    }
+
     pub fn parse_ports_str(self, ports: &str) -> Result<Self, ParseIntError> {
         if ports.is_empty() {
             return Ok(self);
@@ -109,6 +127,7 @@ impl TryFrom<OutboundHysteria2> for Handler {
         } else {
             None
         };
+        let hop_interval = value.hop_interval.map(std::time::Duration::from_secs);
         let opts = HystOption {
             name: value.name,
             sni: value.sni.or(addr.domain().map(|s| s.to_owned())),
@@ -119,6 +138,7 @@ impl TryFrom<OutboundHysteria2> for Handler {
             skip_cert_verify: value.skip_cert_verify,
             passwd: value.password,
             ports: ports_gen,
+            hop_interval,
             obfs,
             up_down: value.up.zip(value.down),
             ca_str: value.ca_str,
@@ -138,7 +158,11 @@ fn test_port_gen() {
     let p = PortGenerator::new(1000).parse_ports_str("").unwrap();
     let p = p.parse_ports_str("1001,1002,1003, 5000-5001").unwrap();
 
+    let all = p.all_ports();
+    assert_eq!(all, vec![1000, 1001, 1002, 1003, 5000, 5001]);
+
     for _ in 0..100 {
-        println!("{}", p.get());
+        let port = p.get();
+        assert!(all.contains(&port));
     }
 }

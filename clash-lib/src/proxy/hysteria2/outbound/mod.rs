@@ -66,6 +66,7 @@ pub struct HystOption {
     pub obfs: Option<Obfs>,
     pub skip_cert_verify: bool,
     pub alpn: Vec<String>,
+    pub hop_interval: Option<std::time::Duration>,
     #[allow(dead_code)]
     pub up_down: Option<(u64, u64)>,
     pub fingerprint: Option<String>,
@@ -208,44 +209,65 @@ impl Handler {
             .await
         };
 
-        let mut ep = if let Some(obfs) = self.opts.obfs.as_ref() {
-            match obfs {
-                Obfs::Salamander(salamander_obfs) => {
-                    let socket = create_socket().await?;
-                    let obfs = super::salamander::Salamander::new(
-                        socket.into_std()?,
-                        salamander_obfs.key.to_vec(),
-                    )?;
-
-                    quinn::Endpoint::new_with_abstract_socket(
-                        self.ep_config.clone(),
-                        None,
-                        Arc::new(obfs),
-                        Arc::new(TokioRuntime),
-                    )?
-                }
+        let mut ep = match (self.opts.ports.as_ref(), self.opts.obfs.as_ref()) {
+            (Some(port_gen), Some(Obfs::Salamander(salamander_obfs))) => {
+                let udp_hop = super::udp_hop::UdpHop::new(
+                    server_socket_addr,
+                    port_gen.clone(),
+                    self.opts.hop_interval,
+                    sess.iface.clone(),
+                    #[cfg(target_os = "linux")]
+                    sess.so_mark,
+                )?;
+                let obfs = super::salamander::Salamander::from_abstract(
+                    Arc::new(udp_hop),
+                    salamander_obfs.key.to_vec(),
+                );
+                quinn::Endpoint::new_with_abstract_socket(
+                    self.ep_config.clone(),
+                    None,
+                    Arc::new(obfs),
+                    Arc::new(TokioRuntime),
+                )?
             }
-        } else if let Some(port_gen) = self.opts.ports.as_ref() {
-            let udp_hop = super::udp_hop::UdpHop::new(
-                server_socket_addr.port(),
-                port_gen.clone(),
-                None,
-            )?;
-            quinn::Endpoint::new_with_abstract_socket(
-                self.ep_config.clone(),
-                None,
-                Arc::new(udp_hop),
-                Arc::new(TokioRuntime),
-            )?
-        } else {
-            let socket = create_socket().await?;
-
-            quinn::Endpoint::new(
-                self.ep_config.clone(),
-                None,
-                socket.into_std()?,
-                Arc::new(TokioRuntime),
-            )?
+            (Some(port_gen), None) => {
+                let udp_hop = super::udp_hop::UdpHop::new(
+                    server_socket_addr,
+                    port_gen.clone(),
+                    self.opts.hop_interval,
+                    sess.iface.clone(),
+                    #[cfg(target_os = "linux")]
+                    sess.so_mark,
+                )?;
+                quinn::Endpoint::new_with_abstract_socket(
+                    self.ep_config.clone(),
+                    None,
+                    Arc::new(udp_hop),
+                    Arc::new(TokioRuntime),
+                )?
+            }
+            (None, Some(Obfs::Salamander(salamander_obfs))) => {
+                let socket = create_socket().await?;
+                let obfs = super::salamander::Salamander::new(
+                    socket.into_std()?,
+                    salamander_obfs.key.to_vec(),
+                )?;
+                quinn::Endpoint::new_with_abstract_socket(
+                    self.ep_config.clone(),
+                    None,
+                    Arc::new(obfs),
+                    Arc::new(TokioRuntime),
+                )?
+            }
+            (None, None) => {
+                let socket = create_socket().await?;
+                quinn::Endpoint::new(
+                    self.ep_config.clone(),
+                    None,
+                    socket.into_std()?,
+                    Arc::new(TokioRuntime),
+                )?
+            }
         };
 
         ep.set_default_client_config(self.client_config.clone());
@@ -755,6 +777,7 @@ mod tests {
             skip_cert_verify: true,
             passwd: "passwd".to_owned(),
             ports: ports_gen,
+            hop_interval: None,
             obfs,
             up_down: Some((100, 100)),
             ca_str: None,

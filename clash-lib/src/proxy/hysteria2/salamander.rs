@@ -74,6 +74,13 @@ impl Salamander {
             obfs: SalamanderObfs::new(key),
         })
     }
+
+    pub fn from_abstract(inner: Arc<dyn AsyncUdpSocket>, key: Vec<u8>) -> Self {
+        Self {
+            inner,
+            obfs: SalamanderObfs::new(key),
+        }
+    }
 }
 
 impl std::fmt::Debug for Salamander {

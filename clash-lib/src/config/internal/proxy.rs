@@ -523,6 +523,9 @@ pub struct OutboundHysteria2 {
     pub port: u16,
     /// port hopping
     pub ports: Option<String>,
+    /// port hopping interval in seconds (defaults to 30s)
+    #[serde(alias = "hop_interval")]
+    pub hop_interval: Option<u64>,
     pub password: String,
     pub obfs: Option<Hysteria2Obfs>,
     pub obfs_password: Option<String>,
