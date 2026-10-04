@@ -37,8 +37,8 @@ jobs:
       enable-sccache: true
       only-clippy-tests-on-pr: true
 
-  release:
-    name: Release
+  release-watfaq:
+    name: Release (Watfaq)
     if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/v')))
     needs: [build]
     uses: rust-proxy/workflows/.github/workflows/release-publish.yml@e6adb5658af3a7bf9df4d323a1de4e92ce600ee3 # main
@@ -48,6 +48,18 @@ jobs:
       cliff-config: '.github/cliff.toml'
       create-latest-on-push: true
       target-repository: 'watfaq-legacy/clash-rs'
+
+  release-ibigbug:
+    name: Release (ibigbug)
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/v')))
+    needs: [build]
+    uses: rust-proxy/workflows/.github/workflows/release-publish.yml@e6adb5658af3a7bf9df4d323a1de4e92ce600ee3 # main
+    secrets:
+      token: ${{ secrets.ADMIN_PAT }}
+    with:
+      cliff-config: '.github/cliff.toml'
+      create-latest-on-push: true
+      target-repository: 'ibigbug/clash-rs'
 
   docker:
     name: Docker
