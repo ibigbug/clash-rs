@@ -10,7 +10,7 @@ use axum::{
     http::Request,
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::get,
+    routing::{any, get},
 };
 
 use http::{HeaderMap, StatusCode, header};
@@ -49,7 +49,7 @@ pub fn routes(
 ) -> Router<Arc<AppState>> {
     let state = ProxyState { components };
     Router::new()
-        .route("/", get(get_proxies))
+        .route("/", any(get_proxies))
         .nest(
             "/{name}",
             Router::new()
