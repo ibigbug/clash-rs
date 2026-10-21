@@ -210,6 +210,30 @@ impl OutboundManager {
         r
     }
 
+    /// Get only group proxies (Selector, URLTest, Fallback, LoadBalance, Relay,
+    /// Smart).
+    pub async fn get_groups(&self) -> HashMap<String, Box<dyn Serialize + Send>> {
+        let mut r = HashMap::new();
+
+        let handlers: Vec<(String, AnyOutboundHandler)> = self
+            .registry
+            .read()
+            .await
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+
+        for (k, v) in handlers {
+            if let Some(g) = v.try_as_group_handler() {
+                let mut m = g.as_map().await;
+                self.apply_common_proxy_fields(&mut m, &v, &k).await;
+                r.insert(k.clone(), Box::new(m) as _);
+            }
+        }
+
+        r
+    }
+
     pub async fn get_proxy(
         &self,
         proxy: &AnyOutboundHandler,
