@@ -62,11 +62,11 @@ fn splice(fd_in: RawFd, fd_out: RawFd, size: usize) -> isize {
             std::ptr::null_mut::<libc::loff_t>(),
             size,
             // NOTE: https://stackoverflow.com/questions/7463689/most-efficient-way-to-copy-a-file-in-linux/7464280#7464280
-            // Both the man page for splice and the comments in the kernel source
-            // say that the SPLICE_F_MOVE flag should provide this functionality.
-            // Unfortunately, the support for SPLICE_F_MOVE was yanked in 2.6.21
-            // (back in 2007) and never replaced. If you search the
-            // kernel sources, you will find SPLICE_F_MOVE is not actually
+            // Both the man page for splice and the comments in the kernel
+            // source say that the SPLICE_F_MOVE flag should provide this
+            // functionality. Unfortunately, the support for SPLICE_F_MOVE was
+            // yanked in 2.6.21 (back in 2007) and never replaced. If you search
+            // the kernel sources, you will find SPLICE_F_MOVE is not actually
             // referenced anywhere. The bottom line is that splice from
             // one file to another calls memcpy to move the data; it is not
             // zero-copy. libc::SPLICE_F_MORE | libc::SPLICE_F_NONBLOCK,

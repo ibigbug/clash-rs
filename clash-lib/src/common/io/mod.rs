@@ -471,8 +471,8 @@ pub async fn copy_bidirectional(
         // chained stream wrapper over tcpstream
         let b_raw = b.underlying_socket();
         match (a_raw, b_raw, trackers) {
-            // zero copy is only available when both streams are raw TcpStream and
-            // tracking is installed
+            // zero copy is only available when both streams are raw TcpStream
+            // and tracking is installed
             (Some(a), Some(b), Some((r_tracker, w_tracker))) => {
                 tracing::trace!("using zero copy for bidirectional copy");
                 zero_copy_bidirectional(

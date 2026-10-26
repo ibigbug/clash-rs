@@ -50,9 +50,9 @@ impl Transport for Client {
 const MAX_SKIP: usize = 105;
 
 enum ReadState {
-    // Fixed-size scratch buffer avoids a heap allocation on every record boundary.
-    // `target` is 105 for the initial handshake preamble, 3 for all subsequent
-    // records.
+    // Fixed-size scratch buffer avoids a heap allocation on every record
+    // boundary. `target` is 105 for the initial handshake preamble, 3 for all
+    // subsequent records.
     SkippingHeader {
         buf: [u8; MAX_SKIP],
         target: usize,

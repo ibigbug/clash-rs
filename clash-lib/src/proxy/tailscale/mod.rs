@@ -202,8 +202,8 @@ impl OutboundHandler for Handler {
     ) -> std::io::Result<BoxedInstrumentedDatagram> {
         let device = self.get_device().await?;
         let local_ip: IpAddr = match &sess.destination {
-            // Strict: IP literal family must match — fail fast rather than binding
-            // wrong family
+            // Strict: IP literal family must match — fail fast rather than
+            // binding wrong family
             SocksAddr::Ip(addr) if addr.is_ipv6() => {
                 device.ipv6_addr().await.map(IpAddr::V6).map_err(|e| {
                     io::Error::other(format!(

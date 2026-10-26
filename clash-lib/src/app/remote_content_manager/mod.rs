@@ -1113,7 +1113,8 @@ impl ProxyManager {
                 // Apply pattern-specific tuning parameters optimized for each
                 // traffic type
                 let mut tuning = match pattern.pattern_type {
-                    // Gaming: Ultra-low latency critical, high packet loss penalty
+                    // Gaming: Ultra-low latency critical, high packet loss
+                    // penalty
                     TrafficPatternType::Gaming => SiteTuning {
                         delay_weight: Some(0.1),
                         packet_loss_weight: Some(8000.0),
