@@ -68,6 +68,13 @@ pub struct ProxySetProvider {
 }
 
 impl ProxySetProvider {
+    /// Create a proxy-set provider.
+    ///
+    /// `cwd` is the directory used to resolve relative paths in provider
+    /// contents (currently Tailscale's `state-dir`). Pass `None` to leave
+    /// such paths unresolved, as tests do. The parameter remains in the
+    /// signature when the `tailscale` feature is disabled so that call sites
+    /// stay feature-independent.
     pub fn new(
         name: String,
         interval: Duration,

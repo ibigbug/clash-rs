@@ -106,6 +106,8 @@ impl Handler {
 
         let mut config = ::tailscale::Config {
             key_state,
+            // Ephemeral nodes are automatically removed from the tailnet
+            // when the device disconnects; mirror the outbound option.
             ephemeral: self.opts.ephemeral,
             ..Default::default()
         };

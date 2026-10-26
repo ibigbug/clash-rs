@@ -325,6 +325,12 @@ impl OutboundManager {
         Ok(())
     }
 
+    /// Load the plain (non-group) outbounds at startup.
+    ///
+    /// `cwd` is the directory containing the configuration and is used to
+    /// resolve relative paths such as Tailscale's `state-dir`. The parameter
+    /// remains in the signature when the `tailscale` feature is disabled so
+    /// that call sites stay feature-independent.
     pub fn load_plain_outbounds(
         outbounds: Vec<OutboundProxyProtocol>,
         #[cfg_attr(not(feature = "tailscale"), allow(unused_variables))]
@@ -937,6 +943,9 @@ impl OutboundManager {
         let proxy_manager = &self.proxy_manager;
         let provider_registry = &mut self.proxy_providers;
         let registry = self.registry.clone();
+        // Shared by every provider closure below; cloning a `PathBuf` per
+        // provider is cheap and keeps Tailscale `state-dir` resolution
+        // consistent with plain outbounds.
         let provider_cwd = PathBuf::from(&cwd);
         let make_proxy_set_provider =
             move |name: &str,
