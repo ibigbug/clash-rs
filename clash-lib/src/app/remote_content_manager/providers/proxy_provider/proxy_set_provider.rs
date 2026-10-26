@@ -74,6 +74,9 @@ impl ProxySetProvider {
         vehicle: ThreadSafeProviderVehicle,
         hc: HealthCheck,
         registry: Option<OutboundHandlerRegistry>,
+        #[cfg_attr(not(feature = "tailscale"), allow(unused_variables))] cwd: Option<
+            std::path::PathBuf,
+        >,
     ) -> anyhow::Result<Self> {
         let hc = Arc::new(hc);
 
@@ -240,7 +243,10 @@ impl ProxySetProvider {
                                     Ok(Arc::new(h) as _)
                                 }
                                 #[cfg(feature = "tailscale")]
-                                OutboundProxyProtocol::Tailscale(tscfg) => {
+                                OutboundProxyProtocol::Tailscale(mut tscfg) => {
+                                    if let Some(ref cwd) = cwd {
+                                        tscfg.resolve_state_dir(cwd);
+                                    }
                                     let h: tailscale::Handler = tscfg.try_into()?;
                                     Ok(Arc::new(h) as _)
                                 }
@@ -417,6 +423,7 @@ proxies:
             Duration::from_secs(1),
             vehicle,
             hc,
+            None,
             None,
         )
         .unwrap();

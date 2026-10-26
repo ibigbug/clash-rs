@@ -496,6 +496,21 @@ pub struct OutboundTailscale {
     pub ephemeral: bool,
 }
 
+#[cfg(feature = "tailscale")]
+impl OutboundTailscale {
+    /// Resolve a relative `state_dir` against `cwd` so that configs can use
+    /// portable relative paths (e.g. `state-dir: "tailscale"`) instead of
+    /// platform-specific absolute paths.
+    pub fn resolve_state_dir(&mut self, cwd: &std::path::Path) {
+        if let Some(ref state_dir) = self.state_dir {
+            let path = std::path::Path::new(state_dir);
+            if path.is_relative() {
+                self.state_dir = Some(cwd.join(path).to_string_lossy().into_owned());
+            }
+        }
+    }
+}
+
 #[cfg(feature = "ssh")]
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 #[serde(rename_all = "kebab-case")]
@@ -792,7 +807,7 @@ impl TryFrom<HashMap<String, Value>> for OutboundProxyProviderDef {
 mod tailscale_tests {
     use super::{OutboundProxyProtocol, OutboundTailscale};
     use serde_yaml::Value;
-    use std::collections::HashMap;
+    use std::{collections::HashMap, path::Path};
 
     #[test]
     fn parse_tailscale_outbound_proxy_protocol() {
@@ -836,6 +851,63 @@ mod tailscale_tests {
             Some("https://controlplane.tailscale.com")
         );
         assert!(ephemeral);
+    }
+
+    #[test]
+    fn test_tailscale_resolve_relative_state_dir() {
+        let yaml = r#"
+            name: ts
+            type: tailscale
+            state-dir: tailscale
+            ephemeral: false
+        "#;
+
+        let OutboundProxyProtocol::Tailscale(mut config) =
+            serde_yaml::from_str(yaml).expect("should parse tailscale")
+        else {
+            panic!("expected tailscale config");
+        };
+
+        config.resolve_state_dir(Path::new("/var/lib/clash"));
+        assert_eq!(
+            config.state_dir.as_deref(),
+            Some("/var/lib/clash/tailscale")
+        );
+    }
+
+    #[test]
+    fn test_tailscale_resolve_absolute_state_dir_unchanged() {
+        let yaml = r#"
+            name: ts
+            type: tailscale
+            state-dir: /tmp/tailscale-state
+        "#;
+
+        let OutboundProxyProtocol::Tailscale(mut config) =
+            serde_yaml::from_str(yaml).expect("should parse tailscale")
+        else {
+            panic!("expected tailscale config");
+        };
+
+        config.resolve_state_dir(Path::new("/var/lib/clash"));
+        assert_eq!(config.state_dir.as_deref(), Some("/tmp/tailscale-state"));
+    }
+
+    #[test]
+    fn test_tailscale_resolve_none_state_dir_unchanged() {
+        let yaml = r#"
+            name: ts
+            type: tailscale
+        "#;
+
+        let OutboundProxyProtocol::Tailscale(mut config) =
+            serde_yaml::from_str(yaml).expect("should parse tailscale")
+        else {
+            panic!("expected tailscale config");
+        };
+
+        config.resolve_state_dir(Path::new("/var/lib/clash"));
+        assert!(config.state_dir.is_none());
     }
 }
 

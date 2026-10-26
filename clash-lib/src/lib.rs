@@ -465,6 +465,7 @@ async fn create_components(
                 _ => None,
             })
             .collect(),
+        &cwd,
     );
 
     // Create a shared outbound registry seeded with plain outbounds.

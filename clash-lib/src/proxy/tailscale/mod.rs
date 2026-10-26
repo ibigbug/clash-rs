@@ -106,6 +106,7 @@ impl Handler {
 
         let mut config = ::tailscale::Config {
             key_state,
+            ephemeral: self.opts.ephemeral,
             ..Default::default()
         };
         config.client_name = Some(
