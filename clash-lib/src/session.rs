@@ -208,7 +208,7 @@ impl SocksAddr {
             }
             SocksAddrType::DOMAIN => {
                 let domain_len = cur.get_u8() as usize;
-                if cur.remaining() < domain_len {
+                if cur.remaining() < domain_len + 2 {
                     return Err(io::Error::other("invalid buf"));
                 }
                 let mut buf = vec![0u8; domain_len];
@@ -339,11 +339,12 @@ impl TryFrom<&[u8]> for SocksAddr {
             }
 
             SocksAddrType::DOMAIN => {
-                if buf.is_empty() {
+                if buf.len() < 2 {
                     return Err(insuff_bytes());
                 }
                 let domain_len = buf[1] as usize;
-                if buf.len() < 1 + domain_len + 2 {
+                // ATYP + LEN + DST.ADDR + DST.PORT
+                if buf.len() < 1 + 1 + domain_len + 2 {
                     return Err(insuff_bytes());
                 }
                 let domain = String::from_utf8((buf[2..domain_len + 2]).to_vec())
@@ -600,4 +601,44 @@ fn invalid_atyp() -> io::Error {
 
 fn insuff_bytes() -> io::Error {
     io::Error::other("insufficient bytes")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn peek_read_domain_missing_port_is_err() {
+        // ATYP=DOMAIN, LEN=3, "abc", no port
+        assert!(SocksAddr::peek_read(&[0x03, 3, b'a', b'b', b'c']).is_err());
+        // only one byte of port
+        assert!(SocksAddr::peek_read(&[0x03, 3, b'a', b'b', b'c', 0]).is_err());
+    }
+
+    #[test]
+    fn peek_read_domain_ok() {
+        let addr =
+            SocksAddr::peek_read(&[0x03, 3, b'a', b'b', b'c', 0, 80, 0xff]).unwrap();
+        assert_eq!(addr, SocksAddr::Domain("abc".to_owned(), 80));
+    }
+
+    #[test]
+    fn try_from_slice_domain_truncated_is_err() {
+        assert!(SocksAddr::try_from(&[0x03u8][..]).is_err());
+        assert!(SocksAddr::try_from(&[0x03u8, 3, b'a', b'b', b'c'][..]).is_err());
+        assert!(SocksAddr::try_from(&[0x03u8, 3, b'a', b'b', b'c', 0][..]).is_err());
+        let addr =
+            SocksAddr::try_from(&[0x03u8, 3, b'a', b'b', b'c', 0, 80][..]).unwrap();
+        assert_eq!(addr, SocksAddr::Domain("abc".to_owned(), 80));
+    }
+
+    #[test]
+    fn socks5_udp_codec_truncated_domain_is_err() {
+        use crate::proxy::socks::inbound::Socks5UDPCodec;
+        use bytes::BytesMut;
+        use tokio_util::codec::Decoder;
+
+        let mut src = BytesMut::from(&[0u8, 0, 0, 0x03, 3, b'a', b'b', b'c'][..]);
+        assert!(Socks5UDPCodec.decode(&mut src).is_err());
+    }
 }
