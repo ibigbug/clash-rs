@@ -230,6 +230,12 @@ tun:
 
   # mtu: 1500                       # MTU for the TUN interface
 
+  # TCP/IP stack: "smoltcp" (default, alias "gvisor") is the userspace stack;
+  # "system" (alias "mixed") hands TCP to the kernel — faster and far lighter
+  # on memory at high connection counts, but requires `gateway` to match the
+  # real interface address and only answers ICMP echo to the gateway itself.
+  stack: smoltcp
+
   so-mark: 0                        # fwmark for TUN-originated packets (Linux only)
   route-table: 2468                 # Policy routing table (Linux only)
 

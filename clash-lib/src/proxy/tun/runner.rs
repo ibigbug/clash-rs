@@ -8,9 +8,10 @@ use url::Url;
 use crate::{
     Error,
     app::{dispatcher::Dispatcher, dns::ThreadSafeDNSResolver},
-    config::config::TunConfig,
+    config::{config::TunConfig, def::TunStack},
     proxy::tun::{
         datagram::handle_inbound_datagram, routes, stream::handle_inbound_stream,
+        system,
     },
     runner::Runner,
 };
@@ -51,17 +52,7 @@ impl TunRunner {
         })
     }
 
-    async fn new_internal(
-        cfg: &TunConfig,
-    ) -> Result<
-        (
-            tun_rs::AsyncDevice,
-            watfaq_netstack::NetStack,
-            watfaq_netstack::TcpListener,
-            watfaq_netstack::UdpSocket,
-        ),
-        Error,
-    > {
+    async fn create_tun(cfg: &TunConfig) -> Result<tun_rs::AsyncDevice, Error> {
         let mut tun_init_config = TunInitializationConfig::default();
         match Url::parse(&cfg.device_id) {
             Ok(u) => match u.scheme() {
@@ -151,6 +142,18 @@ impl TunRunner {
                         tun_builder.name(&tun_name).mtu(cfg.mtu.unwrap_or(
                             if cfg!(windows) { 65535u16 } else { 1500u16 },
                         ));
+
+                    // Offload (TSO/GSO) is only for the system stack, which
+                    // reads and writes through the batched recv_multiple /
+                    // send_multiple API. It must stay off for the userspace
+                    // stack: enabling it prepends a virtio header to every
+                    // device read and write, which the plain framed codec
+                    // there does not expect.
+                    #[cfg(target_os = "linux")]
+                    if cfg.stack == TunStack::System {
+                        debug!("enabling tun offload for the system stack");
+                        tun_builder = tun_builder.offload(true);
+                    }
 
                     if !tun_exist {
                         debug!("setting tun ipv4 addr: {:?}", cfg.gateway);
@@ -295,8 +298,7 @@ impl TunRunner {
                 }
             };
 
-        let (stack, tcp_listener, udp_socket) = watfaq_netstack::NetStack::new();
-        Ok((tun, stack, tcp_listener, udp_socket))
+        Ok(tun)
     }
 }
 
@@ -315,26 +317,48 @@ impl Runner for TunRunner {
         let cancellation_token = self.cancellation_token.clone();
 
         tokio::spawn(async move {
-            let (tun, stack, mut tcp_listener, udp_socket) =
-                TunRunner::new_internal(&cfg)
-                    .await
-                    .inspect_err(|e| match e {
-                        Error::Io(e) => {
-                            if e.kind() == std::io::ErrorKind::PermissionDenied {
-                                error!(
-                                    "tun initialization failed: permission denied. \
-                                     Please make sure the program has the \
-                                     necessary permissions to create and manage \
-                                     TUN interfaces."
-                                );
-                            } else {
-                                error!("tun initialization I/O error: {}", e);
+            let tun =
+                TunRunner::create_tun(&cfg).await.inspect_err(|e| match e {
+                    Error::Io(e) => {
+                        if e.kind() == std::io::ErrorKind::PermissionDenied {
+                            error!(
+                                "tun initialization failed: permission denied. \
+                                 Please make sure the program has the necessary \
+                                 permissions to create and manage TUN interfaces."
+                            );
+                        } else {
+                            error!("tun initialization I/O error: {}", e);
+                        }
+                    }
+                    _ => {
+                        error!("tun initialization error: {}", e);
+                    }
+                })?;
+
+            if let TunStack::System = cfg.stack {
+                info!("tun using system (kernel) TCP stack");
+                return tokio::select! {
+                    res = system::run(cfg, tun, dispatcher, resolver) => {
+                        match res {
+                            Ok(_) => {
+                                info!("tun runner exited");
+                                Ok(())
+                            }
+                            Err(e) => {
+                                error!("tun runner error: {}", e);
+                                Err(e)
                             }
                         }
-                        _ => {
-                            error!("tun initialization error: {}", e);
-                        }
-                    })?;
+                    },
+                    _ = cancellation_token.cancelled() => {
+                        info!("tun stop signal received");
+                        Ok(())
+                    },
+                };
+            }
+
+            let (stack, mut tcp_listener, udp_socket) =
+                watfaq_netstack::NetStack::new();
 
             let framed = tun_rs::async_framed::DeviceFramed::new(
                 tun,

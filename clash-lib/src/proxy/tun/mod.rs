@@ -3,6 +3,7 @@ mod routes;
 pub mod runner;
 pub use runner::TunRunner;
 mod stream;
+mod system;
 
 #[cfg(target_os = "linux")] // for tproxy
 pub use datagram::TunDatagram;

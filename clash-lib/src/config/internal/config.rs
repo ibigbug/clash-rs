@@ -117,6 +117,7 @@ pub struct TunConfig {
     pub so_mark: Option<u32>,
     pub route_table: u32,
     pub dns_hijack: bool,
+    pub stack: def::TunStack,
 }
 
 #[derive(Serialize, Clone, Debug, Copy, PartialEq, Hash, Eq)]
