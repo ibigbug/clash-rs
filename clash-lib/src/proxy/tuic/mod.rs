@@ -781,7 +781,9 @@ ip_mode = "auto"
                 (cert.to_str().unwrap(), "/opt/tuic/fullchain.pem"),
                 (key.to_str().unwrap(), "/opt/tuic/privkey.pem"),
             ])
-            .env(&["TUIC_FORCE_TOML=1"])
+            // The config is TOML but mounted as config.json; tuic-server infers
+            // the format from the extension unless TUIC_CONFIG_FORMAT is set.
+            .env(&["TUIC_CONFIG_FORMAT=toml"])
             .build()
             .await?;
         drop(tmp);
@@ -810,7 +812,7 @@ ip_mode = "auto"
 socks-port: {socks_port}
 bind-address: 127.0.0.1
 mmdb: "{mmdb}"
-mode: global
+mode: rule
 log-level: error
 proxies:
   - name: proxy
@@ -874,7 +876,7 @@ rules:
 socks-port: {socks_port}
 bind-address: 127.0.0.1
 mmdb: "{mmdb}"
-mode: global
+mode: rule
 log-level: error
 proxies:
   - name: proxy
@@ -937,7 +939,7 @@ rules:
 socks-port: {socks_port}
 bind-address: 127.0.0.1
 mmdb: "{mmdb}"
-mode: global
+mode: rule
 log-level: error
 proxies:
   - name: proxy
@@ -1000,7 +1002,7 @@ rules:
 socks-port: {socks_port}
 bind-address: 127.0.0.1
 mmdb: "{mmdb}"
-mode: global
+mode: rule
 log-level: error
 proxies:
   - name: proxy

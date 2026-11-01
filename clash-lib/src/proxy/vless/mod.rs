@@ -658,7 +658,7 @@ mod e2e {
 socks-port: {socks_port}
 bind-address: 127.0.0.1
 mmdb: "{mmdb}"
-mode: global
+mode: rule
 log-level: error
 proxies:
   - name: proxy
@@ -724,7 +724,7 @@ rules:
 socks-port: {socks_port}
 bind-address: 127.0.0.1
 mmdb: "{mmdb}"
-mode: global
+mode: rule
 log-level: error
 proxies:
   - name: proxy
@@ -785,7 +785,7 @@ rules:
 socks-port: {socks_port}
 bind-address: 127.0.0.1
 mmdb: "{mmdb}"
-mode: global
+mode: rule
 log-level: error
 proxies:
   - name: proxy
@@ -849,7 +849,7 @@ rules:
 socks-port: {socks_port}
 bind-address: 127.0.0.1
 mmdb: "{mmdb}"
-mode: global
+mode: rule
 log-level: error
 proxies:
   - name: proxy

@@ -73,18 +73,11 @@ jobs:
       # Pull docker images in advance so test startup is faster
       - name: Pull docker images
         run: |
-          docker pull teddysun/shadowsocks-rust:alpine-1.22.0
-          docker pull gists/simple-obfs:latest
-          docker pull ghcr.io/ihciah/shadow-tls:latest
-          docker pull v2fly/v2fly-core:v4.45.2
-          docker pull p4gefau1t/trojan-go:latest
-          docker pull teddysun/xray:26.3.27
-          docker pull ghcr.io/sagernet/sing-box:v1.13.8
-          docker pull tobyxdd/hysteria:latest
-          docker pull ghcr.io/itsusinn/tuic-server:latest
-          docker pull ghcr.io/spongebob888/shadowquic:latest
-          docker pull docker.io/linuxserver/openssh-server:latest
-          docker pull nicolaka/netshoot:latest
+          # Pull exactly the image references the tests use (consts.rs), so the
+          # pinned digests can't drift from what gets pre-pulled here.
+          grep -oP '^pub const IMAGE_\w+: &str = "\K[^"]+' \
+            clash-lib/src/proxy/utils/test_utils/docker_utils/consts.rs \
+            | sort -u | xargs -n1 docker pull
 
       # Download once so parallel clash-rs instances don't race to fetch it
       - name: Download Country.mmdb

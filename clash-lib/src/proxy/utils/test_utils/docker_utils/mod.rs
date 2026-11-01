@@ -769,6 +769,16 @@ async fn wait_for_port(port: u16, timeout_secs: u64) -> anyhow::Result<()> {
     }
 }
 
+/// Whether a connection that reached the echo server came straight from the
+/// host rather than out of the proxy server's container.
+///
+/// Proxied traffic arrives from the container's address. A host-originated
+/// connection arrives from loopback, or — when dialing one of the host's own
+/// addresses such as the docker gateway — from that same address.
+fn bypassed_proxy(peer: std::net::IpAddr, dest: &str) -> bool {
+    peer.is_loopback() || dest.parse::<std::net::IpAddr>().is_ok_and(|d| d == peer)
+}
+
 /// Start clash-rs as a subprocess with `config_yaml`, then run a full-stack
 /// upload+download throughput test through its SOCKS5 inbound.
 ///
@@ -831,7 +841,7 @@ pub async fn clash_process_e2e_throughput(
     // --- wait for SOCKS5 inbound to be ready ---
     // 90s gives clash-rs headroom on resource-constrained CI runners where
     // multiple Docker containers + subprocesses compete for 2 CPUs.
-    wait_for_port(socks_port, 90).await.map_err(|e| {
+    wait_for_port(socks_port, 90).await.inspect_err(|_| {
         // Diagnose whether clash-rs exited early or simply never bound.
         // A silent crash before tracing-init produces zero output, so the
         // exit status is the only signal available in CI logs.
@@ -853,7 +863,6 @@ pub async fn clash_process_e2e_throughput(
             }
         }
         child.start_kill().ok();
-        e
     })?;
 
     // --- find a target address reachable from docker ---
@@ -874,7 +883,7 @@ pub async fn clash_process_e2e_throughput(
             let echo_task = tokio::spawn(async move {
                 let chunk_size = 64 * 1024_usize;
                 let mut buf = vec![0u8; chunk_size];
-                let (mut stream, _) = listener_clone.accept().await?;
+                let (mut stream, peer) = listener_clone.accept().await?;
                 // Phase 1: receive payload
                 let mut received = 0usize;
                 while received < pbe {
@@ -905,7 +914,7 @@ pub async fn clash_process_e2e_throughput(
                     sent += to_send;
                 }
                 stream.flush().await?;
-                anyhow::Ok(())
+                anyhow::Ok(peer)
             });
 
             // client side
@@ -1019,7 +1028,15 @@ pub async fn clash_process_e2e_throughput(
             }
             let download_elapsed = download_start.elapsed();
 
-            echo_task.await??;
+            let peer = echo_task.await??;
+            if bypassed_proxy(peer.ip(), dest) {
+                child.start_kill().ok();
+                anyhow::bail!(
+                    "[{label}] echo server was reached directly from the host \
+                     (peer {peer}, dialed {dest}): traffic did not go through the \
+                     proxy under test"
+                );
+            }
 
             upload_samples.push(upload_elapsed);
             download_samples.push(download_elapsed);
@@ -1121,4 +1138,25 @@ pub async fn run_test_suites_and_cleanup(
             Ok(())
         })
         .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::bypassed_proxy;
+
+    #[test]
+    fn detects_host_originated_connections() {
+        // from loopback, or from the very address that was dialed
+        assert!(bypassed_proxy(
+            "127.0.0.1".parse().unwrap(),
+            "host.docker.internal"
+        ));
+        assert!(bypassed_proxy("172.17.0.1".parse().unwrap(), "172.17.0.1"));
+        // from the proxy container
+        assert!(!bypassed_proxy("172.17.0.3".parse().unwrap(), "172.17.0.1"));
+        assert!(!bypassed_proxy(
+            "172.17.0.3".parse().unwrap(),
+            "host.docker.internal"
+        ));
+    }
 }
