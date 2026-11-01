@@ -141,7 +141,13 @@ fn destination_list(gateway_ip: Option<String>) -> Vec<String> {
         destination_list.insert(0, ip);
     } else {
         debug!("CLIENT_IP env not set, ");
-        let mut networks = Networks::new_with_refreshed_list();
+        let mut networks = match Networks::new_with_refreshed_list() {
+            Ok(networks) => networks,
+            Err(e) => {
+                debug!("failed to list network interfaces: {e}");
+                return destination_list;
+            }
+        };
         networks.refresh(true);
 
         trace!("networks: {:?}", networks);
@@ -160,7 +166,11 @@ fn destination_list(gateway_ip: Option<String>) -> Vec<String> {
                 .then_with(|| b.1.total_received().cmp(&a.1.total_received()))
         });
         for (iface_name, data) in active_interfaces {
-            trace!("Processing interface: {}, {:#?}", iface_name, data);
+            trace!(
+                "Processing interface: {}, {:#?}",
+                iface_name.display(),
+                data
+            );
 
             // 获取该网卡的所有 IP 地址
             for ip_network in data.ip_networks() {
@@ -170,7 +180,11 @@ fn destination_list(gateway_ip: Option<String>) -> Vec<String> {
                     let ip_str = addr.to_string();
                     // 跳过已存在的 IP
                     if !destination_list.contains(&ip_str) {
-                        debug!("Found IPv4 address on {}: {}", iface_name, ip_str);
+                        debug!(
+                            "Found IPv4 address on {}: {}",
+                            iface_name.display(),
+                            ip_str
+                        );
                         destination_list.push(ip_str);
                     }
                 }
