@@ -840,12 +840,15 @@ rules:
         let test_config_dir = config_helper::test_config_base_dir();
         let temp_dir = prepare_ssh_config_dir(&test_config_dir).await?;
         let ssh_config_tmp_path = temp_dir.path().join("ssh");
-        let private_key_path = ssh_config_tmp_path
-            .join(".ssh")
-            .join("test_ed25519")
-            .to_str()
-            .unwrap()
-            .to_owned();
+        // The container's init re-owns everything under the mounted config
+        // dir, so read the client key from a copy outside of it.
+        let private_key_path = temp_dir.path().join("client_ed25519");
+        tokio::fs::copy(
+            ssh_config_tmp_path.join(".ssh").join("test_ed25519"),
+            &private_key_path,
+        )
+        .await?;
+        let private_key_path = private_key_path.to_str().unwrap().to_owned();
 
         let container = get_ssh_runner(ssh_config_tmp_path).await?;
         let server = container
