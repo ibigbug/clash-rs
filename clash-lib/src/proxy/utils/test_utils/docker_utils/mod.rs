@@ -750,24 +750,41 @@ async fn socks5_connect(
     Ok(stream)
 }
 
-/// Wait until a TCP port accepts connections, or until `timeout_secs` elapses.
+/// Wait until a local TCP port accepts connections, or until `timeout_secs`
+/// elapses.
 #[cfg(all(docker_test, throughput_test))]
 async fn wait_for_port(port: u16, timeout_secs: u64) -> anyhow::Result<()> {
+    wait_for_tcp("127.0.0.1", port, timeout_secs).await
+}
+
+/// Wait until `host:port` accepts TCP connections, or until `timeout_secs`
+/// elapses. Use it for servers that take a while to start listening inside
+/// their container.
+#[cfg(all(docker_test, throughput_test))]
+pub async fn wait_for_tcp(
+    host: &str,
+    port: u16,
+    timeout_secs: u64,
+) -> anyhow::Result<()> {
     let deadline =
         tokio::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
     loop {
-        if tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port))
-            .await
-            .is_ok()
-        {
+        if tokio::net::TcpStream::connect((host, port)).await.is_ok() {
             return Ok(());
         }
         if tokio::time::Instant::now() >= deadline {
-            anyhow::bail!("port {} not ready after {}s", port, timeout_secs);
+            anyhow::bail!("{host}:{port} not ready after {timeout_secs}s");
         }
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     }
 }
+
+/// Payload for throughput tests run under netem (50 ms delay, 1% loss).
+///
+/// Loss caps a TCP leg at a few Mbit/s, so the full 32 MiB payload, sent each
+/// way three times, would not finish within the docker runner's timeout.
+#[cfg(all(docker_test, throughput_test))]
+pub const E2E_NETEM_PAYLOAD_BYTES: usize = 2 * 1024 * 1024;
 
 /// Whether a connection that reached the echo server came straight from the
 /// host rather than out of the proxy server's container.

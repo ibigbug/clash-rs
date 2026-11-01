@@ -652,6 +652,7 @@ mod e2e {
             },
             docker_utils::{
                 alloc_port, clash_process_e2e_throughput, find_clash_rs_binary,
+                wait_for_tcp,
             },
         },
         tests::initialize,
@@ -776,6 +777,8 @@ mod e2e {
         let server = container
             .container_ip()
             .ok_or_else(|| anyhow::anyhow!("ssh container has no IP"))?;
+        // sshd only starts listening once the image's init has finished.
+        wait_for_tcp(&server, SSH_PORT, 60).await?;
         let gateway_ip = container.docker_gateway_ip();
 
         let mmdb = test_config_dir
@@ -848,6 +851,8 @@ rules:
         let server = container
             .container_ip()
             .ok_or_else(|| anyhow::anyhow!("ssh container has no IP"))?;
+        // sshd only starts listening once the image's init has finished.
+        wait_for_tcp(&server, SSH_PORT, 60).await?;
         let gateway_ip = container.docker_gateway_ip();
 
         let mmdb = test_config_dir
