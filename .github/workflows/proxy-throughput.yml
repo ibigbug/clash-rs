@@ -74,10 +74,17 @@ jobs:
       - name: Pull docker images
         run: |
           # Pull exactly the image references the tests use (consts.rs), so the
-          # pinned digests can't drift from what gets pre-pulled here.
-          grep -oP '^pub const IMAGE_\w+: &str = "\K[^"]+' \
-            clash-lib/src/proxy/utils/test_utils/docker_utils/consts.rs \
-            | sort -u | xargs -n1 docker pull
+          # pinned digests can't drift from what gets pre-pulled here. rustfmt
+          # wraps long literals with `\` continuations, so join those first.
+          consts=clash-lib/src/proxy/utils/test_utils/docker_utils/consts.rs
+          images=$(perl -0ne 'while (/pub const IMAGE_\w+: &str =\s*"((?:[^"\\]|\\\n\s*)+)"/g) { ($i = $1) =~ s/\\\n\s*//g; print "$i\n" }' "$consts")
+          declared=$(grep -c '^pub const IMAGE_' "$consts")
+          extracted=$(echo "$images" | grep -c .)
+          if [ "$declared" -ne "$extracted" ]; then
+            echo "::error::extracted $extracted image refs but $consts declares $declared"
+            exit 1
+          fi
+          echo "$images" | sort -u | xargs -n1 docker pull
 
       # Download once so parallel clash-rs instances don't race to fetch it
       - name: Download Country.mmdb

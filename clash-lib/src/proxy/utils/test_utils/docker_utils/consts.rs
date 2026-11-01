@@ -2,7 +2,7 @@ pub const LOCAL_ADDR: &str = "127.0.0.1";
 
 // Images without a stable version tag are pinned by digest so an upstream
 // `:latest` push can't silently change test behaviour. The throughput workflow
-// pre-pulls every `IMAGE_*` reference in this file, so keep each on one line.
+// extracts and pre-pulls every `IMAGE_*` reference in this file.
 
 #[allow(dead_code)]
 pub const IMAGE_WG: &str = "docker.io/linuxserver/wireguard:1.0.20210914-legacy";

@@ -492,6 +492,7 @@ proxies:
     server: {server}
     port: {port}
     password: example
+    sni: example.org
     skip-cert-verify: true
     udp: false
 {extra}
