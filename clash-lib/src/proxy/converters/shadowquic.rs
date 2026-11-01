@@ -52,6 +52,7 @@ impl TryFrom<&OutboundShadowQuic> for Handler {
                 gso: s.gso.unwrap_or(default_gso()),
                 mtu_discovery: s.mtu_discovery.unwrap_or(default_mtu_discovery()),
                 cipher_suite_preference: None,
+                ..Default::default()
             },
         ))
     }

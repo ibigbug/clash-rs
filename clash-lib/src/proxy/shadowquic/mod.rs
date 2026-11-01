@@ -1,11 +1,14 @@
 use erased_serde::Serialize as ErasedSerialize;
-use std::{collections::HashMap, fmt::Debug, io, net::SocketAddr, str::FromStr};
+use std::{
+    collections::HashMap, fmt::Debug, io, net::SocketAddr, str::FromStr, sync::Arc,
+};
 
 use async_trait::async_trait;
 
 use compat::UdpSessionWrapper;
 use shadowquic::{
     config,
+    dns::ResolverManager,
     msgs::socks5::SocksAddr as SQAddr,
     quic::QuicClient,
     shadowquic::{EndClient, outbound::ShadowQuicClient},
@@ -95,7 +98,8 @@ impl Handler {
                     .iface
                     .as_ref()
                     .map(|iface| config::Interface::Device(iface.name.clone()));
-                let mut ep = ShadowQuicClient::new(cfg);
+                let mut ep =
+                    ShadowQuicClient::new(cfg, Arc::new(ResolverManager::new()));
                 ep.config.addr = addr.to_string();
                 Ok(ep) as io::Result<ShadowQuicClient>
             })
