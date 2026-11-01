@@ -622,11 +622,12 @@ mod e2e {
         let mut tmp = tempfile::NamedTempFile::new()?;
         use std::io::Write as _;
         tmp.write_all(VLESS_H2_SERVER_CONFIG.as_bytes())?;
+        // xray has removed the plain HTTP/2 transport; v2fly still serves it.
         let result = DockerTestRunnerBuilder::new()
-            .image(IMAGE_XRAY)
+            .image(IMAGE_VLESS)
             .no_port()
             .mounts(&[
-                (tmp.path().to_str().unwrap(), "/etc/xray/config.json"),
+                (tmp.path().to_str().unwrap(), "/etc/v2ray/config.json"),
                 (cert.to_str().unwrap(), "/etc/ssl/v2ray/fullchain.pem"),
                 (key.to_str().unwrap(), "/etc/ssl/v2ray/privkey.pem"),
             ])

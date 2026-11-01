@@ -763,6 +763,10 @@ alpn = ["h3"]
 [outbound.default]
 type = "direct"
 ip_mode = "auto"
+
+# The echo server lives on the docker host's private address.
+[experimental]
+drop_private = false
 "#;
 
     async fn get_tuic_runner() -> anyhow::Result<DockerTestRunner> {

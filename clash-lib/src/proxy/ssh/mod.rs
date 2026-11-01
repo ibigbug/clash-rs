@@ -205,7 +205,9 @@ impl OutboundHandler for Handler {
         // host key algorithms
         let key = match self.opts.host_key_algorithms.clone() {
             Some(host_key_algorithms) => Cow::Owned(host_key_algorithms),
-            None => Default::default(),
+            // An empty list would offer no host key algorithms at all and fail
+            // every handshake, so fall back to russh's defaults.
+            None => Preferred::DEFAULT.key,
         };
         // TODO: make inactivity_timeout configurable
         let config = client::Config {
