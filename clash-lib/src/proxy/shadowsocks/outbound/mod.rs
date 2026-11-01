@@ -91,7 +91,7 @@ impl Handler {
             (sess.destination.host(), sess.destination.port()),
         );
 
-        Ok(Box::new(ShadowSocksStream(stream)))
+        Ok(Box::new(ShadowSocksStream::new(stream)))
     }
 
     fn server_config(&self) -> Result<ServerConfig, io::Error> {
@@ -566,7 +566,8 @@ mod e2e {
                 RunAndCleanup,
             },
             docker_utils::{
-                alloc_port, clash_process_e2e_throughput, find_clash_rs_binary,
+                E2E_NETEM_PAYLOAD_BYTES, alloc_port, clash_process_e2e_throughput,
+                find_clash_rs_binary,
             },
         },
         tests::initialize,
@@ -784,7 +785,7 @@ rules:
                     socks_port,
                     echo_port,
                     gateway_ip,
-                    E2E_PAYLOAD_BYTES,
+                    E2E_NETEM_PAYLOAD_BYTES,
                 )
                 .await
                 .map(|_| ())
