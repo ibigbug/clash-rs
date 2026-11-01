@@ -141,7 +141,13 @@ fn destination_list(gateway_ip: Option<String>) -> Vec<String> {
         destination_list.insert(0, ip);
     } else {
         debug!("CLIENT_IP env not set, ");
-        let mut networks = Networks::new_with_refreshed_list();
+        let mut networks = match Networks::new_with_refreshed_list() {
+            Ok(networks) => networks,
+            Err(e) => {
+                debug!("failed to list network interfaces: {e}");
+                return destination_list;
+            }
+        };
         networks.refresh(true);
 
         trace!("networks: {:?}", networks);
@@ -160,7 +166,11 @@ fn destination_list(gateway_ip: Option<String>) -> Vec<String> {
                 .then_with(|| b.1.total_received().cmp(&a.1.total_received()))
         });
         for (iface_name, data) in active_interfaces {
-            trace!("Processing interface: {}, {:#?}", iface_name, data);
+            trace!(
+                "Processing interface: {}, {:#?}",
+                iface_name.display(),
+                data
+            );
 
             // 获取该网卡的所有 IP 地址
             for ip_network in data.ip_networks() {
@@ -170,7 +180,11 @@ fn destination_list(gateway_ip: Option<String>) -> Vec<String> {
                     let ip_str = addr.to_string();
                     // 跳过已存在的 IP
                     if !destination_list.contains(&ip_str) {
-                        debug!("Found IPv4 address on {}: {}", iface_name, ip_str);
+                        debug!(
+                            "Found IPv4 address on {}: {}",
+                            iface_name.display(),
+                            ip_str
+                        );
                         destination_list.push(ip_str);
                     }
                 }
@@ -736,23 +750,50 @@ async fn socks5_connect(
     Ok(stream)
 }
 
-/// Wait until a TCP port accepts connections, or until `timeout_secs` elapses.
+/// Wait until a local TCP port accepts connections, or until `timeout_secs`
+/// elapses.
 #[cfg(all(docker_test, throughput_test))]
 async fn wait_for_port(port: u16, timeout_secs: u64) -> anyhow::Result<()> {
+    wait_for_tcp("127.0.0.1", port, timeout_secs).await
+}
+
+/// Wait until `host:port` accepts TCP connections, or until `timeout_secs`
+/// elapses. Use it for servers that take a while to start listening inside
+/// their container.
+#[cfg(all(docker_test, throughput_test))]
+pub async fn wait_for_tcp(
+    host: &str,
+    port: u16,
+    timeout_secs: u64,
+) -> anyhow::Result<()> {
     let deadline =
         tokio::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
     loop {
-        if tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port))
-            .await
-            .is_ok()
-        {
+        if tokio::net::TcpStream::connect((host, port)).await.is_ok() {
             return Ok(());
         }
         if tokio::time::Instant::now() >= deadline {
-            anyhow::bail!("port {} not ready after {}s", port, timeout_secs);
+            anyhow::bail!("{host}:{port} not ready after {timeout_secs}s");
         }
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     }
+}
+
+/// Payload for throughput tests run under netem (50 ms delay, 1% loss).
+///
+/// Loss caps a TCP leg at a few Mbit/s, so the full 32 MiB payload, sent each
+/// way three times, would not finish within the docker runner's timeout.
+#[cfg(all(docker_test, throughput_test))]
+pub const E2E_NETEM_PAYLOAD_BYTES: usize = 2 * 1024 * 1024;
+
+/// Whether a connection that reached the echo server came straight from the
+/// host rather than out of the proxy server's container.
+///
+/// Proxied traffic arrives from the container's address. A host-originated
+/// connection arrives from loopback, or — when dialing one of the host's own
+/// addresses such as the docker gateway — from that same address.
+fn bypassed_proxy(peer: std::net::IpAddr, dest: &str) -> bool {
+    peer.is_loopback() || dest.parse::<std::net::IpAddr>().is_ok_and(|d| d == peer)
 }
 
 /// Start clash-rs as a subprocess with `config_yaml`, then run a full-stack
@@ -817,7 +858,7 @@ pub async fn clash_process_e2e_throughput(
     // --- wait for SOCKS5 inbound to be ready ---
     // 90s gives clash-rs headroom on resource-constrained CI runners where
     // multiple Docker containers + subprocesses compete for 2 CPUs.
-    wait_for_port(socks_port, 90).await.map_err(|e| {
+    wait_for_port(socks_port, 90).await.inspect_err(|_| {
         // Diagnose whether clash-rs exited early or simply never bound.
         // A silent crash before tracing-init produces zero output, so the
         // exit status is the only signal available in CI logs.
@@ -839,7 +880,6 @@ pub async fn clash_process_e2e_throughput(
             }
         }
         child.start_kill().ok();
-        e
     })?;
 
     // --- find a target address reachable from docker ---
@@ -860,7 +900,7 @@ pub async fn clash_process_e2e_throughput(
             let echo_task = tokio::spawn(async move {
                 let chunk_size = 64 * 1024_usize;
                 let mut buf = vec![0u8; chunk_size];
-                let (mut stream, _) = listener_clone.accept().await?;
+                let (mut stream, peer) = listener_clone.accept().await?;
                 // Phase 1: receive payload
                 let mut received = 0usize;
                 while received < pbe {
@@ -891,7 +931,7 @@ pub async fn clash_process_e2e_throughput(
                     sent += to_send;
                 }
                 stream.flush().await?;
-                anyhow::Ok(())
+                anyhow::Ok(peer)
             });
 
             // client side
@@ -1005,7 +1045,15 @@ pub async fn clash_process_e2e_throughput(
             }
             let download_elapsed = download_start.elapsed();
 
-            echo_task.await??;
+            let peer = echo_task.await??;
+            if bypassed_proxy(peer.ip(), dest) {
+                child.start_kill().ok();
+                anyhow::bail!(
+                    "[{label}] echo server was reached directly from the host \
+                     (peer {peer}, dialed {dest}): traffic did not go through the \
+                     proxy under test"
+                );
+            }
 
             upload_samples.push(upload_elapsed);
             download_samples.push(download_elapsed);
@@ -1107,4 +1155,25 @@ pub async fn run_test_suites_and_cleanup(
             Ok(())
         })
         .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::bypassed_proxy;
+
+    #[test]
+    fn detects_host_originated_connections() {
+        // from loopback, or from the very address that was dialed
+        assert!(bypassed_proxy(
+            "127.0.0.1".parse().unwrap(),
+            "host.docker.internal"
+        ));
+        assert!(bypassed_proxy("172.17.0.1".parse().unwrap(), "172.17.0.1"));
+        // from the proxy container
+        assert!(!bypassed_proxy("172.17.0.3".parse().unwrap(), "172.17.0.1"));
+        assert!(!bypassed_proxy(
+            "172.17.0.3".parse().unwrap(),
+            "host.docker.internal"
+        ));
+    }
 }

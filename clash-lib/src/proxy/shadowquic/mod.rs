@@ -1,11 +1,14 @@
 use erased_serde::Serialize as ErasedSerialize;
-use std::{collections::HashMap, fmt::Debug, io, net::SocketAddr, str::FromStr};
+use std::{
+    collections::HashMap, fmt::Debug, io, net::SocketAddr, str::FromStr, sync::Arc,
+};
 
 use async_trait::async_trait;
 
 use compat::UdpSessionWrapper;
 use shadowquic::{
     config,
+    dns::ResolverManager,
     msgs::socks5::SocksAddr as SQAddr,
     quic::QuicClient,
     shadowquic::{EndClient, outbound::ShadowQuicClient},
@@ -95,7 +98,8 @@ impl Handler {
                     .iface
                     .as_ref()
                     .map(|iface| config::Interface::Device(iface.name.clone()));
-                let mut ep = ShadowQuicClient::new(cfg);
+                let mut ep =
+                    ShadowQuicClient::new(cfg, Arc::new(ResolverManager::new()));
                 ep.config.addr = addr.to_string();
                 Ok(ep) as io::Result<ShadowQuicClient>
             })
@@ -377,7 +381,8 @@ mod e2e {
                 DockerTestRunner, DockerTestRunnerBuilder, RunAndCleanup,
             },
             docker_utils::{
-                alloc_port, clash_process_e2e_throughput, find_clash_rs_binary,
+                E2E_NETEM_PAYLOAD_BYTES, alloc_port, clash_process_e2e_throughput,
+                find_clash_rs_binary,
             },
         },
         tests::initialize,
@@ -455,7 +460,7 @@ log-level: "info"
 socks-port: {socks_port}
 bind-address: 127.0.0.1
 mmdb: "{mmdb}"
-mode: global
+mode: rule
 log-level: error
 proxies:
   - name: proxy
@@ -516,7 +521,7 @@ rules:
 socks-port: {socks_port}
 bind-address: 127.0.0.1
 mmdb: "{mmdb}"
-mode: global
+mode: rule
 log-level: error
 proxies:
   - name: proxy
@@ -548,7 +553,7 @@ rules:
                     socks_port,
                     echo_port,
                     gateway_ip,
-                    E2E_PAYLOAD_BYTES,
+                    E2E_NETEM_PAYLOAD_BYTES,
                 )
                 .await
                 .map(|_| ())
@@ -591,7 +596,7 @@ rules:
 socks-port: {socks_port}
 bind-address: 127.0.0.1
 mmdb: "{mmdb}"
-mode: global
+mode: rule
 log-level: error
 proxies:
   - name: proxy

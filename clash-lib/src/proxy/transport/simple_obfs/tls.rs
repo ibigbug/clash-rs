@@ -15,6 +15,11 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use crate::proxy::{AnyStream, transport::Transport};
 
 const CHUNK_SIZE: usize = 1 << 14; // 16 KiB
+/// Payload carried in the ClientHello's session ticket. simple-obfs's server
+/// buffers the whole ClientHello in 16 KiB before parsing it, so a full
+/// `CHUNK_SIZE` ticket plus the hello itself doesn't fit and the data gets
+/// mangled. Match its reference client (`obfs-local`), which sends 2 KiB.
+const FIRST_CHUNK_SIZE: usize = 2048;
 
 pub struct Client {
     server: String,
@@ -99,7 +104,12 @@ impl AsyncWrite for TLSObfs {
 
         // Wrap the next chunk (at most CHUNK_SIZE source bytes) into a TLS
         // Application Data record (or ClientHello for the very first write).
-        let end = CHUNK_SIZE.min(buf.len());
+        let max = if this.first_request {
+            FIRST_CHUNK_SIZE
+        } else {
+            CHUNK_SIZE
+        };
+        let end = max.min(buf.len());
         let chunk = &buf[..end];
         this.write_buf = if this.first_request {
             this.first_request = false;

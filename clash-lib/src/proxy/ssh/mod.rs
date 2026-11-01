@@ -205,7 +205,9 @@ impl OutboundHandler for Handler {
         // host key algorithms
         let key = match self.opts.host_key_algorithms.clone() {
             Some(host_key_algorithms) => Cow::Owned(host_key_algorithms),
-            None => Default::default(),
+            // An empty list would offer no host key algorithms at all and fail
+            // every handshake, so fall back to russh's defaults.
+            None => Preferred::DEFAULT.key,
         };
         // TODO: make inactivity_timeout configurable
         let config = client::Config {
@@ -650,6 +652,7 @@ mod e2e {
             },
             docker_utils::{
                 alloc_port, clash_process_e2e_throughput, find_clash_rs_binary,
+                wait_for_tcp,
             },
         },
         tests::initialize,
@@ -774,6 +777,8 @@ mod e2e {
         let server = container
             .container_ip()
             .ok_or_else(|| anyhow::anyhow!("ssh container has no IP"))?;
+        // sshd only starts listening once the image's init has finished.
+        wait_for_tcp(&server, SSH_PORT, 60).await?;
         let gateway_ip = container.docker_gateway_ip();
 
         let mmdb = test_config_dir
@@ -786,7 +791,7 @@ mod e2e {
 socks-port: {socks_port}
 bind-address: 127.0.0.1
 mmdb: "{mmdb}"
-mode: global
+mode: rule
 log-level: error
 proxies:
   - name: proxy
@@ -835,17 +840,22 @@ rules:
         let test_config_dir = config_helper::test_config_base_dir();
         let temp_dir = prepare_ssh_config_dir(&test_config_dir).await?;
         let ssh_config_tmp_path = temp_dir.path().join("ssh");
-        let private_key_path = ssh_config_tmp_path
-            .join(".ssh")
-            .join("test_ed25519")
-            .to_str()
-            .unwrap()
-            .to_owned();
+        // The container's init re-owns everything under the mounted config
+        // dir, so read the client key from a copy outside of it.
+        let private_key_path = temp_dir.path().join("client_ed25519");
+        tokio::fs::copy(
+            ssh_config_tmp_path.join(".ssh").join("test_ed25519"),
+            &private_key_path,
+        )
+        .await?;
+        let private_key_path = private_key_path.to_str().unwrap().to_owned();
 
         let container = get_ssh_runner(ssh_config_tmp_path).await?;
         let server = container
             .container_ip()
             .ok_or_else(|| anyhow::anyhow!("ssh container has no IP"))?;
+        // sshd only starts listening once the image's init has finished.
+        wait_for_tcp(&server, SSH_PORT, 60).await?;
         let gateway_ip = container.docker_gateway_ip();
 
         let mmdb = test_config_dir
@@ -858,7 +868,7 @@ rules:
 socks-port: {socks_port}
 bind-address: 127.0.0.1
 mmdb: "{mmdb}"
-mode: global
+mode: rule
 log-level: error
 proxies:
   - name: proxy

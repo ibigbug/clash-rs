@@ -157,17 +157,21 @@ fn extract_zip(bytes: &[u8], target_dir: &Path) -> Result<(), Error> {
     // Use a full path-segment match (require trailing "/") to avoid treating
     // "dist2/..." as sharing the "dist" prefix.
     let strip_prefix: Option<String> = {
-        let first = archive
-            .by_index(0)
-            .map(|f| f.name().split('/').next().unwrap_or("").to_string())
-            .ok();
+        let first = archive.by_index(0).ok().and_then(|f| {
+            f.name()
+                .ok()
+                .map(|n| n.split('/').next().unwrap_or("").to_string())
+        });
         match first {
             Some(ref prefix) if !prefix.is_empty() => {
                 let candidate = format!("{prefix}/");
                 let all_share = (0..archive.len()).all(|i| {
                     archive
                         .by_index(i)
-                        .map(|f| f.name().starts_with(candidate.as_str()))
+                        .ok()
+                        .and_then(|f| {
+                            f.name().ok().map(|n| n.starts_with(candidate.as_str()))
+                        })
                         .unwrap_or(false)
                 });
                 if all_share { Some(candidate) } else { None }
@@ -180,13 +184,19 @@ fn extract_zip(bytes: &[u8], target_dir: &Path) -> Result<(), Error> {
         let mut file = archive
             .by_index(i)
             .map_err(|e| Error::InvalidConfig(format!("zip entry failed: {e}")))?;
+        let name = file
+            .name()
+            .map_err(|e| {
+                Error::InvalidConfig(format!("zip entry name failed: {e}"))
+            })?
+            .into_owned();
 
         // `enclosed_name` returns None for paths with ".." or absolute paths,
         // which is our primary path-traversal guard for zip entries.
         let enclosed = match file.enclosed_name() {
             Some(p) => p,
             None => {
-                warn!("skipping potentially dangerous zip entry: {}", file.name());
+                warn!("skipping potentially dangerous zip entry: {}", name);
                 continue;
             }
         };
@@ -198,8 +208,8 @@ fn extract_zip(bytes: &[u8], target_dir: &Path) -> Result<(), Error> {
         // works correctly cross-platform.
         let rel: PathBuf = match strip_prefix {
             Some(ref prefix) => {
-                let raw = file.name();
-                let stripped = raw.strip_prefix(prefix.as_str()).unwrap_or(raw);
+                let stripped =
+                    name.strip_prefix(prefix.as_str()).unwrap_or(name.as_str());
                 // Re-build a PathBuf from the '/' separated components so the
                 // result uses native separators on all platforms.
                 stripped.split('/').filter(|c| !c.is_empty()).collect()
@@ -211,7 +221,7 @@ fn extract_zip(bytes: &[u8], target_dir: &Path) -> Result<(), Error> {
         }
 
         let dest = target_dir.join(&rel);
-        let is_dir = file.name().ends_with('/');
+        let is_dir = name.ends_with('/');
         if is_dir {
             fs::create_dir_all(&dest)?;
         } else {

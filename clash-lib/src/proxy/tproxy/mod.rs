@@ -232,7 +232,9 @@ async fn sendto_with_src(
     builder
         .write(&mut packet, buf)
         .map_err(|x| new_io_error(format!("failed to build udp packet:{}", x)))?;
-    let afd = tokio::io::unix::AsyncFd::new(socket.as_raw_fd())?;
+    // SAFETY: `socket` is borrowed for the whole lifetime of `afd`, so the fd
+    // stays open and refers to the same socket until `afd` is dropped.
+    let afd = unsafe { tokio::io::unix::AsyncFd::register(socket.as_raw_fd()) }?;
     future::poll_fn(|cx: &mut futures::task::Context<'_>| {
         let _guard = futures::ready!(afd.poll_write_ready(cx))?;
         let addr = if dst.is_ipv6() {

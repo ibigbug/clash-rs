@@ -464,7 +464,8 @@ mod e2e {
                 DockerTestRunner, DockerTestRunnerBuilder, RunAndCleanup,
             },
             docker_utils::{
-                alloc_port, clash_process_e2e_throughput, find_clash_rs_binary,
+                E2E_NETEM_PAYLOAD_BYTES, alloc_port, clash_process_e2e_throughput,
+                find_clash_rs_binary,
             },
         },
         tests::initialize,
@@ -484,7 +485,7 @@ mod e2e {
 socks-port: {socks_port}
 bind-address: 127.0.0.1
 mmdb: "{mmdb}"
-mode: global
+mode: rule
 log-level: error
 proxies:
   - name: proxy
@@ -492,6 +493,7 @@ proxies:
     server: {server}
     port: {port}
     password: example
+    sni: example.org
     skip-cert-verify: true
     udp: false
 {extra}
@@ -657,7 +659,7 @@ rules:
                     socks_port,
                     echo_port,
                     gateway_ip,
-                    E2E_PAYLOAD_BYTES,
+                    E2E_NETEM_PAYLOAD_BYTES,
                 )
                 .await
                 .map(|_| ())
