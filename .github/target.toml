@@ -16,6 +16,10 @@ release-name = "i686-unknown-linux-gnu"
 tool = "cross"
 extra-args = "-F plus"
 zig = "2.17"
+# qemu-i386 in the cross container returns ENOSYS for the socketpair tokio's
+# signal driver creates during runtime setup, so every tokio test panics before
+# it runs. Lint and build this target, but skip tests like the mips targets.
+skip-test = true
 
 # Linux MUSL
 [[target]]
