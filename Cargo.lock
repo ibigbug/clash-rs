@@ -10857,17 +10857,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ts_future_util"
-version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f1fdc0889d407fd7545b02ae6a5c662994ba2679f1b0fc0df7325049870aa129"
-dependencies = [
- "futures-core",
- "pin-project-lite",
- "tokio",
-]
-
-[[package]]
 name = "ts_hexdump"
 version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10932,8 +10921,7 @@ dependencies = [
 [[package]]
 name = "ts_netmon"
 version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9db3f993efce5c30bd72dda4d9b2036945aa13ef160b2626d77b2f6adaf47fea"
+source = "git+https://github.com/tailscale/tailscale-rs.git?rev=2c67f76eab#2c67f76eab5cbbcc4f78937b188af74dcf2d9870"
 dependencies = [
  "bitflags 2.13.2",
  "bytes",
@@ -10952,8 +10940,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tracing",
- "ts_future_util",
- "ts_hexdump",
+ "ts_util",
  "windows 0.62.2",
  "zerocopy",
 ]
@@ -11202,6 +11189,17 @@ checksum = "430a46dbd2cc8cf3203d230733026ed0653fa9987c27609256f99e4d07312d25"
 dependencies = [
  "ts_packet",
  "ts_transport",
+]
+
+[[package]]
+name = "ts_util"
+version = "0.6.1"
+source = "git+https://github.com/tailscale/tailscale-rs.git?rev=2c67f76eab#2c67f76eab5cbbcc4f78937b188af74dcf2d9870"
+dependencies = [
+ "futures-core",
+ "heapless 0.9.3",
+ "pin-project-lite",
+ "tokio",
 ]
 
 [[package]]
