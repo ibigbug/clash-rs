@@ -180,7 +180,7 @@ ssh-key = { version = "0.6", features = ["std"] }
 rand = "0.10"
 tracing = "0.1"
 
-shadowsocks = { version = "1.24", optional = true, features = ["aead-cipher-2022", "stream-cipher", "aead-cipher-extra"], git = "https://github.com/shadowsocks/shadowsocks-rust.git", rev = "c4d8d18527289d12470cad1ce718754c908a75fe" }
+shadowsocks = { version = "1.25", optional = true, features = ["aead-cipher-2022", "stream-cipher", "aead-cipher-extra"] }
 maxminddb = "0.32"
 public-suffix = "0.1"
 murmur3 = "0.5"

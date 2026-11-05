@@ -15,12 +15,6 @@ use crate::{
     runner::Runner,
 };
 
-/// Maximum number of attempts to wait for a newly created TUN interface to
-/// become visible via NetworkInterface::show().
-const TUN_VISIBILITY_MAX_ATTEMPTS: u32 = 40;
-/// Interval in milliseconds between each visibility poll attempt.
-const TUN_VISIBILITY_POLL_INTERVAL_MS: u64 = 50;
-
 #[derive(Default)]
 struct TunInitializationConfig {
     fd: Option<u32>,
@@ -128,11 +122,23 @@ impl TunRunner {
                     )));
                 }
             } else {
-                #[cfg(not(any(target_os = "ios", target_os = "android")))]
+                #[cfg(not(any(
+                    target_os = "ios",
+                    target_os = "tvos",
+                    target_os = "android"
+                )))]
                 {
                     use crate::proxy::tun::routes::maybe_add_routes;
                     use network_interface::NetworkInterfaceConfig;
                     use tun_rs::DeviceBuilder;
+
+                    /// Maximum number of attempts to wait for a newly created
+                    /// TUN interface to become visible via
+                    /// NetworkInterface::show().
+                    const TUN_VISIBILITY_MAX_ATTEMPTS: u32 = 40;
+                    /// Interval in milliseconds between each visibility poll
+                    /// attempt.
+                    const TUN_VISIBILITY_POLL_INTERVAL_MS: u64 = 50;
 
                     let tun_name =
                         tun_init_config.tun_name.expect("tun name must be provided");
@@ -287,7 +293,11 @@ impl TunRunner {
 
                     dev
                 }
-                #[cfg(any(target_os = "ios", target_os = "android"))]
+                #[cfg(any(
+                    target_os = "ios",
+                    target_os = "tvos",
+                    target_os = "android"
+                ))]
                 {
                     return Err(Error::InvalidConfig(
                         "only fd is supported on mobile platforms".to_string(),

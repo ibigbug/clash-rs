@@ -48,3 +48,6 @@ needless_collect = "deny"
 [patch.crates-io]
 rustls = { git = "https://github.com/Watfaq/rustls.git", branch = "watfaq/0.23.45" }
 tokio-rustls = { git = "https://github.com/Watfaq/tokio-rustls.git", branch = "watfaq/0.26.4" }
+# ts_netmon 0.6.1 re-exports PlatformMon on iOS, where it does not exist
+# (fixed in tailscale-rs 2c67f76). Drop after the next tailscale release.
+ts_netmon = { git = "https://github.com/tailscale/tailscale-rs.git", rev = "2c67f76eab" }

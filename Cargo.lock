@@ -91,17 +91,16 @@ dependencies = [
 
 [[package]]
 name = "aes-gcm-siv"
-version = "0.11.1"
+version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ae0784134ba9375416d469ec31e7c5f9fa94405049cf08c5ce5b4698be673e0d"
+checksum = "4c32325128cb24de2a2d14d92da7569dae7073f9e47334521d494747fa94d902"
 dependencies = [
- "aead 0.5.2",
- "aes 0.8.4",
- "cipher 0.4.4",
- "ctr 0.9.2",
- "polyval 0.6.2",
- "subtle",
- "zeroize",
+ "aead 0.6.1",
+ "aes 0.9.3",
+ "cipher 0.5.2",
+ "ctr 0.10.0",
+ "ctutils",
+ "polyval 0.7.1",
 ]
 
 [[package]]
@@ -1040,12 +1039,11 @@ dependencies = [
 
 [[package]]
 name = "camellia"
-version = "0.1.0"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3264e2574e9ef2b53ce6f536dea83a69ac0bc600b762d1523ff83fe07230ce30"
+checksum = "d3ed33f9863ee76491bbe0d7e16a225c694d8525287e320dc7fbe71ee212254c"
 dependencies = [
- "byteorder",
- "cipher 0.4.4",
+ "cipher 0.5.2",
 ]
 
 [[package]]
@@ -1083,14 +1081,14 @@ dependencies = [
 
 [[package]]
 name = "ccm"
-version = "0.5.0"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9ae3c82e4355234767756212c570e29833699ab63e6ffd161887314cc5b43847"
+checksum = "0be9b34d99d395af800e996c5784f810f8400ccd64202f91859dc677825b5378"
 dependencies = [
- "aead 0.5.2",
- "cipher 0.4.4",
- "ctr 0.9.2",
- "subtle",
+ "aead 0.6.1",
+ "cipher 0.5.2",
+ "ctr 0.10.0",
+ "ctutils",
 ]
 
 [[package]]
@@ -7667,13 +7665,13 @@ dependencies = [
 
 [[package]]
 name = "sealed"
-version = "0.6.0"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "22f968c5ea23d555e670b449c1c5e7b2fc399fdaec1d304a17cd48e288abc107"
+checksum = "9b68e2ea526d9fb32f23ca8894fb5da9e743f34c2f41701f0501dc8a25c4b343"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.117",
+ "syn 3.0.3",
 ]
 
 [[package]]
@@ -8181,11 +8179,12 @@ dependencies = [
 [[package]]
 name = "shadowsocks"
 version = "1.25.0"
-source = "git+https://github.com/shadowsocks/shadowsocks-rust.git?rev=c4d8d18527289d12470cad1ce718754c908a75fe#c4d8d18527289d12470cad1ce718754c908a75fe"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e2065b026dbe4f47048eca384adf07f693bf901050d80abd3adb7b2422709b2d"
 dependencies = [
  "aes 0.9.3",
  "arc-swap",
- "base64 0.22.1",
+ "base64 0.23.1",
  "blake3",
  "byte_string",
  "bytes",
@@ -8207,7 +8206,7 @@ dependencies = [
  "serde_urlencoded",
  "shadowsocks-crypto",
  "socket2 0.6.5",
- "spin 0.10.0",
+ "spin 0.12.3",
  "thiserror 2.0.21",
  "tokio",
  "tokio-tfo",
@@ -8218,13 +8217,13 @@ dependencies = [
 
 [[package]]
 name = "shadowsocks-crypto"
-version = "0.7.0"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9339588f8aee0810546fd7e4dcc219fc4bda2cfd0066dd277b7104d5113fd0c0"
+checksum = "b404a62ebea5003f44b9a2748dee7555c5f9ae39896508e466a2a91ee6fa5df5"
 dependencies = [
- "aead 0.5.2",
- "aes 0.8.4",
- "aes-gcm 0.10.3",
+ "aead 0.6.1",
+ "aes 0.9.3",
+ "aes-gcm 0.11.1",
  "aes-gcm-siv",
  "aws-lc-rs",
  "blake3",
@@ -8232,10 +8231,10 @@ dependencies = [
  "camellia",
  "ccm",
  "cfg-if",
- "chacha20 0.9.1",
- "chacha20poly1305 0.10.1",
- "ctr 0.9.2",
- "ghash 0.5.1",
+ "chacha20 0.10.0",
+ "chacha20poly1305 0.11.0",
+ "ctr 0.10.0",
+ "ghash 0.6.0",
  "hkdf 0.13.0",
  "md-5",
  "rand 0.10.3",
@@ -8367,11 +8366,11 @@ dependencies = [
 
 [[package]]
 name = "sm4"
-version = "0.5.1"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2d7abf5135ffd68fb4b438e1fb246923b80d25eda386d8b798bb4ad3ed00f75f"
+checksum = "ff2d621883cdeeaee6759d39f4bc8cd314b29db72b6ac3d6714b31422512ee11"
 dependencies = [
- "cipher 0.4.4",
+ "cipher 0.5.2",
 ]
 
 [[package]]
@@ -8514,9 +8513,9 @@ dependencies = [
 
 [[package]]
 name = "spin"
-version = "0.10.0"
+version = "0.12.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d5fe4ccb98d9c292d56fec89a5e07da7fc4cf0dc11e156b41793132775d3e591"
+checksum = "0134f9043ed38b087ac4f7d4af44c79e2c9e5094421fe3164f435ce585953b10"
 dependencies = [
  "lock_api",
 ]
@@ -10858,17 +10857,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ts_future_util"
-version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f1fdc0889d407fd7545b02ae6a5c662994ba2679f1b0fc0df7325049870aa129"
-dependencies = [
- "futures-core",
- "pin-project-lite",
- "tokio",
-]
-
-[[package]]
 name = "ts_hexdump"
 version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10933,8 +10921,7 @@ dependencies = [
 [[package]]
 name = "ts_netmon"
 version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9db3f993efce5c30bd72dda4d9b2036945aa13ef160b2626d77b2f6adaf47fea"
+source = "git+https://github.com/tailscale/tailscale-rs.git?rev=2c67f76eab#2c67f76eab5cbbcc4f78937b188af74dcf2d9870"
 dependencies = [
  "bitflags 2.13.2",
  "bytes",
@@ -10953,8 +10940,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tracing",
- "ts_future_util",
- "ts_hexdump",
+ "ts_util",
  "windows 0.62.2",
  "zerocopy",
 ]
@@ -11203,6 +11189,17 @@ checksum = "430a46dbd2cc8cf3203d230733026ed0653fa9987c27609256f99e4d07312d25"
 dependencies = [
  "ts_packet",
  "ts_transport",
+]
+
+[[package]]
+name = "ts_util"
+version = "0.6.1"
+source = "git+https://github.com/tailscale/tailscale-rs.git?rev=2c67f76eab#2c67f76eab5cbbcc4f78937b188af74dcf2d9870"
+dependencies = [
+ "futures-core",
+ "heapless 0.9.3",
+ "pin-project-lite",
+ "tokio",
 ]
 
 [[package]]
