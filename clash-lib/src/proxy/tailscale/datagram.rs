@@ -28,6 +28,7 @@ pub struct TailscaleDatagramOutbound {
 impl TailscaleDatagramOutbound {
     pub fn new(
         socket: ::tailscale::netstack::UdpSocket,
+        device: Arc<::tailscale::Device>,
         resolver: ThreadSafeDNSResolver,
     ) -> Self {
         let local_addr = socket.local_addr();
@@ -55,33 +56,38 @@ impl TailscaleDatagramOutbound {
                     let dst = match pkt.dst_addr {
                         SocksAddr::Ip(addr) => addr,
                         SocksAddr::Domain(domain, port) => {
-                            // Try v4 first, fall back to v6.
-                            let ip = match resolver
-                                .resolve_v4(&domain, false)
-                                .await
-                                .map_err(map_io_error)
-                            {
-                                Ok(Some(ip)) => IpAddr::V4(ip),
-                                _ => match resolver
-                                    .resolve_v6(&domain, false)
+                            // Tailnet peers first, then v4 with v6 fallback.
+                            let peer_ip =
+                                super::resolve_peer(&device, &domain).await;
+                            let ip = match peer_ip {
+                                Some(ip) => ip,
+                                None => match resolver
+                                    .resolve_v4(&domain, false)
                                     .await
                                     .map_err(map_io_error)
                                 {
-                                    Ok(Some(ip)) => IpAddr::V6(ip),
-                                    Ok(None) => {
-                                        tracing::warn!(
-                                            "tailscale udp resolve returned no \
-                                             result for {domain}"
-                                        );
-                                        continue;
-                                    }
-                                    Err(err) => {
-                                        tracing::warn!(
-                                            "tailscale udp resolve failed for \
-                                             {domain}: {err}"
-                                        );
-                                        continue;
-                                    }
+                                    Ok(Some(ip)) => IpAddr::V4(ip),
+                                    _ => match resolver
+                                        .resolve_v6(&domain, false)
+                                        .await
+                                        .map_err(map_io_error)
+                                    {
+                                        Ok(Some(ip)) => IpAddr::V6(ip),
+                                        Ok(None) => {
+                                            tracing::warn!(
+                                                "tailscale udp resolve returned no \
+                                                 result for {domain}"
+                                            );
+                                            continue;
+                                        }
+                                        Err(err) => {
+                                            tracing::warn!(
+                                                "tailscale udp resolve failed for \
+                                                 {domain}: {err}"
+                                            );
+                                            continue;
+                                        }
+                                    },
                                 },
                             };
                             (ip, port).into()

@@ -31,6 +31,57 @@ use super::{
 
 const TAILSCALE_CLIENT_NAME: &str = "clash-rs";
 const TAILSCALE_STATE_FILE_NAME: &str = "tailscale_state.json";
+/// Upper bound on waiting for the first netmap when looking up a peer name.
+const PEER_LOOKUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Resolve `host` against the tailnet's peers, standing in for MagicDNS.
+///
+/// tailscale-rs has no MagicDNS resolver at 100.100.100.100, and the regular
+/// DNS resolver doesn't know tailnet names, so peer hostnames (`nas`) and
+/// FQDNs (`nas.tailnet.ts.net`) are looked up in the netmap instead. Other
+/// names are skipped, since the lookup waits for the first netmap. Returns
+/// `None` for names that aren't tailnet peers, so the caller can fall back to
+/// the regular resolver.
+pub(crate) async fn resolve_peer(
+    device: &::tailscale::Device,
+    host: &str,
+) -> Option<IpAddr> {
+    let name = host.trim_end_matches('.').to_ascii_lowercase();
+    if !is_tailnet_name(&name) {
+        return None;
+    }
+    match tokio::time::timeout(PEER_LOOKUP_TIMEOUT, device.peer_by_name(&name)).await
+    {
+        Ok(Ok(Some(node))) => {
+            let v4 = node.tailnet_address.ipv4.addr();
+            let v6 = node.tailnet_address.ipv6.addr();
+            if !v4.is_unspecified() {
+                Some(IpAddr::V4(v4))
+            } else if !v6.is_unspecified() {
+                Some(IpAddr::V6(v6))
+            } else {
+                None
+            }
+        }
+        Ok(Ok(None)) => None,
+        Ok(Err(e)) => {
+            tracing::warn!("tailscale peer lookup for {name} failed: {e}");
+            None
+        }
+        Err(_) => {
+            tracing::warn!("tailscale peer lookup for {name} timed out");
+            None
+        }
+    }
+}
+
+/// Whether a normalized (lowercase, no trailing dot) name can be a tailnet
+/// peer: a bare hostname or a MagicDNS FQDN under `.ts.net`.
+fn is_tailnet_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name.contains(':')
+        && (!name.contains('.') || name.ends_with(".ts.net"))
+}
 
 #[derive(Clone)]
 pub struct HandlerOptions {
@@ -170,15 +221,18 @@ impl OutboundHandler for Handler {
         sess: &Session,
         resolver: ThreadSafeDNSResolver,
     ) -> std::io::Result<BoxedInstrumentedStream> {
+        let device = self.get_device().await?;
         let remote_ip = match &sess.destination {
             SocksAddr::Ip(addr) => addr.ip(),
-            SocksAddr::Domain(host, _) => resolver
-                .resolve(host, false)
-                .await
-                .map_err(map_io_error)?
-                .ok_or_else(|| io::Error::other("no dns result"))?,
+            SocksAddr::Domain(host, _) => match resolve_peer(&device, host).await {
+                Some(ip) => ip,
+                None => resolver
+                    .resolve(host, false)
+                    .await
+                    .map_err(map_io_error)?
+                    .ok_or_else(|| io::Error::other("no dns result"))?,
+            },
         };
-        let device = self.get_device().await?;
         let s = device
             .tcp_connect((remote_ip, sess.destination.port()).into())
             .await
@@ -240,7 +294,7 @@ impl OutboundHandler for Handler {
                 ))
             })?;
 
-        let d = TailscaleDatagramOutbound::new(udp, resolver);
+        let d = TailscaleDatagramOutbound::new(udp, device, resolver);
         let d = InstrumentedDatagramWrapper::new(d);
         d.append_to_chain(self.name()).await;
         Ok(Box::new(d))
@@ -324,6 +378,16 @@ mod tests {
         q.extend_from_slice(&1u16.to_be_bytes());
         q.extend_from_slice(&1u16.to_be_bytes());
         q
+    }
+
+    #[test]
+    fn tailnet_names_are_hostnames_or_ts_net() {
+        assert!(super::is_tailnet_name("nas"));
+        assert!(super::is_tailnet_name("nas.tail1234.ts.net"));
+        assert!(!super::is_tailnet_name("example.com"));
+        assert!(!super::is_tailnet_name("ts.net.example.com"));
+        assert!(!super::is_tailnet_name(""));
+        assert!(!super::is_tailnet_name("::1"));
     }
 
     #[tokio::test]
