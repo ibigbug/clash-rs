@@ -212,7 +212,7 @@ impl Display for OutboundType {
             OutboundType::Tuic => write!(f, "Tuic"),
             OutboundType::Socks5 => write!(f, "Socks5"),
             OutboundType::Hysteria2 => write!(f, "Hysteria2"),
-            OutboundType::Ssh => write!(f, "ssh"),
+            OutboundType::Ssh => write!(f, "Ssh"),
             OutboundType::Tailscale => write!(f, "Tailscale"),
             OutboundType::ShadowQuic => write!(f, "ShadowQuic"),
 
