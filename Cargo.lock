@@ -248,7 +248,7 @@ version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
 dependencies = [
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -259,7 +259,7 @@ checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
 dependencies = [
  "anstyle",
  "once_cell_polyfill",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2185,7 +2185,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "36e10ac4bd47bf8d24a4852f001df23b7acbbca6e59d0adec0c2e2c4409dfe5b"
 dependencies = [
  "heck",
- "indexmap 1.9.3",
+ "indexmap 2.14.0",
  "itertools 0.15.0",
  "proc-macro-crate",
  "proc-macro2",
@@ -2358,7 +2358,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2771,7 +2771,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3937,7 +3937,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.62.2",
+ "windows-core 0.61.2",
 ]
 
 [[package]]
@@ -5265,7 +5265,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6469,7 +6469,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "03da047801ff44bb6a4d407d4860c05fd70bb81714e6b2f3812603d5b145b042"
 dependencies = [
  "heck",
- "itertools 0.14.0",
+ "itertools 0.13.0",
  "log",
  "multimap",
  "petgraph",
@@ -6488,7 +6488,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b570b25f7617e43d59005d0990ccb79e950a423952cea19671b7a876da390adf"
 dependencies = [
  "anyhow",
- "itertools 0.14.0",
+ "itertools 0.13.0",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
@@ -6557,7 +6557,7 @@ dependencies = [
  "derive-deftly",
  "libc",
  "paste",
- "thiserror 1.0.69",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -6724,7 +6724,7 @@ dependencies = [
  "libc",
  "socket2 0.6.5",
  "tracing",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6737,7 +6737,7 @@ dependencies = [
  "libc",
  "socket2 0.6.5",
  "tracing",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -7436,7 +7436,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -7520,7 +7520,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -7864,7 +7864,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a1ec1f5cac0eb96063c64b28705255a7ed6e7d77f95c1d25e9f8b8c928006ce1"
 dependencies = [
  "annotate-snippets",
- "base64 0.23.1",
+ "base64 0.21.7",
  "encoding_rs_io",
  "granit-parser",
  "nohash-hasher",
@@ -8412,20 +8412,6 @@ dependencies = [
 
 [[package]]
 name = "smoltcp"
-version = "0.13.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5f73d40463bba65efc9adc6370b56df76d563cc46e2482bba58351b4afb7535e"
-dependencies = [
- "bitflags 1.3.2",
- "byteorder",
- "cfg-if",
- "defmt 0.3.100",
- "heapless 0.9.3",
- "managed",
-]
-
-[[package]]
-name = "smoltcp"
 version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6f8b28ad56c6e35524a37dd492af5d1a47e31e1a4d175cd12f89c075f01980f"
@@ -8493,7 +8479,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c3d1e2c7f27f8d4cb10542a02c49005dbd6e93095799d6f3be745fae9f8fedd4"
 dependencies = [
  "libc",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -8909,8 +8895,7 @@ checksum = "7b2093cf4c8eb1e67749a6762251bc9cd836b6fc171623bd0a9d324d37af2417"
 [[package]]
 name = "tailscale"
 version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7c41f9ac0c6e105ebcb5c368e8636d4926c28ec77aa000ddcc126df1fb527b2e"
+source = "git+https://github.com/tailscale/tailscale-rs.git?rev=9f7cec0447#9f7cec0447df4214fe7bd34a8fb8674c2f639978"
 dependencies = [
  "rand 0.10.3",
  "serde",
@@ -8952,7 +8937,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -10646,8 +10631,7 @@ checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 [[package]]
 name = "ts_array256"
 version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "69af267f89d47a71d60aa2ff115e7723c18f0c874e76cddbebb9aa8ebbdf35be"
+source = "git+https://github.com/tailscale/tailscale-rs.git?rev=9f7cec0447#9f7cec0447df4214fe7bd34a8fb8674c2f639978"
 dependencies = [
  "heapless 0.9.3",
  "smallvec",
@@ -10658,8 +10642,7 @@ dependencies = [
 [[package]]
 name = "ts_bart"
 version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "444f95c3c416a7dc852113c7e3a62d0e0a6bee7d0edbd0ca295f60373585719d"
+source = "git+https://github.com/tailscale/tailscale-rs.git?rev=9f7cec0447#9f7cec0447df4214fe7bd34a8fb8674c2f639978"
 dependencies = [
  "cfg-if",
  "heapless 0.9.3",
@@ -10672,8 +10655,7 @@ dependencies = [
 [[package]]
 name = "ts_bart_packetfilter"
 version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "65e9aff31e23e2454b6652d09716c62cc09548018c569b3fa0a37d48a159e547"
+source = "git+https://github.com/tailscale/tailscale-rs.git?rev=9f7cec0447#9f7cec0447df4214fe7bd34a8fb8674c2f639978"
 dependencies = [
  "hashbrown 0.17.1",
  "smallvec",
@@ -10687,8 +10669,7 @@ dependencies = [
 [[package]]
 name = "ts_bitset"
 version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d509538ad206ba50db4db382a9fd94a2c4494460095fb844434d518bf4cc89e1"
+source = "git+https://github.com/tailscale/tailscale-rs.git?rev=9f7cec0447#9f7cec0447df4214fe7bd34a8fb8674c2f639978"
 dependencies = [
  "cfg-if",
  "static_assertions",
@@ -10697,8 +10678,7 @@ dependencies = [
 [[package]]
 name = "ts_capabilityversion"
 version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9b2d1b1e25c202d44972b4423d372e7e1eb9ec226864d0b5c24c1be923392fe9"
+source = "git+https://github.com/tailscale/tailscale-rs.git?rev=9f7cec0447#9f7cec0447df4214fe7bd34a8fb8674c2f639978"
 dependencies = [
  "serde",
 ]
@@ -10706,8 +10686,7 @@ dependencies = [
 [[package]]
 name = "ts_control"
 version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cb2c3cf4680b02deb47a6c18d5d9b296fb496cc9546e4d76e594f5a24557d463"
+source = "git+https://github.com/tailscale/tailscale-rs.git?rev=9f7cec0447#9f7cec0447df4214fe7bd34a8fb8674c2f639978"
 dependencies = [
  "bytes",
  "chrono",
@@ -10741,8 +10720,7 @@ dependencies = [
 [[package]]
 name = "ts_control_noise"
 version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cad85e8057cbc8de6f8a893ea0a417b22b6698c5a39efac995773ab5f3000166"
+source = "git+https://github.com/tailscale/tailscale-rs.git?rev=9f7cec0447#9f7cec0447df4214fe7bd34a8fb8674c2f639978"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -10755,17 +10733,16 @@ dependencies = [
  "tokio-util",
  "tracing",
  "ts_capabilityversion",
- "ts_hexdump",
  "ts_keys",
  "ts_noise",
+ "ts_util",
  "zerocopy",
 ]
 
 [[package]]
 name = "ts_control_serde"
 version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aab4f5931c2be1ef684bc1edc0f7965c5e8dd067a1d663cfec25cfea067e8ffe"
+source = "git+https://github.com/tailscale/tailscale-rs.git?rev=9f7cec0447#9f7cec0447df4214fe7bd34a8fb8674c2f639978"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -10784,30 +10761,27 @@ dependencies = [
 [[package]]
 name = "ts_dataplane"
 version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ac692c013513afe18dc7ead7a74f3e67c048f943feae4d01b1c819d7bc445c94"
+source = "git+https://github.com/tailscale/tailscale-rs.git?rev=9f7cec0447#9f7cec0447df4214fe7bd34a8fb8674c2f639978"
 dependencies = [
  "bitrs",
  "bytes",
  "etherparse 0.19.0",
+ "itertools 0.14.0",
  "tokio",
  "tracing",
  "ts_bart",
  "ts_disco_protocol",
- "ts_overlay_router",
  "ts_packet",
  "ts_packetfilter",
  "ts_time",
  "ts_transport",
  "ts_tunnel",
- "ts_underlay_router",
 ]
 
 [[package]]
 name = "ts_derp"
 version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2acde518e1296c20cb93242184c40b7af2731ca50a6744bab69cb2c66e24551e"
+source = "git+https://github.com/tailscale/tailscale-rs.git?rev=9f7cec0447#9f7cec0447df4214fe7bd34a8fb8674c2f639978"
 dependencies = [
  "bytes",
  "crypto_box",
@@ -10819,12 +10793,12 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
- "ts_hexdump",
  "ts_http_util",
  "ts_keys",
  "ts_packet",
  "ts_tls_util",
  "ts_transport",
+ "ts_util",
  "url",
  "yoke",
  "zerocopy",
@@ -10833,43 +10807,31 @@ dependencies = [
 [[package]]
 name = "ts_disco_protocol"
 version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1eb6973ae3553eed7d672a36ef352f7f7518649031dbe62a5c94bf6663711172"
+source = "git+https://github.com/tailscale/tailscale-rs.git?rev=9f7cec0447#9f7cec0447df4214fe7bd34a8fb8674c2f639978"
 dependencies = [
  "aead 0.5.2",
  "crypto_box",
  "num-derive",
  "num-traits",
  "thiserror 2.0.21",
- "ts_hexdump",
  "ts_keys",
+ "ts_util",
  "zerocopy",
 ]
 
 [[package]]
 name = "ts_dynbitset"
 version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ada5dc5f35273c0f3ff67d19ac46cd71e9357f86d66b8ef931b2ee294a08e42d"
+source = "git+https://github.com/tailscale/tailscale-rs.git?rev=9f7cec0447#9f7cec0447df4214fe7bd34a8fb8674c2f639978"
 dependencies = [
  "smallvec",
  "ts_bitset",
 ]
 
 [[package]]
-name = "ts_hexdump"
-version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "53f43b3841b0977e25ab975326374dacf5be152bef7403297dc44f5143e3c028"
-dependencies = [
- "heapless 0.9.3",
-]
-
-[[package]]
 name = "ts_http_util"
 version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ede5ab36eef24606c78379d5b82f13a3ce98738cb71c8d6056eb8140eb603938"
+source = "git+https://github.com/tailscale/tailscale-rs.git?rev=9f7cec0447#9f7cec0447df4214fe7bd34a8fb8674c2f639978"
 dependencies = [
  "bytes",
  "futures",
@@ -10889,8 +10851,7 @@ dependencies = [
 [[package]]
 name = "ts_keys"
 version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8372db61fd845ed4ace9499ade955a1a5961655e26c3a45048d1467a95eb5fe8"
+source = "git+https://github.com/tailscale/tailscale-rs.git?rev=9f7cec0447#9f7cec0447df4214fe7bd34a8fb8674c2f639978"
 dependencies = [
  "crypto_box",
  "serde",
@@ -10903,11 +10864,9 @@ dependencies = [
 [[package]]
 name = "ts_netcheck"
 version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ea173af20572c6444019d6f8532e67e8fc31e1cac1cea94a76d7f7fce12af7ca"
+source = "git+https://github.com/tailscale/tailscale-rs.git?rev=9f7cec0447#9f7cec0447df4214fe7bd34a8fb8674c2f639978"
 dependencies = [
  "bytes",
- "dashmap",
  "stun-rs",
  "thiserror 2.0.21",
  "tokio",
@@ -10921,7 +10880,7 @@ dependencies = [
 [[package]]
 name = "ts_netmon"
 version = "0.6.1"
-source = "git+https://github.com/tailscale/tailscale-rs.git?rev=2c67f76eab#2c67f76eab5cbbcc4f78937b188af74dcf2d9870"
+source = "git+https://github.com/tailscale/tailscale-rs.git?rev=9f7cec0447#9f7cec0447df4214fe7bd34a8fb8674c2f639978"
 dependencies = [
  "bitflags 2.13.2",
  "bytes",
@@ -10948,48 +10907,22 @@ dependencies = [
 [[package]]
 name = "ts_netstack_smoltcp"
 version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d917f3575ece5b352360ccd2f4a5507aace4b693f0c802d0285c609cea6827fd"
-dependencies = [
- "bytes",
- "futures-util",
- "tokio",
- "tracing",
- "ts_netstack_smoltcp_core",
- "ts_netstack_smoltcp_socket",
-]
-
-[[package]]
-name = "ts_netstack_smoltcp_core"
-version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1dcffc9a5716f8e7a8904b4c9e5b8efb535e2713d34b63d0e84aee83c8506af1"
+source = "git+https://github.com/tailscale/tailscale-rs.git?rev=9f7cec0447#9f7cec0447df4214fe7bd34a8fb8674c2f639978"
 dependencies = [
  "bytes",
  "flume",
+ "futures-util",
  "heapless 0.9.3",
- "smoltcp 0.13.1",
+ "smoltcp 0.14.0",
  "thiserror 2.0.21",
- "tracing",
-]
-
-[[package]]
-name = "ts_netstack_smoltcp_socket"
-version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b2109743df4bfc2b46dfc628be8d6f16ef2a8f06cea48d70c13cc72cc8a945b6"
-dependencies = [
- "bytes",
  "tokio",
  "tracing",
- "ts_netstack_smoltcp_core",
 ]
 
 [[package]]
 name = "ts_nodecapability"
 version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e4d7605a75d89ed0fa309404d997a3302b4d1a1f7915521e2182cb7771c58d33"
+source = "git+https://github.com/tailscale/tailscale-rs.git?rev=9f7cec0447#9f7cec0447df4214fe7bd34a8fb8674c2f639978"
 dependencies = [
  "cfg-if",
  "serde",
@@ -10999,8 +10932,7 @@ dependencies = [
 [[package]]
 name = "ts_noise"
 version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a2d9a4a6dfa82f19d61043b800e191b64f61bf6e50e1dcfdb38e14e7f28629a0"
+source = "git+https://github.com/tailscale/tailscale-rs.git?rev=9f7cec0447#9f7cec0447df4214fe7bd34a8fb8674c2f639978"
 dependencies = [
  "aead 0.5.2",
  "blake2 0.10.6",
@@ -11014,36 +10946,21 @@ dependencies = [
 ]
 
 [[package]]
-name = "ts_overlay_router"
-version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a4516ec78124b965a9475fb941685901b4b4495b261eed0ed91afdb627b27d0c"
-dependencies = [
- "itertools 0.14.0",
- "tracing",
- "ts_bart",
- "ts_packet",
- "ts_transport",
-]
-
-[[package]]
 name = "ts_packet"
 version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3934b1778a2899f6325c165d525f51ebec6de419c2b426ea9e82297ee64a1aa4"
+source = "git+https://github.com/tailscale/tailscale-rs.git?rev=9f7cec0447#9f7cec0447df4214fe7bd34a8fb8674c2f639978"
 dependencies = [
  "bytes",
  "crypto_box",
  "stable_deref_trait",
- "ts_hexdump",
+ "ts_util",
  "yoke",
 ]
 
 [[package]]
 name = "ts_packetfilter"
 version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bd167c3cebccc96ab37cace59ae8366d1487bfdf92dc518ca27813c93b0de0ef"
+source = "git+https://github.com/tailscale/tailscale-rs.git?rev=9f7cec0447#9f7cec0447df4214fe7bd34a8fb8674c2f639978"
 dependencies = [
  "hashbrown 0.17.1",
  "ipnet",
@@ -11054,8 +10971,7 @@ dependencies = [
 [[package]]
 name = "ts_packetfilter_serde"
 version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dbb8e593d7080083da9444425f05e8c24bf459daa3a5968aa4f0925eff27ed37"
+source = "git+https://github.com/tailscale/tailscale-rs.git?rev=9f7cec0447#9f7cec0447df4214fe7bd34a8fb8674c2f639978"
 dependencies = [
  "ipnet",
  "nom 8.0.0",
@@ -11068,8 +10984,7 @@ dependencies = [
 [[package]]
 name = "ts_packetfilter_state"
 version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "193f4a81c47fa3abd44e80e89ecee0c64b0fd8f9d6159e6b407642708fc8ed2f"
+source = "git+https://github.com/tailscale/tailscale-rs.git?rev=9f7cec0447#9f7cec0447df4214fe7bd34a8fb8674c2f639978"
 dependencies = [
  "ts_packetfilter",
  "ts_packetfilter_serde",
@@ -11078,8 +10993,7 @@ dependencies = [
 [[package]]
 name = "ts_peercapability"
 version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "81c18288184982b01e93930c42d524d9d7a2682e5a54eee456cdd176559a1143"
+source = "git+https://github.com/tailscale/tailscale-rs.git?rev=9f7cec0447#9f7cec0447df4214fe7bd34a8fb8674c2f639978"
 dependencies = [
  "serde",
  "url",
@@ -11088,8 +11002,7 @@ dependencies = [
 [[package]]
 name = "ts_runtime"
 version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "606b6d01cea87feffcd40efa6eed6ed77511d135f5807f198bc2adf96d7bbb68"
+source = "git+https://github.com/tailscale/tailscale-rs.git?rev=9f7cec0447#9f7cec0447df4214fe7bd34a8fb8674c2f639978"
 dependencies = [
  "bytes",
  "futures",
@@ -11112,17 +11025,16 @@ dependencies = [
  "ts_dataplane",
  "ts_derp",
  "ts_disco_protocol",
- "ts_hexdump",
  "ts_keys",
  "ts_netcheck",
  "ts_netmon",
  "ts_netstack_smoltcp",
- "ts_overlay_router",
  "ts_packet",
  "ts_packetfilter",
  "ts_packetfilter_state",
  "ts_transport",
  "ts_tunnel",
+ "ts_util",
  "url",
  "yoke",
  "zerocopy",
@@ -11131,14 +11043,12 @@ dependencies = [
 [[package]]
 name = "ts_time"
 version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0a713a89eb4946b2e0b6689003696247dce83b4f4153fe676adeb1ead8e905c6"
+source = "git+https://github.com/tailscale/tailscale-rs.git?rev=9f7cec0447#9f7cec0447df4214fe7bd34a8fb8674c2f639978"
 
 [[package]]
 name = "ts_tls_util"
 version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ea6a22b611afe1bfd4a38e8096b1ce66527c4a773ead601a06c6d827b066a7ca"
+source = "git+https://github.com/tailscale/tailscale-rs.git?rev=9f7cec0447#9f7cec0447df4214fe7bd34a8fb8674c2f639978"
 dependencies = [
  "tokio",
  "tokio-rustls",
@@ -11150,23 +11060,21 @@ dependencies = [
 [[package]]
 name = "ts_transport"
 version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c35ed52ac9c9e4f7f4db0a6148cae467d93d9491d3b5a3916db941862b2d65f5"
+source = "git+https://github.com/tailscale/tailscale-rs.git?rev=9f7cec0447#9f7cec0447df4214fe7bd34a8fb8674c2f639978"
 dependencies = [
  "dyn-eq",
  "dyn-hash",
  "smallbox",
- "ts_hexdump",
  "ts_keys",
  "ts_packet",
+ "ts_util",
  "zerocopy",
 ]
 
 [[package]]
 name = "ts_tunnel"
 version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "90c05be0f72d756f9790e0c6199ce775d14c5bd746dcebdc3ea0efffaf894cc3"
+source = "git+https://github.com/tailscale/tailscale-rs.git?rev=9f7cec0447#9f7cec0447df4214fe7bd34a8fb8674c2f639978"
 dependencies = [
  "aead 0.5.2",
  "blake2 0.10.6",
@@ -11182,19 +11090,9 @@ dependencies = [
 ]
 
 [[package]]
-name = "ts_underlay_router"
-version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "430a46dbd2cc8cf3203d230733026ed0653fa9987c27609256f99e4d07312d25"
-dependencies = [
- "ts_packet",
- "ts_transport",
-]
-
-[[package]]
 name = "ts_util"
 version = "0.6.1"
-source = "git+https://github.com/tailscale/tailscale-rs.git?rev=2c67f76eab#2c67f76eab5cbbcc4f78937b188af74dcf2d9870"
+source = "git+https://github.com/tailscale/tailscale-rs.git?rev=9f7cec0447#9f7cec0447df4214fe7bd34a8fb8674c2f639978"
 dependencies = [
  "futures-core",
  "heapless 0.9.3",
@@ -11798,7 +11696,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -12318,7 +12216,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d6f32a0ff4a9f6f01231eb2059cc85479330739333e0e58cadf03b6af2cca10"
 dependencies = [
  "cfg-if",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

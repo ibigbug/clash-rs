@@ -48,6 +48,10 @@ needless_collect = "deny"
 [patch.crates-io]
 rustls = { git = "https://github.com/Watfaq/rustls.git", branch = "watfaq/0.23.45" }
 tokio-rustls = { git = "https://github.com/Watfaq/tokio-rustls.git", branch = "watfaq/0.26.4" }
-# ts_netmon 0.6.1 re-exports PlatformMon on iOS, where it does not exist
-# (fixed in tailscale-rs 2c67f76). Drop after the next tailscale release.
-ts_netmon = { git = "https://github.com/tailscale/tailscale-rs.git", rev = "2c67f76eab" }
+# tailscale-rs 0.6.1 from git, until the next tailscale release:
+# - 2c67f76: ts_netmon re-exports PlatformMon on iOS, where it does not exist.
+# - 9f7cec0: netstack requests whose caller was dropped are skipped instead of
+#   running against a socket that was closed meanwhile (smoltcp panics with
+#   "handle does not refer to a valid socket", e.g. after a UDP DNS timeout).
+tailscale = { git = "https://github.com/tailscale/tailscale-rs.git", rev = "9f7cec0447" }
+ts_netmon = { git = "https://github.com/tailscale/tailscale-rs.git", rev = "9f7cec0447" }
