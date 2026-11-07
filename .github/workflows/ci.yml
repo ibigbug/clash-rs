@@ -35,6 +35,10 @@ jobs:
       rustflags: ""
       enable-tmate: false
       enable-sccache: true
+      # The reusable workflow keys sccache caches by run id, so every run
+      # writes a fresh cache per target. Cap PR caches to limit Actions
+      # storage growth; master/tag builds keep a larger warm cache.
+      sccache-max-size: "${{ github.event_name == 'pull_request' && '150M' || '500M' }}"
       only-clippy-tests-on-pr: true
 
   release-watfaq:
