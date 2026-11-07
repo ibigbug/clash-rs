@@ -17,7 +17,9 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: ["macos-latest", "windows-latest", "ubuntu-latest"]
+        # Coverage is only collected on Ubuntu for pull requests; the full
+        # macOS/Windows set runs on pushes to master and on release tags.
+        os: ${{ github.event_name == 'pull_request' && fromJSON('["ubuntu-latest"]') || fromJSON('["macos-latest", "windows-latest", "ubuntu-latest"]') }}
     steps:
       - uses: actions/checkout@v7
         with:

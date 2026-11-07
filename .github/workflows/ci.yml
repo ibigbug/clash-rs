@@ -31,9 +31,9 @@ jobs:
     with:
       rust-toolchain: "stable"
       packages: "clash-rs"
-      target-config-file: ".github/target.toml"
+      target-config-file: ${{ github.event_name == 'pull_request' && '.github/target-pr.toml' || '.github/target.toml' }}
       rustflags: ""
-      enable-tmate: true
+      enable-tmate: false
       enable-sccache: true
       only-clippy-tests-on-pr: true
 
@@ -63,6 +63,9 @@ jobs:
 
   docker:
     name: Docker
+    # Multi-arch image builds are slow and only consume cache/minutes on PRs
+    # without publishing anything useful.
+    if: github.event_name != 'pull_request'
     needs: [build]
     uses: rust-proxy/workflows/.github/workflows/docker-publish.yml@v2.0.4
     with:
