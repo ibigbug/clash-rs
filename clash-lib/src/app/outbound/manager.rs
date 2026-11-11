@@ -333,7 +333,10 @@ impl OutboundManager {
     /// that call sites stay feature-independent.
     pub fn load_plain_outbounds(
         outbounds: Vec<OutboundProxyProtocol>,
-        #[cfg_attr(not(feature = "tailscale"), allow(unused_variables))]
+        #[cfg_attr(
+            not(any(feature = "tailscale", feature = "naive")),
+            allow(unused_variables)
+        )]
         cwd: &std::path::Path,
     ) -> Vec<AnyOutboundHandler> {
         outbounds
@@ -416,6 +419,17 @@ impl OutboundManager {
                                 "failed to load hysteria2 outbound {}: {}",
                                 name, e
                             );
+                        })
+                        .ok()
+                }
+                #[cfg(feature = "naive")]
+                OutboundProxyProtocol::Naive(mut config) => {
+                    let name = config.common_opts.name.clone();
+                    config.resolve_paths(cwd);
+                    crate::proxy::naive::Handler::try_from(config)
+                        .map(|handler| Arc::new(handler) as AnyOutboundHandler)
+                        .inspect_err(|e| {
+                            error!("failed to load naive outbound {}: {}", name, e);
                         })
                         .ok()
                 }

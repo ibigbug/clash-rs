@@ -19,6 +19,7 @@ bsd = ["shadowsocks", "tuic", "ring", "clash-lib/zero_copy", "tun"]  # enable tu
 shadowsocks = ["clash-lib/shadowsocks"]
 ssh = ["clash-lib/ssh"]
 tuic = ["clash-lib/tuic"]
+naive = ["clash-lib/naive"]
 onion = ["clash-lib/onion"]
 shadowquic = ["clash-lib/shadowquic"]
 wireguard = ["clash-lib/wireguard"]
