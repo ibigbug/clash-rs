@@ -2,11 +2,19 @@ import { useEffect, useState } from 'react';
 import { useWebSocket } from './useWebSocket';
 import { getWsUrl } from '../lib/api';
 
+export interface FlowSource {
+  ip: string;
+  /** Inbound the connections arrived through: "HTTP", "HTTP-CONNECT", "SOCKS5", "TUN", ... */
+  inbound: string;
+}
+
 export interface FlowRecord {
   dstHost: string;
   dstPort: number;
   protocol: string;
   srcIps: string[];
+  /** Absent from older cores. */
+  sources?: FlowSource[];
   connCount: number;
   activeCount: number;
   closedCount: number;

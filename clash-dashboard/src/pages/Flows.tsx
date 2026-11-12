@@ -480,7 +480,14 @@ export function Flows() {
                   className="group transition-colors"
                   style={{ borderBottom: '1px solid var(--color-separator-subtle)' }}
                 >
-                  <td className="px-4 py-3" title={flow.srcIps.length > 0 ? `Sources: ${flow.srcIps.join(', ')}` : undefined}>
+                  <td
+                    className="px-4 py-3"
+                    title={
+                      flow.sources?.length
+                        ? `Sources: ${flow.sources.map(s => `${s.ip} (${s.inbound})`).join(', ')}`
+                        : flow.srcIps.length > 0 ? `Sources: ${flow.srcIps.join(', ')}` : undefined
+                    }
+                  >
                     <div className="text-[14px] font-medium truncate" style={{ color: 'var(--color-text-primary)' }}>
                       {flow.dstHost || '—'}
                     </div>
