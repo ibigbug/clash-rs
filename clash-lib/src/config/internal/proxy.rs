@@ -73,6 +73,9 @@ pub enum OutboundProxyProtocol {
     #[cfg(feature = "tuic")]
     #[serde(rename = "tuic")]
     Tuic(OutboundTuic),
+    #[cfg(feature = "naive")]
+    #[serde(rename = "naive")]
+    Naive(OutboundNaive),
     #[serde(rename = "hysteria2")]
     Hysteria2(OutboundHysteria2),
     #[serde(rename = "ssh")]
@@ -106,6 +109,8 @@ impl OutboundProxyProtocol {
             OutboundProxyProtocol::Tor(tor) => &tor.name,
             #[cfg(feature = "tuic")]
             OutboundProxyProtocol::Tuic(tuic) => &tuic.common_opts.name,
+            #[cfg(feature = "naive")]
+            OutboundProxyProtocol::Naive(naive) => &naive.common_opts.name,
             OutboundProxyProtocol::Hysteria2(hysteria2) => &hysteria2.name,
             #[cfg(feature = "ssh")]
             OutboundProxyProtocol::Ssh(ssh) => &ssh.common_opts.name,
@@ -151,6 +156,8 @@ impl Display for OutboundProxyProtocol {
             OutboundProxyProtocol::Tor(_) => write!(f, "Tor"),
             #[cfg(feature = "tuic")]
             OutboundProxyProtocol::Tuic(_) => write!(f, "Tuic"),
+            #[cfg(feature = "naive")]
+            OutboundProxyProtocol::Naive(_) => write!(f, "Naive"),
             OutboundProxyProtocol::Hysteria2(_) => write!(f, "Hysteria2"),
             #[cfg(feature = "ssh")]
             OutboundProxyProtocol::Ssh(_) => write!(f, "Ssh"),
@@ -174,6 +181,33 @@ pub struct CommonConfigOptions {
     /// nothing
     #[serde(alias = "dialer-proxy")]
     pub connect_via: Option<String>,
+}
+
+/// Chromium-backed NaiveProxy. TLS verification is always enabled.
+#[cfg(feature = "naive")]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
+#[serde(rename_all = "kebab-case")]
+pub struct OutboundNaive {
+    #[serde(flatten)]
+    pub common_opts: CommonConfigOptions,
+    pub username: String,
+    pub password: String,
+    /// HTTP/2 by default; QUIC when true.
+    #[serde(default)]
+    pub quic: bool,
+    pub concurrency: Option<u32>,
+    pub congestion_controller: Option<String>,
+    /// File path or inline PEM containing trusted server CA certificates.
+    pub ca_cert: Option<String>,
+    pub cronet_lib_path: Option<String>,
+    /// CONNECT deadline in milliseconds, including engine initialization.
+    pub request_timeout: Option<u64>,
+    /// UoT v2 requires a compatible server and is opt-in.
+    #[serde(default)]
+    pub udp: bool,
+    /// Recognized so unsupported TLS bypasses/overrides cannot be ignored.
+    pub skip_cert_verify: Option<bool>,
+    pub sni: Option<String>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Debug, Default)]

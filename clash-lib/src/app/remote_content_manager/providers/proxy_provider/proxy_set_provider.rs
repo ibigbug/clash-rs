@@ -243,6 +243,15 @@ impl ProxySetProvider {
                                     let h: tuic::Handler = tuic.try_into()?;
                                     Ok(Arc::new(h) as _)
                                 }
+                                #[cfg(feature = "naive")]
+                                OutboundProxyProtocol::Naive(mut config) => {
+                                    if let Some(ref cwd) = cwd {
+                                        config.resolve_paths(cwd);
+                                    }
+                                    let h: crate::proxy::naive::Handler =
+                                        config.try_into()?;
+                                    Ok(Arc::new(h) as _)
+                                }
                                 #[cfg(feature = "shadowquic")]
                                 OutboundProxyProtocol::ShadowQuic(sq) => {
                                     let h: crate::proxy::shadowquic::Handler =

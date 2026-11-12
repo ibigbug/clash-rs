@@ -201,6 +201,50 @@ impl DockerTestRunner {
         })
     }
 
+    /// Wait for application readiness, including UDP-only listeners.
+    #[allow(dead_code)]
+    pub async fn wait_for_log(
+        &self,
+        marker: &str,
+        timeout: std::time::Duration,
+    ) -> anyhow::Result<()> {
+        tokio::time::timeout(timeout, async {
+            loop {
+                let logs = self
+                    .instance
+                    .logs(
+                        &self.id,
+                        Some(LogsOptions {
+                            stdout: true,
+                            stderr: true,
+                            ..Default::default()
+                        }),
+                    )
+                    .try_collect::<Vec<_>>()
+                    .await?;
+                let output =
+                    logs.iter().map(ToString::to_string).collect::<String>();
+                let inspect =
+                    self.instance.inspect_container(&self.id, None).await?;
+                if !inspect
+                    .state
+                    .and_then(|state| state.running)
+                    .unwrap_or(false)
+                {
+                    anyhow::bail!("container exited before readiness: {output}");
+                }
+                if output.contains(marker) {
+                    return Ok(());
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .map_err(|_| {
+            anyhow::anyhow!("container readiness timeout waiting for {marker:?}")
+        })?
+    }
+
     pub fn container_ip(&self) -> Option<String> {
         self.inspect
             .network_settings

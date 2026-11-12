@@ -38,6 +38,7 @@ ring = [
 # Protos
 shadowsocks = ["dep:shadowsocks", "dep:blake3"]
 tuic = ["dep:wind-tuic", "dep:wind-core", "dep:wind-quic", "dep:wind-quinn"]
+naive = ["dep:wind-naive", "dep:wind-core"]
 ssh = ["dep:russh", "dep:dirs", "dep:totp-rs"]
 onion = ["dep:arti-client", "dep:tor-rtcompat", "arti-client/onion-service-client"]
 shadowquic = ["dep:shadowquic", "shadowquic?/shadowquic-quinn"]
@@ -189,10 +190,10 @@ arti-client = { version = "0.47", optional = true, default-features = false, fea
 tor-rtcompat = { version = "0.47", optional = true, default-features = false, features = ["tokio", "rustls"] }
 
 
-# TUIC pins Wind to an exact main revision.
-wind-tuic = { git = "https://github.com/rust-proxy/wind", rev = "3ab2388761a32337e9f810348869ce68bfcc3067", optional = true, default-features = false, features = ["client", "decode", "quinn"] }
-wind-core = { git = "https://github.com/rust-proxy/wind", rev = "3ab2388761a32337e9f810348869ce68bfcc3067", optional = true, default-features = false }
-wind-quic = { git = "https://github.com/rust-proxy/wind", rev = "3ab2388761a32337e9f810348869ce68bfcc3067", optional = true, default-features = false, features = ["quinn"] }
+# Keep all Wind crates on the same exact revision.
+wind-tuic = { git = "https://github.com/rust-proxy/wind", rev = "03d5406049af1c950b178829d24b4a67d6fad1f2", optional = true, default-features = false, features = ["client", "decode", "quinn"] }
+wind-core = { git = "https://github.com/rust-proxy/wind", rev = "03d5406049af1c950b178829d24b4a67d6fad1f2", optional = true, default-features = false }
+wind-quic = { git = "https://github.com/rust-proxy/wind", rev = "03d5406049af1c950b178829d24b4a67d6fad1f2", optional = true, default-features = false, features = ["quinn"] }
 # Keep Wind's Quinn fork separate from the crates.io Quinn used by Hysteria2.
 wind-quinn = { package = "quinn", git = "https://github.com/Tipuch/quinn.git", branch = "bbrv3", optional = true, default-features = false, features = ["runtime-tokio"] }
 
@@ -245,8 +246,8 @@ http-body-util = "0.1"
 reqwest = { version = "0.13", features = ["socks"] }
 sysinfo = { version = "0.40", features = ["network"]}
 moka = { version = "0.12", features = ["future"] }
-wind-tuic = { git = "https://github.com/rust-proxy/wind", rev = "3ab2388761a32337e9f810348869ce68bfcc3067", default-features = false, features = ["server", "quinn"] }
-wind-base = { git = "https://github.com/rust-proxy/wind", rev = "3ab2388761a32337e9f810348869ce68bfcc3067" }
+wind-tuic = { git = "https://github.com/rust-proxy/wind", rev = "03d5406049af1c950b178829d24b4a67d6fad1f2", default-features = false, features = ["server", "client", "quinn"] }
+wind-base = { git = "https://github.com/rust-proxy/wind", rev = "03d5406049af1c950b178829d24b4a67d6fad1f2" }
 eyre = "0.6"
 
 [build-dependencies]
@@ -277,6 +278,14 @@ windows = { version = "0.62", features = [
     "Win32_NetworkManagement_Ndis",
     "Win32_Security_Authorization"
 ] }
+
+# Cronet is loaded at runtime on desktop Linux/Windows. Apple and Android
+# builds need a matching static archive (CRONET_LIB_DIR).
+[target.'cfg(not(any(target_vendor = "apple", target_os = "android")))'.dependencies]
+wind-naive = { git = "https://github.com/rust-proxy/wind", rev = "03d5406049af1c950b178829d24b4a67d6fad1f2", optional = true, default-features = false, features = ["dynamic"] }
+
+[target.'cfg(any(target_vendor = "apple", target_os = "android"))'.dependencies]
+wind-naive = { git = "https://github.com/rust-proxy/wind", rev = "03d5406049af1c950b178829d24b4a67d6fad1f2", optional = true, default-features = false, features = ["static-link"] }
 
 [lints]
 workspace = true
