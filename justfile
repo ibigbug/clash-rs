@@ -17,9 +17,9 @@ test-no-docker:
   CLASH_RS_CI=true cargo test --all --all-features
 
 verge-win verge_path='C:\Apps\Clash Verge\verge-mihomo-alpha.exe':
-  cargo build -p clash-rs --release --features=standard
+  cargo build -p clash-rs --profile detailed-release --features=standard
   rm -f "{{verge_path}}"
   cp target/release/clash-rs.exe "{{verge_path}}"
 
-test-api token='test_token' url='http://127.0.0.1:9093/proxies':
+test-api token='test_token' url='http://127.0.0.1:9090/group':
   curl -H "Authorization: Bearer {{token}}" {{url}}
