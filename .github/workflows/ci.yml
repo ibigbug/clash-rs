@@ -18,7 +18,7 @@ defaults:
 
 env:
   RUST_LOG: "clash_lib=TRACE"
-  RUST_TOOLCHAIN: "stable"
+  RUST_TOOLCHAIN: "1.99.1"
   RUSTC_BOOTSTRAP: "1"
   SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
 
@@ -29,12 +29,16 @@ jobs:
     secrets:
       sentry-dsn: ${{ secrets.SENTRY_DSN }}
     with:
-      rust-toolchain: "stable"
+      rust-toolchain: "1.99.1"
       packages: "clash-rs"
-      target-config-file: ".github/target.toml"
+      target-config-file: ${{ github.event_name == 'pull_request' && '.github/target-pr.toml' || '.github/target.toml' }}
       rustflags: ""
-      enable-tmate: true
+      enable-tmate: false
       enable-sccache: true
+      # The reusable workflow keys sccache caches by run id, so every run
+      # writes a fresh cache per target. Cap PR caches to limit Actions
+      # storage growth; master/tag builds keep a larger warm cache.
+      sccache-max-size: "${{ github.event_name == 'pull_request' && '150M' || '500M' }}"
       only-clippy-tests-on-pr: true
 
   release-watfaq:
@@ -63,6 +67,9 @@ jobs:
 
   docker:
     name: Docker
+    # Multi-arch image builds are slow and only consume cache/minutes on PRs
+    # without publishing anything useful.
+    if: github.event_name != 'pull_request'
     needs: [build]
     uses: rust-proxy/workflows/.github/workflows/docker-publish.yml@v2.0.4
     with:

@@ -1,0 +1,57 @@
+name: Cleanup caches
+
+on:
+  schedule:
+    # Daily at 03:17 UTC. The reusable build workflow keys sccache caches by
+    # github.run_id, so every run stores a fresh per-target cache and the
+    # repository's cache storage grows until GitHub evicts it.
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+    inputs:
+      retention_days:
+        description: "Delete caches created more than this many days ago"
+        required: false
+        default: "5"
+        type: string
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: cleanup-caches
+  cancel-in-progress: false
+
+jobs:
+  cleanup:
+    name: Delete old Actions caches
+    runs-on: ubuntu-latest
+    env:
+      RETENTION_DAYS: ${{ github.event.inputs.retention_days || '5' }}
+    steps:
+      - name: Delete caches older than retention
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          repo="${GITHUB_REPOSITORY}"
+          cutoff=$(( $(date +%s) - RETENTION_DAYS * 86400 ))
+          deleted=0
+          kept=0
+          while IFS=$'\t' read -r id created; do
+            [ -n "$id" ] || continue
+            if [ "$(date -d "$created" +%s)" -lt "$cutoff" ]; then
+              gh api -X DELETE "/repos/${repo}/actions/caches/${id}" >/dev/null
+              deleted=$((deleted + 1))
+            else
+              kept=$((kept + 1))
+            fi
+          done < <(gh api --paginate "/repos/${repo}/actions/caches?per_page=100" \
+                     --jq '.actions_caches[] | [.id, .created_at] | @tsv')
+          {
+            echo "### Cache cleanup"
+            echo ""
+            echo "- Retention: ${RETENTION_DAYS} days"
+            echo "- Deleted: ${deleted}"
+            echo "- Kept: ${kept}"
+          } >> "$GITHUB_STEP_SUMMARY"

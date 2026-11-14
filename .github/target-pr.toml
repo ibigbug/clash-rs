@@ -1,0 +1,41 @@
+# Reduced build matrix for pull requests.
+#
+# The full .github/target.toml matrix (26 targets, including mips/musl/cross
+# builds) still runs on pushes to master and on release tags. Pull requests
+# only need the platforms that catch most breakage, because the PR matrix
+# accounts for most of the repository's Actions minutes.
+
+[[target]]
+os = "ubuntu-latest"
+target = "x86_64-unknown-linux-gnu"
+release-name = "x86_64-unknown-linux-gnu"
+tool = "cross"
+extra-args = "-F plus"
+
+[[target]]
+os = "ubuntu-latest"
+target = "x86_64-unknown-linux-musl"
+release-name = "x86_64-unknown-linux-musl"
+tool = "cross"
+extra-args = "-F perf"
+
+[[target]]
+os = "ubuntu-latest"
+target = "aarch64-unknown-linux-gnu"
+release-name = "aarch64-unknown-linux-gnu"
+tool = "cross"
+extra-args = "-F plus"
+
+[[target]]
+os = "windows-latest"
+target = "x86_64-pc-windows-msvc"
+release-name = "x86_64-pc-windows-msvc"
+postfix = ".exe"
+extra-args = "-F plus"
+nasm = true
+
+[[target]]
+os = "macos-latest"
+target = "aarch64-apple-darwin"
+release-name = "aarch64-apple-darwin"
+extra-args = "-F plus"
