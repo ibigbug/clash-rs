@@ -78,7 +78,7 @@ pub fn proxy_groups_dag_sort(
     let group_len = groups.len();
 
     while !queue.is_empty() {
-        let name = queue.pop_front().unwrap().to_owned();
+        let name = queue.pop_front().unwrap();
         let node = graph
             .get(&name)
             .unwrap_or_else(|| panic!("node {name} not found"));
