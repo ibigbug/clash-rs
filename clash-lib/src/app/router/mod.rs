@@ -463,6 +463,7 @@ pub fn map_rule_type(
                         print_and_exit!("rule provider {} not found", rule_set)
                     })
                     .clone(),
+                options.no_resolve,
             )),
             None => {
                 // this is called in remote rule provider with no rule provider
@@ -536,6 +537,51 @@ mod tests {
 
         assert_eq!(entry.matcher().target(), "PROXY");
         assert_eq!(entry.interface(), Some("en0"));
+    }
+
+    #[test]
+    fn test_rule_set_should_resolve_ip() {
+        use crate::app::remote_content_manager::providers::rule_provider::{
+            RuleProviderImpl, RuleSetBehavior, RuleSetFormat, ThreadSafeRuleProvider,
+        };
+        use std::collections::HashMap;
+
+        let mut registry: HashMap<String, ThreadSafeRuleProvider> = HashMap::new();
+        for (name, behavior) in [
+            ("cidr", RuleSetBehavior::Ipcidr),
+            ("classical", RuleSetBehavior::Classical),
+            ("domains", RuleSetBehavior::Domain),
+        ] {
+            registry.insert(
+                name.to_owned(),
+                Arc::new(RuleProviderImpl::new(
+                    name.to_owned(),
+                    behavior,
+                    RuleSetFormat::Text,
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(vec![]),
+                )),
+            );
+        }
+
+        let should_resolve = |line: &str| {
+            super::map_rule_type(
+                RuleType::try_from(line.to_string()).unwrap(),
+                None,
+                None,
+                Some(&registry),
+            )
+            .should_resolve_ip()
+        };
+
+        assert!(should_resolve("RULE-SET,cidr,DIRECT"));
+        assert!(!should_resolve("RULE-SET,cidr,DIRECT,no-resolve"));
+        assert!(should_resolve("RULE-SET,classical,DIRECT"));
+        assert!(!should_resolve("RULE-SET,classical,DIRECT,no-resolve"));
+        assert!(!should_resolve("RULE-SET,domains,DIRECT"));
     }
 
     #[tokio::test]
