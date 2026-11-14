@@ -585,6 +585,77 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_rule_set_resolution_in_match_route() {
+        use crate::{
+            app::remote_content_manager::providers::rule_provider::RuleSetBehavior,
+            config::internal::config::{InlineRuleProvider, RuleProviderDef},
+        };
+        use std::collections::HashMap;
+
+        async fn route(rule: &str, expected_resolves: usize) -> String {
+            let mut resolver = MockClashResolver::new();
+            resolver
+                .expect_resolve()
+                .times(expected_resolves)
+                .returning(|_, _| Ok(Some("10.1.2.3".parse().unwrap())));
+
+            let providers = HashMap::from([
+                (
+                    "cidr".to_owned(),
+                    RuleProviderDef::Inline(InlineRuleProvider {
+                        path: String::new(),
+                        behavior: RuleSetBehavior::Ipcidr,
+                        inline_rules: vec!["10.0.0.0/8".to_owned()],
+                    }),
+                ),
+                (
+                    "domains".to_owned(),
+                    RuleProviderDef::Inline(InlineRuleProvider {
+                        path: String::new(),
+                        behavior: RuleSetBehavior::Domain,
+                        inline_rules: vec!["+.other.example".to_owned()],
+                    }),
+                ),
+            ]);
+
+            let router = super::Router::new(
+                vec![RuleType::try_from(rule.to_owned()).unwrap()],
+                providers,
+                Arc::new(resolver),
+                None,
+                None,
+                None,
+                String::new(),
+            )
+            .await;
+            // providers are initialized in the background; make sure they are
+            // loaded before matching
+            for p in router.get_rule_providers().values() {
+                p.initialize().await.unwrap();
+            }
+
+            router
+                .match_route(&mut Session {
+                    destination: crate::session::SocksAddr::Domain(
+                        "internal.example".to_owned(),
+                        443,
+                    ),
+                    ..Default::default()
+                })
+                .await
+                .0
+                .to_owned()
+        }
+
+        // resolves the domain and matches the resolved IP
+        assert_eq!(route("RULE-SET,cidr,PROXY", 1).await, "PROXY");
+        // no-resolve: no DNS lookup, so the domain cannot match
+        assert_eq!(route("RULE-SET,cidr,PROXY,no-resolve", 0).await, "MATCH");
+        // domain rule-sets never trigger a lookup
+        assert_eq!(route("RULE-SET,domains,PROXY", 0).await, "MATCH");
+    }
+
+    #[tokio::test]
     async fn test_route_match() {
         initialize();
 
