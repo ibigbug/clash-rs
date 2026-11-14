@@ -402,12 +402,15 @@ impl RuleType {
             ))),
         }?;
 
+        // `no-resolve` applies to IP based rules and to RULE-SET (commonly
+        // used with ipcidr providers, e.g. `RULE-SET,cncidr,DIRECT,no-resolve`).
         if options.no_resolve
             && !matches!(
                 &kind,
                 RuleKind::GeoIP { .. }
                     | RuleKind::IpCidr { .. }
                     | RuleKind::SrcCidr { .. }
+                    | RuleKind::RuleSet { .. }
             )
         {
             return Err(Error::InvalidConfig(format!(
@@ -508,6 +511,22 @@ mod tests {
             .unwrap();
         assert_eq!(rule.target(), "interface=en0");
         assert_eq!(rule.interface(), None);
+    }
+
+    #[test]
+    fn test_no_resolve_option_accepted() {
+        let rule =
+            RuleType::try_from("RULE-SET,cncidr,DIRECT,no-resolve".to_string())
+                .unwrap();
+        assert_eq!(rule.target(), "DIRECT");
+        assert!(rule.options.no_resolve);
+
+        assert!(
+            RuleType::try_from(
+                "IP-CIDR,10.0.0.0/8,DIRECT,no-resolve,no-resolve".to_string()
+            )
+            .is_err()
+        );
     }
 
     #[test]
