@@ -67,7 +67,7 @@ fn split_sub_rule_options(rest: &str) -> (&str, Vec<&str>) {
         }
     }
     params.reverse();
-    (payload, params)
+    (payload.trim(), params)
 }
 
 pub struct CompositeRule {
@@ -388,6 +388,39 @@ mod tests {
         let rule = CompositeRule::new(
             "AND",
             "((DOMAIN,example.com),(NETWORK,TCP))",
+            "DIRECT",
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(!rule.should_resolve_ip());
+    }
+
+    #[test]
+    fn test_sub_rule_whitespace() {
+        let rule = CompositeRule::new(
+            "AND",
+            "(( IP-CIDR , 10.0.0.0/8 , no-resolve ),( NETWORK, UDP ))",
+            "DIRECT",
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(!rule.should_resolve_ip());
+        assert!(rule.apply(&Session {
+            destination: SocksAddr::Ip("10.1.2.3:53".parse().unwrap()),
+            network: Network::Udp,
+            ..Default::default()
+        }));
+    }
+
+    #[test]
+    fn test_src_ip_cidr_does_not_resolve() {
+        let rule = CompositeRule::new(
+            "AND",
+            "((DOMAIN,example.com),(SRC-IP-CIDR,192.168.0.0/16))",
             "DIRECT",
             None,
             None,
