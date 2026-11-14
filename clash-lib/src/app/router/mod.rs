@@ -463,6 +463,7 @@ pub fn map_rule_type(
                         print_and_exit!("rule provider {} not found", rule_set)
                     })
                     .clone(),
+                options.no_resolve,
             )),
             None => {
                 // this is called in remote rule provider with no rule provider
@@ -536,6 +537,122 @@ mod tests {
 
         assert_eq!(entry.matcher().target(), "PROXY");
         assert_eq!(entry.interface(), Some("en0"));
+    }
+
+    #[test]
+    fn test_rule_set_should_resolve_ip() {
+        use crate::app::remote_content_manager::providers::rule_provider::{
+            RuleProviderImpl, RuleSetBehavior, RuleSetFormat, ThreadSafeRuleProvider,
+        };
+        use std::collections::HashMap;
+
+        let mut registry: HashMap<String, ThreadSafeRuleProvider> = HashMap::new();
+        for (name, behavior) in [
+            ("cidr", RuleSetBehavior::Ipcidr),
+            ("classical", RuleSetBehavior::Classical),
+            ("domains", RuleSetBehavior::Domain),
+        ] {
+            registry.insert(
+                name.to_owned(),
+                Arc::new(RuleProviderImpl::new(
+                    name.to_owned(),
+                    behavior,
+                    RuleSetFormat::Text,
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(vec![]),
+                )),
+            );
+        }
+
+        let should_resolve = |line: &str| {
+            super::map_rule_type(
+                RuleType::try_from(line.to_string()).unwrap(),
+                None,
+                None,
+                Some(&registry),
+            )
+            .should_resolve_ip()
+        };
+
+        assert!(should_resolve("RULE-SET,cidr,DIRECT"));
+        assert!(!should_resolve("RULE-SET,cidr,DIRECT,no-resolve"));
+        assert!(should_resolve("RULE-SET,classical,DIRECT"));
+        assert!(!should_resolve("RULE-SET,classical,DIRECT,no-resolve"));
+        assert!(!should_resolve("RULE-SET,domains,DIRECT"));
+    }
+
+    #[tokio::test]
+    async fn test_rule_set_resolution_in_match_route() {
+        use crate::{
+            app::remote_content_manager::providers::rule_provider::RuleSetBehavior,
+            config::internal::config::{InlineRuleProvider, RuleProviderDef},
+        };
+        use std::collections::HashMap;
+
+        async fn route(rule: &str, expected_resolves: usize) -> String {
+            let mut resolver = MockClashResolver::new();
+            resolver
+                .expect_resolve()
+                .times(expected_resolves)
+                .returning(|_, _| Ok(Some("10.1.2.3".parse().unwrap())));
+
+            let providers = HashMap::from([
+                (
+                    "cidr".to_owned(),
+                    RuleProviderDef::Inline(InlineRuleProvider {
+                        path: String::new(),
+                        behavior: RuleSetBehavior::Ipcidr,
+                        inline_rules: vec!["10.0.0.0/8".to_owned()],
+                    }),
+                ),
+                (
+                    "domains".to_owned(),
+                    RuleProviderDef::Inline(InlineRuleProvider {
+                        path: String::new(),
+                        behavior: RuleSetBehavior::Domain,
+                        inline_rules: vec!["+.other.example".to_owned()],
+                    }),
+                ),
+            ]);
+
+            let router = super::Router::new(
+                vec![RuleType::try_from(rule.to_owned()).unwrap()],
+                providers,
+                Arc::new(resolver),
+                None,
+                None,
+                None,
+                String::new(),
+            )
+            .await;
+            // providers are initialized in the background; make sure they are
+            // loaded before matching
+            for p in router.get_rule_providers().values() {
+                p.initialize().await.unwrap();
+            }
+
+            router
+                .match_route(&mut Session {
+                    destination: crate::session::SocksAddr::Domain(
+                        "internal.example".to_owned(),
+                        443,
+                    ),
+                    ..Default::default()
+                })
+                .await
+                .0
+                .to_owned()
+        }
+
+        // resolves the domain and matches the resolved IP
+        assert_eq!(route("RULE-SET,cidr,PROXY", 1).await, "PROXY");
+        // no-resolve: no DNS lookup, so the domain cannot match
+        assert_eq!(route("RULE-SET,cidr,PROXY,no-resolve", 0).await, "MATCH");
+        // domain rule-sets never trigger a lookup
+        assert_eq!(route("RULE-SET,domains,PROXY", 0).await, "MATCH");
     }
 
     #[tokio::test]
