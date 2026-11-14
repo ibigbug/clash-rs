@@ -770,7 +770,7 @@ impl OutboundManager {
                     );
                     selector_control.insert(
                         proto.name.clone(),
-                        url_test_arc.clone() as ThreadSafeSelectorControl,
+                        url_test_arc as ThreadSafeSelectorControl,
                     );
                 }
                 OutboundGroupProtocol::Fallback(proto) => {
