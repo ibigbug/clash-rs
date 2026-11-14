@@ -403,7 +403,8 @@ impl RuleType {
         }?;
 
         // `no-resolve` applies to IP based rules and to RULE-SET (commonly
-        // used with ipcidr providers, e.g. `RULE-SET,cncidr,DIRECT,no-resolve`).
+        // used with ipcidr providers, e.g.
+        // `RULE-SET,cncidr,DIRECT,no-resolve`).
         if options.no_resolve
             && !matches!(
                 &kind,
