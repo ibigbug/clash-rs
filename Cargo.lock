@@ -1287,21 +1287,21 @@ checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
 
 [[package]]
 name = "clash-doc"
-version = "0.10.11"
+version = "0.10.12"
 dependencies = [
  "clash-lib",
 ]
 
 [[package]]
 name = "clash-ffi"
-version = "0.10.11"
+version = "0.10.12"
 dependencies = [
  "clash-lib",
 ]
 
 [[package]]
 name = "clash-lib"
-version = "0.10.11"
+version = "0.10.12"
 dependencies = [
  "aead 0.5.2",
  "aes 0.9.3",
@@ -1444,7 +1444,7 @@ dependencies = [
 
 [[package]]
 name = "clash-rs"
-version = "0.10.11"
+version = "0.10.12"
 dependencies = [
  "anyhow",
  "aws-lc-rs",
@@ -11570,7 +11570,7 @@ dependencies = [
 
 [[package]]
 name = "watfaq-dns"
-version = "0.10.11"
+version = "0.10.12"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11591,7 +11591,7 @@ dependencies = [
 
 [[package]]
 name = "watfaq-netstack"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "bytes",
  "env_logger",
