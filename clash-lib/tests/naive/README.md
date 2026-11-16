@@ -98,9 +98,10 @@ Without `CLASH_DOCKER_TEST`, the Docker tests are excluded at compile time, matc
 cargo test -p clash-lib --features naive --lib naive_ --locked
 ```
 
-The cronet-binaries Windows build uses the static MSVC CRT (`/MT`). Match it
-with `RUSTFLAGS="-C target-feature=+crt-static"` and an explicit Rust MSVC
-`--target`; do not mix archives built for a different CRT.
+Windows downloads automatically match Rust's CRT. The default `/MD` archive
+needs no extra `RUSTFLAGS`; it statically links Cronet and uses the MSVC runtime
+DLLs. Explicit `+crt-static` builds select the `/MT` archive and should also
+pass `--target`. A manually supplied archive must match the application's CRT.
 
 
 ### Optional static archive download
@@ -117,7 +118,7 @@ Static linkage takes precedence when Cargo enables both backends. A supplied
 its existing behavior.
 
 Static archives for Linux (glibc/musl), Windows MSVC, Apple, and Android
-are pinned to the `static-20261116` release with SHA-256 verification.
+are pinned to the `static-20261116.1` release with SHA-256 verification.
 Custom unpinned assets require `CRONET_DOWNLOAD_SHA256`. Windows also downloads
 the matching `.link-flags.txt` and requires its pinned checksum or
 `CRONET_DOWNLOAD_LINK_FLAGS_SHA256`.
