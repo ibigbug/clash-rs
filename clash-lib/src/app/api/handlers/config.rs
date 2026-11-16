@@ -51,7 +51,10 @@ pub fn routes(
     Router::new()
         .route(
             "/",
-            get(get_configs).put(update_configs).patch(patch_configs),
+            get(get_configs)
+                .post(get_configs)
+                .put(update_configs)
+                .patch(patch_configs),
         )
         .with_state(ConfigState {
             components,
