@@ -244,7 +244,8 @@ httpmock = "0.9.0" # TODO replace with wiremock
 tracing-test = "0.2"
 http-body-util = "0.1"
 reqwest = { version = "0.13", features = ["socks"] }
-sysinfo = { version = "0.40", features = ["network"]}
+# Only network enumeration is needed; the default system feature fails on musl.
+sysinfo = { version = "0.40", default-features = false, features = ["network"]}
 moka = { version = "0.12", features = ["future"] }
 wind-tuic = { git = "https://github.com/rust-proxy/wind", rev = "03d5406049af1c950b178829d24b4a67d6fad1f2", default-features = false, features = ["server", "client", "quinn"] }
 wind-base = { git = "https://github.com/rust-proxy/wind", rev = "03d5406049af1c950b178829d24b4a67d6fad1f2" }
