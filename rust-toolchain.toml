@@ -1,2 +1,5 @@
 [toolchain]
-channel = "stable"
+# Pinned below 1.100: its new build-dir layout passes one `-L` per dependency,
+# which makes rustc command lines exceed the Windows 32K limit under sccache
+# (os error 206 building tor-keymgr). Move back to "stable" once that is fixed.
+channel = "1.99.1"

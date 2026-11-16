@@ -154,6 +154,8 @@ pub struct ClosedFlowInfo {
     pub destination_port: u16,
     pub network: String,
     pub source_ip: String,
+    /// How the connection entered the core (session type: "HTTP", "TUN", ...).
+    pub inbound: String,
     pub country: Option<String>,
     pub asn: Option<String>,
 }
@@ -179,6 +181,7 @@ impl ClosedFlowInfo {
                 crate::session::Network::Udp => "udp".to_string(),
             },
             source_ip: info.session_holder.source.ip().to_string(),
+            inbound: info.session_holder.typ.to_string(),
             country: info.session_holder.country.clone(),
             asn: info.session_holder.asn.clone(),
         }

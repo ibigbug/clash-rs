@@ -18,7 +18,7 @@ defaults:
 
 env:
   RUST_LOG: "clash_lib=TRACE"
-  RUST_TOOLCHAIN: "stable"
+  RUST_TOOLCHAIN: "1.99.1"
   RUSTC_BOOTSTRAP: "1"
   SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
 
@@ -29,7 +29,7 @@ jobs:
     secrets:
       sentry-dsn: ${{ secrets.SENTRY_DSN }}
     with:
-      rust-toolchain: "stable"
+      rust-toolchain: "1.99.1"
       packages: "clash-rs"
       target-config-file: ${{ github.event_name == 'pull_request' && '.github/target-pr.toml' || '.github/target.toml' }}
       rustflags: ""

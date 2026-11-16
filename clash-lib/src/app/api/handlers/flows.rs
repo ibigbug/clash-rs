@@ -65,6 +65,9 @@ pub struct FlowRecord {
     pub dst_port: u16,
     pub protocol: String,
     pub src_ips: Vec<String>,
+    /// Each source with the inbound it came through, e.g. 127.0.0.1 via "HTTP"
+    /// and 198.19.0.2 via "TUN".
+    pub sources: Vec<FlowSource>,
     pub conn_count: usize,
     pub active_count: usize,
     pub closed_count: usize,
@@ -79,6 +82,14 @@ pub struct FlowRecord {
     /// ASN org name from ASN mmdb.
     pub asn: Option<String>,
     pub last_seen: DateTime<Utc>,
+}
+
+#[derive(Serialize, Clone, PartialEq, Eq)]
+pub struct FlowSource {
+    pub ip: String,
+    /// Session type the connection arrived through ("HTTP", "HTTP-CONNECT",
+    /// "SOCKS5", "TUN", ...).
+    pub inbound: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -99,6 +110,7 @@ struct FlowKey {
 /// Data extracted from one connection tracker, passed into `Acc::apply`.
 struct ConnEntry {
     src_ip: String,
+    inbound: String,
     upload: u64,
     download: u64,
     rule: String,
@@ -112,6 +124,7 @@ struct ConnEntry {
 
 struct Acc {
     src_ips: Vec<String>,
+    sources: Vec<FlowSource>,
     conn_count: usize,
     active_count: usize,
     closed_count: usize,
@@ -127,8 +140,17 @@ struct Acc {
 
 impl Acc {
     fn apply(&mut self, entry: ConnEntry) {
-        if !entry.src_ip.is_empty() && !self.src_ips.contains(&entry.src_ip) {
-            self.src_ips.push(entry.src_ip);
+        if !entry.src_ip.is_empty() {
+            let source = FlowSource {
+                ip: entry.src_ip.clone(),
+                inbound: entry.inbound,
+            };
+            if !self.sources.contains(&source) {
+                self.sources.push(source);
+            }
+            if !self.src_ips.contains(&entry.src_ip) {
+                self.src_ips.push(entry.src_ip);
+            }
         }
         self.conn_count += 1;
         if entry.is_active {
@@ -189,6 +211,7 @@ async fn build_flow_records(
             };
             let acc = map.entry(key).or_insert_with(|| Acc {
                 src_ips: Vec::new(),
+                sources: Vec::new(),
                 conn_count: 0,
                 active_count: 0,
                 closed_count: 0,
@@ -203,6 +226,7 @@ async fn build_flow_records(
             });
             acc.apply(ConnEntry {
                 src_ip: info.session_holder.source.ip().to_string(),
+                inbound: info.session_holder.typ.to_string(),
                 upload: info.upload_total.load(Ordering::Relaxed),
                 download: info.download_total.load(Ordering::Relaxed),
                 rule: info.rule.clone(),
@@ -237,6 +261,7 @@ async fn build_flow_records(
             };
             let acc = map.entry(key).or_insert_with(|| Acc {
                 src_ips: Vec::new(),
+                sources: Vec::new(),
                 conn_count: 0,
                 active_count: 0,
                 closed_count: 0,
@@ -251,6 +276,7 @@ async fn build_flow_records(
             });
             acc.apply(ConnEntry {
                 src_ip: info.source_ip.clone(),
+                inbound: info.inbound.clone(),
                 upload: info.upload_total,
                 download: info.download_total,
                 rule: info.rule.clone(),
@@ -274,6 +300,7 @@ async fn build_flow_records(
                 dst_port: key.dst_port,
                 protocol: key.protocol,
                 src_ips: acc.src_ips,
+                sources: acc.sources,
                 conn_count: acc.conn_count,
                 active_count: acc.active_count,
                 closed_count: acc.closed_count,
@@ -355,4 +382,65 @@ pub async fn ws_handle(
         .on_upgrade(async move |socket| {
             callback(socket).await;
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(ip: &str, inbound: &str) -> ConnEntry {
+        ConnEntry {
+            src_ip: ip.to_string(),
+            inbound: inbound.to_string(),
+            upload: 1,
+            download: 2,
+            rule: String::new(),
+            rule_payload: String::new(),
+            chains: Vec::new(),
+            country: None,
+            asn: None,
+            start_time: Utc::now(),
+            is_active: true,
+        }
+    }
+
+    #[test]
+    fn sources_keep_each_ip_inbound_pair_once() {
+        let mut acc = Acc {
+            src_ips: Vec::new(),
+            sources: Vec::new(),
+            conn_count: 0,
+            active_count: 0,
+            closed_count: 0,
+            upload_total: 0,
+            download_total: 0,
+            rule: String::new(),
+            rule_payload: String::new(),
+            chains: Vec::new(),
+            country: None,
+            asn: None,
+            last_seen: DateTime::<Utc>::MIN_UTC,
+        };
+        acc.apply(entry("127.0.0.1", "HTTP"));
+        acc.apply(entry("127.0.0.1", "HTTP"));
+        acc.apply(entry("127.0.0.1", "SOCKS5"));
+        acc.apply(entry("198.19.0.2", "TUN"));
+        acc.apply(entry("", "TUN"));
+
+        assert_eq!(acc.src_ips, vec!["127.0.0.1", "198.19.0.2"]);
+        let pairs: Vec<_> = acc
+            .sources
+            .iter()
+            .map(|s| (s.ip.as_str(), s.inbound.as_str()))
+            .collect();
+        assert_eq!(
+            pairs,
+            vec![
+                ("127.0.0.1", "HTTP"),
+                ("127.0.0.1", "SOCKS5"),
+                ("198.19.0.2", "TUN")
+            ]
+        );
+        assert_eq!(acc.conn_count, 5);
+    }
 }

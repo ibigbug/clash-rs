@@ -38,6 +38,36 @@ impl RuleExpression {
             RuleExpression::Not(expr) => !expr.evaluate(sess),
         }
     }
+
+    /// Whether any leaf rule in this expression needs the destination IP
+    fn should_resolve_ip(&self) -> bool {
+        match self {
+            RuleExpression::Rule(matcher) => matcher.should_resolve_ip(),
+            RuleExpression::And(exprs) | RuleExpression::Or(exprs) => {
+                exprs.iter().any(|e| e.should_resolve_ip())
+            }
+            RuleExpression::Not(expr) => expr.should_resolve_ip(),
+        }
+    }
+}
+
+/// Split trailing rule options (`no-resolve`, `interface=...`) off a sub-rule
+/// body such as `cncidr,no-resolve`. Only recognized options are split off, so
+/// payloads that contain commas (e.g. `DOMAIN-REGEX,^a{1,3}$`) are kept whole.
+fn split_sub_rule_options(rest: &str) -> (&str, Vec<&str>) {
+    let mut payload = rest;
+    let mut params = Vec::new();
+    while let Some((head, last)) = payload.rsplit_once(',') {
+        let last = last.trim();
+        if last == "no-resolve" || last.starts_with("interface=") {
+            params.push(last);
+            payload = head;
+        } else {
+            break;
+        }
+    }
+    params.reverse();
+    (payload.trim(), params)
 }
 
 pub struct CompositeRule {
@@ -251,7 +281,14 @@ impl CompositeRule {
         }
 
         // It's a leaf rule - parse as RuleType
-        let rule = RuleType::new(rule_type, rest, "", None)?;
+        let (payload, params) = split_sub_rule_options(rest);
+        let rule = RuleType::new(rule_type, payload, "", Some(params))?;
+        if rule.interface().is_some() {
+            return Err(crate::Error::InvalidConfig(format!(
+                "rule option `interface` is not supported inside composite \
+                 sub-rules, set it on the composite rule instead: {expr_str}"
+            )));
+        }
         let matcher = map_rule_type(rule, mmdb, geodata, rule_provider_registry);
         Ok(RuleExpression::Rule(matcher))
     }
@@ -295,6 +332,10 @@ impl RuleMatcher for CompositeRule {
     fn type_name(&self) -> &str {
         &self.operator
     }
+
+    fn should_resolve_ip(&self) -> bool {
+        self.expression.should_resolve_ip()
+    }
 }
 
 #[cfg(test)]
@@ -308,6 +349,130 @@ mod tests {
             network,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn test_sub_rule_no_resolve_option() {
+        // no-resolve is parsed as an option, not as part of the payload
+        let rule = CompositeRule::new(
+            "AND",
+            "((IP-CIDR,10.0.0.0/8,no-resolve),(NETWORK,UDP))",
+            "DIRECT",
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(!rule.should_resolve_ip());
+
+        let sess = Session {
+            destination: SocksAddr::Ip("10.1.2.3:53".parse().unwrap()),
+            network: Network::Udp,
+            ..Default::default()
+        };
+        assert!(rule.apply(&sess));
+
+        // without no-resolve, a nested IP rule makes the composite resolve
+        let rule = CompositeRule::new(
+            "OR",
+            "((DOMAIN,example.com),(NOT,((IP-CIDR,10.0.0.0/8))))",
+            "DIRECT",
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(rule.should_resolve_ip());
+
+        // domain-only composites never resolve
+        let rule = CompositeRule::new(
+            "AND",
+            "((DOMAIN,example.com),(NETWORK,TCP))",
+            "DIRECT",
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(!rule.should_resolve_ip());
+    }
+
+    #[test]
+    fn test_sub_rule_whitespace() {
+        let rule = CompositeRule::new(
+            "AND",
+            "(( IP-CIDR , 10.0.0.0/8 , no-resolve ),( NETWORK, UDP ))",
+            "DIRECT",
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(!rule.should_resolve_ip());
+        assert!(rule.apply(&Session {
+            destination: SocksAddr::Ip("10.1.2.3:53".parse().unwrap()),
+            network: Network::Udp,
+            ..Default::default()
+        }));
+    }
+
+    #[test]
+    fn test_src_ip_cidr_does_not_resolve() {
+        let rule = CompositeRule::new(
+            "AND",
+            "((DOMAIN,example.com),(SRC-IP-CIDR,192.168.0.0/16))",
+            "DIRECT",
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(!rule.should_resolve_ip());
+    }
+
+    #[test]
+    fn test_sub_rule_options() {
+        // payloads containing commas are kept whole
+        let rule = CompositeRule::new(
+            "AND",
+            r"((DOMAIN-REGEX,^a{1,3}\.example\.com$),(NETWORK,TCP))",
+            "DIRECT",
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(rule.apply(&create_test_session(
+            "aa.example.com",
+            443,
+            Network::Tcp
+        )));
+
+        // interface belongs on the composite rule, not on sub-rules
+        assert!(
+            CompositeRule::new(
+                "AND",
+                "((DOMAIN,example.com,interface=en0),(NETWORK,TCP))",
+                "DIRECT",
+                None,
+                None,
+                None,
+            )
+            .is_err()
+        );
+
+        // options still follow the per-rule-type rules
+        assert!(
+            CompositeRule::new(
+                "AND",
+                "((DOMAIN,example.com,no-resolve),(NETWORK,TCP))",
+                "DIRECT",
+                None,
+                None,
+                None,
+            )
+            .is_err()
+        );
     }
 
     #[test]

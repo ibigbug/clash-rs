@@ -40,7 +40,9 @@ impl RuleMatcher for IpCidr {
     }
 
     fn should_resolve_ip(&self) -> bool {
-        !self.no_resolve
+        // SRC-IP-CIDR matches the source address and never needs the
+        // destination resolved
+        !self.match_src && !self.no_resolve
     }
 
     fn payload(&self) -> String {

@@ -214,7 +214,7 @@ fn extract_zip(bytes: &[u8], target_dir: &Path) -> Result<(), Error> {
                 // result uses native separators on all platforms.
                 stripped.split('/').filter(|c| !c.is_empty()).collect()
             }
-            None => enclosed.clone(),
+            None => enclosed,
         };
         if rel.as_os_str().is_empty() {
             continue;
@@ -338,7 +338,7 @@ fn extract_tgz(bytes: &[u8], target_dir: &Path) -> Result<(), Error> {
                     .unwrap_or(&path)
                     .to_path_buf()
             }
-            None => path.clone(),
+            None => path,
         };
 
         if rel.as_os_str().is_empty() {

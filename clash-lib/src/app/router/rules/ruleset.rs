@@ -1,6 +1,8 @@
 use crate::{
     app::{
-        remote_content_manager::providers::rule_provider::ThreadSafeRuleProvider,
+        remote_content_manager::providers::rule_provider::{
+            RuleSetBehavior, ThreadSafeRuleProvider,
+        },
         router::rules::RuleMatcher,
     },
     session::Session,
@@ -11,6 +13,7 @@ pub struct RuleSet {
     pub rule_set: String,
     pub target: String,
     pub rule_provider: ThreadSafeRuleProvider,
+    pub no_resolve: bool,
 }
 
 impl RuleSet {
@@ -18,11 +21,13 @@ impl RuleSet {
         rule_set: String,
         target: String,
         rule_provider: ThreadSafeRuleProvider,
+        no_resolve: bool,
     ) -> Self {
         Self {
             rule_set,
             target,
             rule_provider,
+            no_resolve,
         }
     }
 }
@@ -48,5 +53,13 @@ impl RuleMatcher for RuleSet {
 
     fn type_name(&self) -> &str {
         "RuleSet"
+    }
+
+    /// Resolve the destination domain before matching unless `no-resolve` is
+    /// set. Domain rule-sets never match on IPs, so they never
+    /// need resolution.
+    fn should_resolve_ip(&self) -> bool {
+        !self.no_resolve
+            && !matches!(self.rule_provider.behavior(), RuleSetBehavior::Domain)
     }
 }

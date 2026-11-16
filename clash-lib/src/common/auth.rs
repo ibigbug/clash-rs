@@ -27,7 +27,7 @@ impl PlainAuthenticator {
         let mut usernames = Vec::new();
         for user in users {
             store.insert(user.0.clone(), user.1.clone());
-            usernames.push(user.0.clone());
+            usernames.push(user.0);
         }
         Self { store, usernames }
     }

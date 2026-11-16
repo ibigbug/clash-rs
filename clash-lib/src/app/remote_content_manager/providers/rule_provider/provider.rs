@@ -1,10 +1,4 @@
-use std::{
-    collections::HashMap,
-    fmt::Display,
-    net::{IpAddr, Ipv4Addr},
-    sync::Arc,
-    time::Duration,
-};
+use std::{collections::HashMap, fmt::Display, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use erased_serde::Serialize as ESerialize;
@@ -339,11 +333,10 @@ impl RuleProvider for RuleProviderImpl {
         match inner {
             Ok(inner) => match &inner.content {
                 RuleContent::Domain(set) => set.has(&sess.destination.host()),
-                RuleContent::Ipcidr(trie) => trie.contains(
-                    sess.destination
-                        .ip()
-                        .unwrap_or(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0))),
-                ),
+                RuleContent::Ipcidr(trie) => sess
+                    .resolved_ip
+                    .or(sess.destination.ip())
+                    .is_some_and(|ip| trie.contains(ip)),
                 RuleContent::Classical(fast) => fast.search(sess),
             },
             Err(_) => {
@@ -760,6 +753,38 @@ mod tests {
             !provider.search(&sess_twitter),
             "twitter.com should NOT match after file update"
         );
+    }
+
+    #[tokio::test]
+    async fn test_ipcidr_provider_uses_resolved_ip() {
+        let provider = RuleProviderImpl::new(
+            "ipcidr-test".to_string(),
+            RuleSetBehavior::Ipcidr,
+            RuleSetFormat::Text,
+            None,
+            None,
+            Some(Arc::new(MockMmdbLookupTrait::new())),
+            Some(Arc::new(MockGeoDataLookupTrait::new())),
+            Some(vec!["10.0.0.0/8".to_owned(), "0.0.0.0/8".to_owned()]),
+        );
+        assert_ok!(provider.initialize().await);
+
+        // IP destination
+        assert!(provider.search(&Session {
+            destination: SocksAddr::Ip("10.1.2.3:443".parse().unwrap()),
+            ..Default::default()
+        }));
+        // domain destination matched via the router-resolved IP
+        assert!(provider.search(&Session {
+            destination: SocksAddr::Domain("internal.example".to_owned(), 443),
+            resolved_ip: Some("10.1.2.3".parse().unwrap()),
+            ..Default::default()
+        }));
+        // unresolved domain must not fall back to 0.0.0.0 and hit 0.0.0.0/8
+        assert!(!provider.search(&Session {
+            destination: SocksAddr::Domain("internal.example".to_owned(), 443),
+            ..Default::default()
+        }));
     }
 
     #[tokio::test]
