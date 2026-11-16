@@ -12,6 +12,21 @@ cargo build -p clash-rs --features naive --locked
 
 On Windows and Linux, the runtime requires a platform-matching `libcronet` library, available from [cronet-binaries](https://github.com/rust-proxy/cronet-binaries/releases). Set its path with `cronet-lib-path`. Apple and Android targets use static linking and require the corresponding library through `CRONET_LIB_DIR`. Alternatively, enable `clash-lib/wind-naive/download` at build time to let the dependency download and verify a prebuilt library. Cross-compilation still requires the target platform's toolchain.
 
+To embed Cronet, enable `naive-static` (which also enables `naive`):
+
+```sh
+CRONET_LIB_DIR=/path/to/native/lib cargo build -p clash-rs --features naive-static --locked
+```
+
+This overrides dynamic loading, including when Cargo unifies both features.
+Linux requires a matching glibc/musl `libcronet.a`. Windows MSVC requires
+`cronet.lib` and its generated `link_flags.txt` in the same directory. No runtime
+`cronet-lib-path` or `CLASH_NAIVE_CRONET_LIB` is needed in static builds. Existing
+Apple/Android builds remain static. Linux/Windows static downloads are not yet
+checksum-pinned; use a locally built archive. A supplied `CRONET_LIB_DIR` bypasses
+automatic downloads. Static Cronet does not imply a fully static executable:
+platform system libraries may remain dynamic.
+
 ```yaml
 proxies:
   - name: naive-out
@@ -45,7 +60,7 @@ Wind and Cronet are fetched at pinned Git revisions. Normal builds do not depend
 
 Like the other protocol tests, these tests use `DockerTestRunner` and are enabled by `CLASH_DOCKER_TEST=true`. They exercise the full path: SOCKS5 client → ClashRS → Wind/Cronet → a sing-box Naive inbound in Docker → HTTP/TCP/UDP echo services in a Python container sharing the server network namespace.
 
-The shared runner pulls the official `ghcr.io/sagernet/sing-box:v1.14.4` image and a digest-pinned `python:3.13-alpine` target image, provisions temporary configuration and short-lived TLS certificates, publishes TCP/UDP ports, waits for server readiness, and removes both containers after each test. Container logs are printed during cleanup. No locally installed sing-box binary or public proxy server is required. The tests fail if Docker, the image, or Cronet is unavailable; they do not silently skip missing dependencies.
+The shared runner pulls the official `ghcr.io/sagernet/sing-box:v1.14.4` image and a digest-pinned `python:3.13-alpine` target image, provisions temporary configuration and short-lived TLS certificates, publishes TCP/UDP ports, waits for server readiness, and removes both containers after each test. Container logs are printed during cleanup. No locally installed sing-box binary or public proxy server is required. An already cached digest-pinned fixture is reused without contacting the registry. The tests fail if Docker, the image, or Cronet is unavailable; they do not silently skip missing dependencies.
 
 Start a Docker daemon running Linux containers and prepare the host platform's Cronet library as described above. Run from the ClashRS repository root:
 
@@ -82,3 +97,7 @@ Without `CLASH_DOCKER_TEST`, the Docker tests are excluded at compile time, matc
 ```sh
 cargo test -p clash-lib --features naive --lib naive_ --locked
 ```
+
+The cronet-binaries Windows build uses the static MSVC CRT (`/MT`). Match it
+with `RUSTFLAGS="-C target-feature=+crt-static"` and an explicit Rust MSVC
+`--target`; do not mix archives built for a different CRT.
