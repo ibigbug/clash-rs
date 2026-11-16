@@ -1819,7 +1819,7 @@ checksum = "790eea4361631c5e7d22598ecd5723ff611904e3344ce8720784c93e3d83d40b"
 [[package]]
 name = "cronet-rs"
 version = "0.1.0"
-source = "git+https://github.com/rust-proxy/cronet-rs?rev=2571154372c16911ff8970aa308d5632a92eb2ff#2571154372c16911ff8970aa308d5632a92eb2ff"
+source = "git+https://github.com/rust-proxy/cronet-rs?rev=a670a4f0e3488d0cff234d204a62de6488f09867#a670a4f0e3488d0cff234d204a62de6488f09867"
 dependencies = [
  "cronet-sys",
  "log",
@@ -1830,7 +1830,7 @@ dependencies = [
 [[package]]
 name = "cronet-sys"
 version = "0.1.0"
-source = "git+https://github.com/rust-proxy/cronet-rs?rev=2571154372c16911ff8970aa308d5632a92eb2ff#2571154372c16911ff8970aa308d5632a92eb2ff"
+source = "git+https://github.com/rust-proxy/cronet-rs?rev=a670a4f0e3488d0cff234d204a62de6488f09867#a670a4f0e3488d0cff234d204a62de6488f09867"
 dependencies = [
  "libloading 0.8.9",
 ]
@@ -12558,7 +12558,7 @@ checksum = "712e227841d057c1ee1cd2fb22fa7e5a5461ae8e48fa2ca79ec42cfc1931183f"
 [[package]]
 name = "wind-base"
 version = "0.2.0"
-source = "git+https://github.com/rust-proxy/wind?rev=03d5406049af1c950b178829d24b4a67d6fad1f2#03d5406049af1c950b178829d24b4a67d6fad1f2"
+source = "git+https://github.com/rust-proxy/wind?rev=53e5edc74f452774ffd68e55d512f50d1bff7502#53e5edc74f452774ffd68e55d512f50d1bff7502"
 dependencies = [
  "async-trait",
  "bytes",
@@ -12574,7 +12574,7 @@ dependencies = [
 [[package]]
 name = "wind-core"
 version = "0.2.0"
-source = "git+https://github.com/rust-proxy/wind?rev=03d5406049af1c950b178829d24b4a67d6fad1f2#03d5406049af1c950b178829d24b4a67d6fad1f2"
+source = "git+https://github.com/rust-proxy/wind?rev=53e5edc74f452774ffd68e55d512f50d1bff7502#53e5edc74f452774ffd68e55d512f50d1bff7502"
 dependencies = [
  "async-trait",
  "bytes",
@@ -12599,7 +12599,7 @@ dependencies = [
 [[package]]
 name = "wind-naive"
 version = "0.2.0"
-source = "git+https://github.com/rust-proxy/wind?rev=03d5406049af1c950b178829d24b4a67d6fad1f2#03d5406049af1c950b178829d24b4a67d6fad1f2"
+source = "git+https://github.com/rust-proxy/wind?rev=53e5edc74f452774ffd68e55d512f50d1bff7502#53e5edc74f452774ffd68e55d512f50d1bff7502"
 dependencies = [
  "async-trait",
  "bytes",
@@ -12614,7 +12614,7 @@ dependencies = [
 [[package]]
 name = "wind-quic"
 version = "0.2.0"
-source = "git+https://github.com/rust-proxy/wind?rev=03d5406049af1c950b178829d24b4a67d6fad1f2#03d5406049af1c950b178829d24b4a67d6fad1f2"
+source = "git+https://github.com/rust-proxy/wind?rev=53e5edc74f452774ffd68e55d512f50d1bff7502#53e5edc74f452774ffd68e55d512f50d1bff7502"
 dependencies = [
  "arc-swap",
  "aws-lc-rs",
@@ -12643,7 +12643,7 @@ dependencies = [
 [[package]]
 name = "wind-rule"
 version = "0.2.0"
-source = "git+https://github.com/rust-proxy/wind?rev=03d5406049af1c950b178829d24b4a67d6fad1f2#03d5406049af1c950b178829d24b4a67d6fad1f2"
+source = "git+https://github.com/rust-proxy/wind?rev=53e5edc74f452774ffd68e55d512f50d1bff7502#53e5edc74f452774ffd68e55d512f50d1bff7502"
 dependencies = [
  "ipnet",
  "regex",
@@ -12652,7 +12652,7 @@ dependencies = [
 [[package]]
 name = "wind-tuic"
 version = "0.2.0"
-source = "git+https://github.com/rust-proxy/wind?rev=03d5406049af1c950b178829d24b4a67d6fad1f2#03d5406049af1c950b178829d24b4a67d6fad1f2"
+source = "git+https://github.com/rust-proxy/wind?rev=53e5edc74f452774ffd68e55d512f50d1bff7502#53e5edc74f452774ffd68e55d512f50d1bff7502"
 dependencies = [
  "arc-swap",
  "async-trait",

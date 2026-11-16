@@ -72,7 +72,8 @@ Test coverage:
 1. Three concurrent HTTP/2 requests each round-trip 256 KiB, crossing the initial padding and adapter buffer boundaries. The tests also check the API type and ensure passwords are not exposed.
 2. The same round trips over QUIC. The server listens only on UDP, so success cannot result from an HTTP/2 fallback.
 3. A successful control request establishes connectivity before testing incorrect passwords and untrusted certificates. Rejected tunnels must deliver no requests to the destination service.
-4. Two destination ports are accessed within one SOCKS5 UDP association, with response sources and 2048-byte payloads verified.
+4. HTTP/2 and HTTP/3 half-close cases send empty, 7-byte, and 256 KiB requests through SOCKS5, shut down the write half twice, and receive the complete 256 KiB response emitted only after destination EOF.
+5. Two destination ports are accessed within one SOCKS5 UDP association, with response sources and 2048-byte payloads verified.
 
 Without `CLASH_DOCKER_TEST`, the Docker tests are excluded at compile time, matching the other protocol modules. `--ignored` is not needed. Run the adapter's configuration, handshake error propagation, and cancellation tests separately with:
 

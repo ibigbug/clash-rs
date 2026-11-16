@@ -29,6 +29,7 @@ use docker::{
 };
 use futures::FutureExt;
 use serde_json::json;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_util::task::AbortOnDropHandle;
 
 const SERVER_PORT: u16 = 10002;
@@ -307,6 +308,77 @@ async fn naive_e2e_h2_tcp() -> Result<()> {
 #[serial_test::serial]
 async fn naive_e2e_h3_tcp() -> Result<()> {
     tcp_roundtrip(true).await
+}
+
+async fn tcp_half_close(quic: bool) -> Result<()> {
+    Server::run(quic, move |server| async move {
+        let client = Client::start(&server, quic, "e2e-password", true, false)?;
+        for size in [0, 7, 256 * 1024] {
+            tokio::time::timeout(Duration::from_secs(15), async {
+                let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await?;
+                let port = listener.local_addr()?.port();
+                let payload: Vec<_> = (0..size).map(|i| (i % 251) as u8).collect();
+                let expected = payload.clone();
+                let target = AbortOnDropHandle::new(tokio::spawn(async move {
+                    let (mut socket, _) = listener.accept().await?;
+                    let mut request = Vec::new();
+                    socket.read_to_end(&mut request).await?;
+                    assert_eq!(request.len(), expected.len());
+                    assert!(request == expected, "request contents differ");
+                    // Only real TCP EOF at the destination releases the reply.
+                    socket.write_all(&vec![0xa5; 256 * 1024]).await?;
+                    socket.shutdown().await?;
+                    Ok::<_, anyhow::Error>(())
+                }));
+                let mut socket =
+                    tokio::net::TcpStream::connect(("127.0.0.1", client.socks_port))
+                        .await?;
+                socket.write_all(&[5, 1, 0]).await?;
+                let mut auth = [0; 2];
+                socket.read_exact(&mut auth).await?;
+                assert_eq!(auth, [5, 0]);
+                let mut connect = vec![5, 1, 0, 1];
+                connect.extend_from_slice(&server.target_ip.octets());
+                connect.extend_from_slice(&port.to_be_bytes());
+                socket.write_all(&connect).await?;
+                let mut reply = [0; 4];
+                socket.read_exact(&mut reply).await?;
+                assert_eq!(&reply[..3], &[5, 0, 0]);
+                let address_len = match reply[3] {
+                    1 => 4,
+                    4 => 16,
+                    3 => socket.read_u8().await? as usize,
+                    atyp => bail!("unexpected SOCKS5 address type {atyp}"),
+                };
+                socket.read_exact(&mut vec![0; address_len + 2]).await?;
+                socket.write_all(&payload).await?;
+                socket.shutdown().await?;
+                socket.shutdown().await?;
+                let mut response = Vec::new();
+                socket.read_to_end(&mut response).await?;
+                assert_eq!(response.len(), 256 * 1024);
+                assert!(response.iter().all(|byte| *byte == 0xa5));
+                target.await??;
+                Ok::<_, anyhow::Error>(())
+            })
+            .await
+            .context("EOF-delimited request timed out")??;
+        }
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::serial]
+async fn naive_e2e_h2_half_close() -> Result<()> {
+    tcp_half_close(false).await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::serial]
+async fn naive_e2e_h3_half_close() -> Result<()> {
+    tcp_half_close(true).await
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

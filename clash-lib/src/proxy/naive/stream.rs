@@ -146,6 +146,7 @@ mod tests {
 
     struct TestOutbound {
         fail: bool,
+        eof_delimited: bool,
     }
     #[async_trait::async_trait]
     impl Outbound for TestOutbound {
@@ -157,9 +158,17 @@ mod tests {
             if self.fail {
                 eyre::bail!("authentication rejected");
             }
-            let mut data = [0; 4];
-            stream.read_exact(&mut data).await?;
+            let mut data = vec![0; 4];
+            if self.eof_delimited {
+                data.clear();
+                stream.read_to_end(&mut data).await?;
+            } else {
+                stream.read_exact(&mut data).await?;
+            }
             stream.write_all(&data).await?;
+            if self.eof_delimited {
+                return Ok(());
+            }
             std::future::pending().await
         }
 
@@ -175,7 +184,10 @@ mod tests {
     #[tokio::test]
     async fn naive_connect_propagates_failure_before_returning_stream() {
         let result = connect(
-            Arc::new(TestOutbound { fail: true }),
+            Arc::new(TestOutbound {
+                fail: true,
+                eof_delimited: false,
+            }),
             super::super::flow(
                 &Default::default(),
                 wind_core::rule::NetworkType::Tcp,
@@ -196,7 +208,10 @@ mod tests {
     async fn naive_stream_relays_and_observes_handler_cancellation() {
         let cancel = CancellationToken::new();
         let mut stream = connect(
-            Arc::new(TestOutbound { fail: false }),
+            Arc::new(TestOutbound {
+                fail: false,
+                eof_delimited: false,
+            }),
             super::super::flow(
                 &Default::default(),
                 wind_core::rule::NetworkType::Tcp,
@@ -218,5 +233,33 @@ mod tests {
         .unwrap()
         .unwrap();
         assert_eq!(n, 0);
+    }
+
+    #[tokio::test]
+    async fn naive_stream_write_shutdown_preserves_response() {
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            let mut stream = connect(
+                Arc::new(TestOutbound {
+                    fail: false,
+                    eof_delimited: true,
+                }),
+                super::super::flow(
+                    &Default::default(),
+                    wind_core::rule::NetworkType::Tcp,
+                ),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+            let payload = vec![0x5a; 256 * 1024];
+            stream.write_all(&payload).await.unwrap();
+            stream.shutdown().await.unwrap();
+            stream.shutdown().await.unwrap();
+            let mut response = Vec::new();
+            stream.read_to_end(&mut response).await.unwrap();
+            assert_eq!(response, payload);
+        })
+        .await
+        .unwrap();
     }
 }
