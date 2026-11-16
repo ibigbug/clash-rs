@@ -1502,7 +1502,7 @@ dependencies = [
  "uuid",
  "watfaq-dns",
  "watfaq-netstack",
- "webpki-roots",
+ "webpki-roots 1.0.11",
  "wind-base",
  "wind-core",
  "wind-naive",
@@ -1819,7 +1819,7 @@ checksum = "790eea4361631c5e7d22598ecd5723ff611904e3344ce8720784c93e3d83d40b"
 [[package]]
 name = "cronet-rs"
 version = "0.1.0"
-source = "git+https://github.com/rust-proxy/cronet-rs?rev=db7474fb6be2d2a2f7990210e19e6b0b3538e1e2#db7474fb6be2d2a2f7990210e19e6b0b3538e1e2"
+source = "git+https://github.com/rust-proxy/cronet-rs?rev=66e609b8a35ed76e36074b9dd6d222dd5bfcf43e#66e609b8a35ed76e36074b9dd6d222dd5bfcf43e"
 dependencies = [
  "cronet-sys",
  "log",
@@ -1830,9 +1830,11 @@ dependencies = [
 [[package]]
 name = "cronet-sys"
 version = "0.1.0"
-source = "git+https://github.com/rust-proxy/cronet-rs?rev=db7474fb6be2d2a2f7990210e19e6b0b3538e1e2#db7474fb6be2d2a2f7990210e19e6b0b3538e1e2"
+source = "git+https://github.com/rust-proxy/cronet-rs?rev=66e609b8a35ed76e36074b9dd6d222dd5bfcf43e#66e609b8a35ed76e36074b9dd6d222dd5bfcf43e"
 dependencies = [
  "libloading 0.8.9",
+ "sha2 0.10.9",
+ "ureq 2.12.1",
 ]
 
 [[package]]
@@ -8428,7 +8430,7 @@ dependencies = [
  "sentry-panic",
  "sentry-tracing",
  "tokio",
- "ureq",
+ "ureq 3.3.0",
 ]
 
 [[package]]
@@ -8836,7 +8838,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
- "webpki-roots",
+ "webpki-roots 1.0.11",
  "windows 0.62.2",
  "yaml-rust2",
 ]
@@ -9228,6 +9230,17 @@ checksum = "c3d1e2c7f27f8d4cb10542a02c49005dbd6e93095799d6f3be745fae9f8fedd4"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "socks"
+version = "0.3.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f0c3dbbd9ae980613c6dd8e28a9407b50509d3803b57624d5dfe8315218cd58b"
+dependencies = [
+ "byteorder",
+ "libc",
+ "winapi",
 ]
 
 [[package]]
@@ -11898,7 +11911,7 @@ dependencies = [
  "tokio-rustls",
  "tracing",
  "url",
- "webpki-roots",
+ "webpki-roots 1.0.11",
 ]
 
 [[package]]
@@ -12171,6 +12184,23 @@ checksum = "6d49784317cd0d1ee7ec5c716dd598ec5b4483ea832a2dced265471cc0f690ae"
 
 [[package]]
 name = "ureq"
+version = "2.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "02d1a66277ed75f640d608235660df48c8e3c19f3b4edb6a263315626cc3c01d"
+dependencies = [
+ "base64 0.22.1",
+ "flate2",
+ "log",
+ "once_cell",
+ "rustls",
+ "rustls-pki-types",
+ "socks",
+ "url",
+ "webpki-roots 0.26.11",
+]
+
+[[package]]
+name = "ureq"
 version = "3.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dea7109cdcd5864d4eeb1b58a1648dc9bf520360d7af16ec26d0a9354bafcfc0"
@@ -12182,7 +12212,7 @@ dependencies = [
  "rustls-pki-types",
  "ureq-proto",
  "utf8-zero",
- "webpki-roots",
+ "webpki-roots 1.0.11",
 ]
 
 [[package]]
@@ -12436,7 +12466,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tracing",
- "webpki-roots",
+ "webpki-roots 1.0.11",
 ]
 
 [[package]]
@@ -12511,6 +12541,15 @@ dependencies = [
 
 [[package]]
 name = "webpki-roots"
+version = "0.26.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "521bc38abb08001b01866da9f51eb7c5d647a19260e00054a8c7fd5f9e57f7a9"
+dependencies = [
+ "webpki-roots 1.0.11",
+]
+
+[[package]]
+name = "webpki-roots"
 version = "1.0.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f5f280bbb2b287bc8e7de7e3852945a0ff50d1bbcb5ed42b6c7a568c546df171"
@@ -12558,7 +12597,7 @@ checksum = "712e227841d057c1ee1cd2fb22fa7e5a5461ae8e48fa2ca79ec42cfc1931183f"
 [[package]]
 name = "wind-base"
 version = "0.2.0"
-source = "git+https://github.com/rust-proxy/wind?rev=02f582e1f5307c8334d52a8ee9353fa7a58cfdc4#02f582e1f5307c8334d52a8ee9353fa7a58cfdc4"
+source = "git+https://github.com/rust-proxy/wind?rev=075cee4120cc91a8bfeb2864d68f585df2909797#075cee4120cc91a8bfeb2864d68f585df2909797"
 dependencies = [
  "async-trait",
  "bytes",
@@ -12574,7 +12613,7 @@ dependencies = [
 [[package]]
 name = "wind-core"
 version = "0.2.0"
-source = "git+https://github.com/rust-proxy/wind?rev=02f582e1f5307c8334d52a8ee9353fa7a58cfdc4#02f582e1f5307c8334d52a8ee9353fa7a58cfdc4"
+source = "git+https://github.com/rust-proxy/wind?rev=075cee4120cc91a8bfeb2864d68f585df2909797#075cee4120cc91a8bfeb2864d68f585df2909797"
 dependencies = [
  "async-trait",
  "bytes",
@@ -12599,7 +12638,7 @@ dependencies = [
 [[package]]
 name = "wind-naive"
 version = "0.2.0"
-source = "git+https://github.com/rust-proxy/wind?rev=02f582e1f5307c8334d52a8ee9353fa7a58cfdc4#02f582e1f5307c8334d52a8ee9353fa7a58cfdc4"
+source = "git+https://github.com/rust-proxy/wind?rev=075cee4120cc91a8bfeb2864d68f585df2909797#075cee4120cc91a8bfeb2864d68f585df2909797"
 dependencies = [
  "async-trait",
  "bytes",
@@ -12614,7 +12653,7 @@ dependencies = [
 [[package]]
 name = "wind-quic"
 version = "0.2.0"
-source = "git+https://github.com/rust-proxy/wind?rev=02f582e1f5307c8334d52a8ee9353fa7a58cfdc4#02f582e1f5307c8334d52a8ee9353fa7a58cfdc4"
+source = "git+https://github.com/rust-proxy/wind?rev=075cee4120cc91a8bfeb2864d68f585df2909797#075cee4120cc91a8bfeb2864d68f585df2909797"
 dependencies = [
  "arc-swap",
  "aws-lc-rs",
@@ -12643,7 +12682,7 @@ dependencies = [
 [[package]]
 name = "wind-rule"
 version = "0.2.0"
-source = "git+https://github.com/rust-proxy/wind?rev=02f582e1f5307c8334d52a8ee9353fa7a58cfdc4#02f582e1f5307c8334d52a8ee9353fa7a58cfdc4"
+source = "git+https://github.com/rust-proxy/wind?rev=075cee4120cc91a8bfeb2864d68f585df2909797#075cee4120cc91a8bfeb2864d68f585df2909797"
 dependencies = [
  "ipnet",
  "regex",
@@ -12652,7 +12691,7 @@ dependencies = [
 [[package]]
 name = "wind-tuic"
 version = "0.2.0"
-source = "git+https://github.com/rust-proxy/wind?rev=02f582e1f5307c8334d52a8ee9353fa7a58cfdc4#02f582e1f5307c8334d52a8ee9353fa7a58cfdc4"
+source = "git+https://github.com/rust-proxy/wind?rev=075cee4120cc91a8bfeb2864d68f585df2909797#075cee4120cc91a8bfeb2864d68f585df2909797"
 dependencies = [
  "arc-swap",
  "async-trait",
