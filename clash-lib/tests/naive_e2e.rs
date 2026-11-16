@@ -1,6 +1,6 @@
 //! Real client/server interoperability: SOCKS -> Clash -> Wind/Cronet ->
-//! Docker sing-box Naive inbound -> host HTTP/UDP target. No public proxy is
-//! used.
+//! Docker sing-box Naive inbound -> container-local HTTP/TCP/UDP targets. No
+//! public proxy is used.
 #![cfg(all(feature = "naive", docker_test))]
 
 mod common;
@@ -9,36 +9,33 @@ mod common;
 mod docker;
 
 use std::{
-    future::Future,
-    net::Ipv4Addr,
-    panic::AssertUnwindSafe,
-    path::PathBuf,
-    sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    },
+    future::Future, net::Ipv4Addr, panic::AssertUnwindSafe, path::PathBuf,
     time::Duration,
 };
 
 use anyhow::{Context, Result, bail};
-use axum::{Router, body::Bytes, routing::post};
 use common::{ClashInstance, Socks5UdpSession};
 use docker::{
     consts::IMAGE_NAIVE_SINGBOX,
-    docker_runner::{DockerTestRunnerBuilder, RunAndCleanup, alloc_docker_port},
+    docker_runner::{
+        DockerTestRunnerBuilder, MultiDockerTestRunner, RunAndCleanup,
+        alloc_docker_port,
+    },
 };
 use futures::FutureExt;
 use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio_util::task::AbortOnDropHandle;
 
 const SERVER_PORT: u16 = 10002;
+const TARGET_IMAGE: &str =
+    "python:3.13-alpine@sha256:\
+     9ef1a599f863231c3d91e941389bfdc4a2d6070557243d54df1a4e57015b960e";
+const HTTP_TARGET: &str = "http://127.0.0.1:10080";
 
 struct Server {
     host: String,
     port: u16,
     ca: String,
-    target_ip: Ipv4Addr,
 }
 
 impl Server {
@@ -84,6 +81,9 @@ impl Server {
                 "outbounds": [{"type": "direct", "tag": "direct"}]
             }))?,
         )?;
+        let target_path = dir.path().join("targets.py");
+        std::fs::write(&target_path, include_bytes!("naive/targets.py"))?;
+        let target_path = target_path.to_str().context("non-UTF-8 fixture path")?;
         let runner = DockerTestRunnerBuilder::new()
             .image(IMAGE_NAIVE_SINGBOX)
             .cmd(&["run", "-c", "/etc/naive/server.json"])
@@ -94,64 +94,41 @@ impl Server {
             .host_port(port, SERVER_PORT)
             .build()
             .await?;
-        // Resolve the destination from the container's perspective. Remote
-        // Docker needs an explicit route back to the machine running this test.
-        let ready = async {
-            runner
-                .wait_for_log("sing-box started", Duration::from_secs(15))
-                .await?;
-            if let Ok(ip) = std::env::var("CLIENT_IP") {
-                return ip.parse::<Ipv4Addr>().context(
-                    "CLIENT_IP must be an IPv4 address reachable from Docker",
-                );
-            }
-            if std::env::var("DOCKER_HOST").is_ok_and(|endpoint| {
-                endpoint.starts_with("tcp://")
-                    || endpoint.starts_with("http://")
-                    || endpoint.starts_with("https://")
-            }) {
-                bail!(
-                    "set CLIENT_IP to the test host's IPv4 address when using \
-                     remote Docker"
-                );
-            }
-            if cfg!(target_os = "linux") {
-                return runner
-                    .gateway_ip()
-                    .context("Docker network has no gateway")?
-                    .parse::<Ipv4Addr>()
-                    .context("Docker gateway is not IPv4");
-            }
-            let hosts = runner
-                .exec_command(&["getent", "hosts", "host.docker.internal"])
-                .await?;
-            hosts
-                .split_whitespace()
-                .find_map(|part| part.parse::<Ipv4Addr>().ok())
-                .context(
-                    "cannot resolve host.docker.internal; set CLIENT_IP to the \
-                     test host's IPv4 address",
-                )
-        }
-        .await;
-        let target_ip = match ready {
-            Ok(ip) => ip,
+        let targets = DockerTestRunnerBuilder::new()
+            .image(TARGET_IMAGE)
+            .no_port()
+            .net_mode(&format!("container:{}", runner.container_id()))
+            .cmd(&["python", "-u", "/targets.py"])
+            .mounts(&[(target_path, "/targets.py")])
+            .build()
+            .await;
+        let targets = match targets {
+            Ok(targets) => targets,
             Err(error) => {
                 runner.cleanup().await?;
                 return Err(error);
             }
         };
-        let server = Self {
-            host,
-            port,
-            ca,
-            target_ip,
-        };
+        let ready = async {
+            runner
+                .wait_for_log("sing-box started", Duration::from_secs(15))
+                .await?;
+            targets
+                .wait_for_log("naive targets ready", Duration::from_secs(15))
+                .await
+        }
+        .await;
+        // Remove the namespace-sharing fixture before the proxy container.
+        let mut runners = MultiDockerTestRunner::default();
+        runners.add_with_runner(targets);
+        runners.add_with_runner(runner);
+        let server = Self { host, port, ca };
         // Catch assertion panics so the shared runner still removes the
         // container. Keep fixtures outside the timed future, including
         // on timeout/failure.
-        let result = runner
+        let result = runners
             .run_and_cleanup(async move {
+                ready?;
                 match AssertUnwindSafe(async move { test(server).await })
                     .catch_unwind()
                     .await
@@ -238,30 +215,10 @@ impl Client {
     }
 }
 
-async fn http_target(
-    target_ip: Ipv4Addr,
-) -> Result<(String, Arc<AtomicUsize>, AbortOnDropHandle<()>)> {
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await?;
-    let url = format!("http://{target_ip}:{}/echo", listener.local_addr()?.port());
-    let calls = Arc::new(AtomicUsize::new(0));
-    let counter = calls.clone();
-    let router = Router::new().route(
-        "/echo",
-        post(move |body: Bytes| {
-            counter.fetch_add(1, Ordering::SeqCst);
-            async move { body }
-        }),
-    );
-    let task = AbortOnDropHandle::new(tokio::spawn(async move {
-        axum::serve(listener, router).await.unwrap();
-    }));
-    Ok((url, calls, task))
-}
-
 async fn tcp_roundtrip(quic: bool) -> Result<()> {
     Server::run(quic, move |server| async move {
         let client = Client::start(&server, quic, "e2e-password", true, false)?;
-        let (url, calls, _target) = http_target(server.target_ip).await?;
+        let url = format!("{HTTP_TARGET}/echo");
         // Cross both Naive's initial padded frames and the adapter's 64 KiB
         // buffer.
         let payload: Vec<u8> = (0..256 * 1024).map(|i| (i % 251) as u8).collect();
@@ -277,7 +234,15 @@ async fn tcp_roundtrip(quic: bool) -> Result<()> {
             Ok::<_, anyhow::Error>(())
         });
         futures::future::try_join_all(requests).await?;
-        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        assert_eq!(
+            http.get(format!("{HTTP_TARGET}/count"))
+                .send()
+                .await?
+                .error_for_status()?
+                .text()
+                .await?,
+            "3"
+        );
         let api_response = reqwest::Client::builder()
             .no_proxy()
             .build()?
@@ -312,57 +277,53 @@ async fn naive_e2e_h3_tcp() -> Result<()> {
 
 async fn tcp_half_close(quic: bool) -> Result<()> {
     Server::run(quic, move |server| async move {
-        let client = Client::start(&server, quic, "e2e-password", true, false)?;
-        for size in [0, 7, 256 * 1024] {
-            tokio::time::timeout(Duration::from_secs(15), async {
-                let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await?;
-                let port = listener.local_addr()?.port();
-                let payload: Vec<_> = (0..size).map(|i| (i % 251) as u8).collect();
-                let expected = payload.clone();
-                let target = AbortOnDropHandle::new(tokio::spawn(async move {
-                    let (mut socket, _) = listener.accept().await?;
-                    let mut request = Vec::new();
-                    socket.read_to_end(&mut request).await?;
-                    assert_eq!(request.len(), expected.len());
-                    assert!(request == expected, "request contents differ");
-                    // Only real TCP EOF at the destination releases the reply.
-                    socket.write_all(&vec![0xa5; 256 * 1024]).await?;
+        for round in 0..3 {
+            let client = Client::start(&server, quic, "e2e-password", true, false)?;
+            for (index, size) in [0, 7, 256 * 1024].into_iter().enumerate() {
+                tokio::time::timeout(Duration::from_secs(15), async {
+                    let port = 10003 + index as u16;
+                    let payload: Vec<_> =
+                        (0..size).map(|i| (i % 251) as u8).collect();
+                    let mut socket = tokio::net::TcpStream::connect((
+                        "127.0.0.1",
+                        client.socks_port,
+                    ))
+                    .await?;
+                    socket.write_all(&[5, 1, 0]).await?;
+                    let mut auth = [0; 2];
+                    socket.read_exact(&mut auth).await?;
+                    assert_eq!(auth, [5, 0]);
+                    let mut connect = vec![5, 1, 0, 1];
+                    connect.extend_from_slice(&Ipv4Addr::LOCALHOST.octets());
+                    connect.extend_from_slice(&port.to_be_bytes());
+                    socket.write_all(&connect).await?;
+                    let mut reply = [0; 4];
+                    socket.read_exact(&mut reply).await?;
+                    assert_eq!(&reply[..3], &[5, 0, 0]);
+                    let address_len = match reply[3] {
+                        1 => 4,
+                        4 => 16,
+                        3 => socket.read_u8().await? as usize,
+                        atyp => bail!("unexpected SOCKS5 address type {atyp}"),
+                    };
+                    socket.read_exact(&mut vec![0; address_len + 2]).await?;
+                    socket.write_all(&payload).await?;
                     socket.shutdown().await?;
+                    socket.shutdown().await?;
+                    let mut response = Vec::new();
+                    socket.read_to_end(&mut response).await?;
+                    assert_eq!(response.len(), 256 * 1024);
+                    assert!(response.iter().all(|byte| *byte == 0xa5));
                     Ok::<_, anyhow::Error>(())
-                }));
-                let mut socket =
-                    tokio::net::TcpStream::connect(("127.0.0.1", client.socks_port))
-                        .await?;
-                socket.write_all(&[5, 1, 0]).await?;
-                let mut auth = [0; 2];
-                socket.read_exact(&mut auth).await?;
-                assert_eq!(auth, [5, 0]);
-                let mut connect = vec![5, 1, 0, 1];
-                connect.extend_from_slice(&server.target_ip.octets());
-                connect.extend_from_slice(&port.to_be_bytes());
-                socket.write_all(&connect).await?;
-                let mut reply = [0; 4];
-                socket.read_exact(&mut reply).await?;
-                assert_eq!(&reply[..3], &[5, 0, 0]);
-                let address_len = match reply[3] {
-                    1 => 4,
-                    4 => 16,
-                    3 => socket.read_u8().await? as usize,
-                    atyp => bail!("unexpected SOCKS5 address type {atyp}"),
-                };
-                socket.read_exact(&mut vec![0; address_len + 2]).await?;
-                socket.write_all(&payload).await?;
-                socket.shutdown().await?;
-                socket.shutdown().await?;
-                let mut response = Vec::new();
-                socket.read_to_end(&mut response).await?;
-                assert_eq!(response.len(), 256 * 1024);
-                assert!(response.iter().all(|byte| *byte == 0xa5));
-                target.await??;
-                Ok::<_, anyhow::Error>(())
-            })
-            .await
-            .context("EOF-delimited request timed out")??;
+                })
+                .await
+                .with_context(|| {
+                    format!(
+                        "EOF-delimited request timed out (round={round}, \
+                         size={size}, quic={quic})"
+                    )
+                })??;
+            }
         }
         Ok(())
     })
@@ -385,19 +346,25 @@ async fn naive_e2e_h3_half_close() -> Result<()> {
 #[serial_test::serial]
 async fn naive_e2e_authentication_and_certificate_rejection() -> Result<()> {
     Server::run(false, |server| async move {
-        let (url, calls, _target) = http_target(server.target_ip).await?;
-        {
-            let client = Client::start(&server, false, "e2e-password", true, false)?;
-            let response = client
-                .http()?
-                .post(&url)
-                .body("control")
+        let url = format!("{HTTP_TARGET}/echo");
+        let control = Client::start(&server, false, "e2e-password", true, false)?;
+        let http = control.http()?;
+        let response = http
+            .post(&url)
+            .body("control")
+            .send()
+            .await?
+            .error_for_status()?;
+        assert_eq!(response.text().await?, "control");
+        assert_eq!(
+            http.get(format!("{HTTP_TARGET}/count"))
                 .send()
                 .await?
-                .error_for_status()?;
-            assert_eq!(response.text().await?, "control");
-        }
-        assert_eq!(calls.swap(0, Ordering::SeqCst), 1);
+                .error_for_status()?
+                .text()
+                .await?,
+            "1"
+        );
         for (password, trust) in [("wrong-password", true), ("e2e-password", false)]
         {
             let client = Client::start(&server, false, password, trust, false)?;
@@ -412,10 +379,43 @@ async fn naive_e2e_authentication_and_certificate_rejection() -> Result<()> {
             );
         }
         assert_eq!(
-            calls.load(Ordering::SeqCst),
-            0,
+            http.get(format!("{HTTP_TARGET}/count"))
+                .send()
+                .await?
+                .error_for_status()?
+                .text()
+                .await?,
+            "1",
             "failed tunnels must never fall back to DIRECT"
         );
+        Ok(())
+    })
+    .await
+}
+
+async fn udp_roundtrip(quic: bool) -> Result<()> {
+    Server::run(quic, move |server| async move {
+        let client = Client::start(&server, quic, "e2e-password", true, true)?;
+        let udp = Socks5UdpSession::connect(client.socks_port).await;
+        for sequence in 0..12 {
+            let port = 10090 + sequence % 2;
+            let payload =
+                vec![sequence as u8; [1, 2048, 4096][sequence as usize % 3]];
+            udp.send_ipv4(&payload, Ipv4Addr::LOCALHOST.octets(), port)
+                .await;
+            let (reply, source) =
+                tokio::time::timeout(Duration::from_secs(10), udp.recv())
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "UDP reply timed out (quic={quic}, \
+                             sequence={sequence}, port={port}, size={})",
+                            payload.len()
+                        )
+                    })?;
+            assert_eq!(reply, payload);
+            assert_eq!(source, format!("127.0.0.1:{port}"));
+        }
         Ok(())
     })
     .await
@@ -424,27 +424,11 @@ async fn naive_e2e_authentication_and_certificate_rejection() -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial_test::serial]
 async fn naive_e2e_udp_over_tcp() -> Result<()> {
-    Server::run(false, |server| async move {
-        let client = Client::start(&server, false, "e2e-password", true, true)?;
-        let udp = Socks5UdpSession::connect(client.socks_port).await;
-        for _ in 0..2 {
-            let echo = tokio::net::UdpSocket::bind("0.0.0.0:0").await?;
-            let addr = echo.local_addr()?;
-            let task = AbortOnDropHandle::new(tokio::spawn(async move {
-                let mut buf = [0; 4096];
-                let (n, peer) = echo.recv_from(&mut buf).await.unwrap();
-                echo.send_to(&buf[..n], peer).await.unwrap();
-            }));
-            let payload = vec![0x5a; 2048];
-            udp.send_ipv4(&payload, server.target_ip.octets(), addr.port())
-                .await;
-            let (reply, source) =
-                tokio::time::timeout(Duration::from_secs(10), udp.recv()).await?;
-            assert_eq!(reply, payload);
-            assert_eq!(source, format!("{}:{}", server.target_ip, addr.port()));
-            task.await?;
-        }
-        Ok(())
-    })
-    .await
+    udp_roundtrip(false).await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::serial]
+async fn naive_e2e_h3_udp_over_tcp() -> Result<()> {
+    udp_roundtrip(true).await
 }

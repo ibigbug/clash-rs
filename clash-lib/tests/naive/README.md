@@ -43,9 +43,9 @@ Wind and Cronet are fetched at pinned Git revisions. Normal builds do not depend
 
 ## Running end-to-end tests
 
-Like the other protocol tests, these tests use `DockerTestRunner` and are enabled by `CLASH_DOCKER_TEST=true`. They exercise the full path: SOCKS5 client → ClashRS → Wind/Cronet → a sing-box Naive inbound in Docker → HTTP/UDP echo services on the test host.
+Like the other protocol tests, these tests use `DockerTestRunner` and are enabled by `CLASH_DOCKER_TEST=true`. They exercise the full path: SOCKS5 client → ClashRS → Wind/Cronet → a sing-box Naive inbound in Docker → HTTP/TCP/UDP echo services in a Python container sharing the server network namespace.
 
-The shared runner pulls the official `ghcr.io/sagernet/sing-box:v1.14.4` image, mounts temporary configuration and short-lived TLS certificates, publishes TCP/UDP ports, waits for server readiness, and removes the container after each test. Container logs are printed during cleanup. No locally installed sing-box binary or public proxy server is required. The tests fail if Docker, the image, or Cronet is unavailable; they do not silently skip missing dependencies.
+The shared runner pulls the official `ghcr.io/sagernet/sing-box:v1.14.4` image and a digest-pinned `python:3.13-alpine` target image, provisions temporary configuration and short-lived TLS certificates, publishes TCP/UDP ports, waits for server readiness, and removes both containers after each test. Container logs are printed during cleanup. No locally installed sing-box binary or public proxy server is required. The tests fail if Docker, the image, or Cronet is unavailable; they do not silently skip missing dependencies.
 
 Start a Docker daemon running Linux containers and prepare the host platform's Cronet library as described above. Run from the ClashRS repository root:
 
@@ -65,15 +65,17 @@ cargo test -p clash-lib --features naive --test naive_e2e --locked -- --nocaptur
 
 Alternatively, add `wind-naive/download` to `--features` to download a verified prebuilt Cronet library during the build. Apple targets require the static library configured through `CRONET_LIB_DIR`; they do not use `CLASH_NAIVE_CRONET_LIB`.
 
-For a remote Docker daemon, set `DOCKER_HOST` and `CLIENT_IP`. The shared runner uploads fixtures through the Docker API, and the client connects to the published port on the daemon's host. `CLIENT_IP` must be an IPv4 address of the test host reachable from the container. For local Docker, the tests use the bridge gateway on Linux and resolve `host.docker.internal` inside the container on Docker Desktop. Set `CLIENT_IP` explicitly for other network layouts. The HTTP/UDP echo services bind to all IPv4 interfaces so the container can reach them; host firewall rules must allow this traffic.
+For a remote Docker daemon, set `DOCKER_HOST`. The shared runner uploads fixtures through the Docker API, and the client connects to the published port on the daemon host. Target services listen only on loopback inside the shared container network namespace, so no container-to-host callback route, firewall exception, or `CLIENT_IP` is needed.
+
+The Linux test executable can also run inside a bridge-networked Linux container with its matching Cronet library. Set `DOCKER_HOST` to an Engine API endpoint reachable from that container; its hostname must also expose the published proxy ports. Fixtures are uploaded through the API, so they need no host bind mounts. This isolates the client SOCKS loopback path as well as the server targets, which is useful when a WSL host loopback drops larger UDP datagrams.
 
 Test coverage:
 
 1. Three concurrent HTTP/2 requests each round-trip 256 KiB, crossing the initial padding and adapter buffer boundaries. The tests also check the API type and ensure passwords are not exposed.
 2. The same round trips over QUIC. The server listens only on UDP, so success cannot result from an HTTP/2 fallback.
 3. A successful control request establishes connectivity before testing incorrect passwords and untrusted certificates. Rejected tunnels must deliver no requests to the destination service.
-4. HTTP/2 and HTTP/3 half-close cases send empty, 7-byte, and 256 KiB requests through SOCKS5, shut down the write half twice, and receive the complete 256 KiB response emitted only after destination EOF.
-5. Two destination ports are accessed within one SOCKS5 UDP association, with response sources and 2048-byte payloads verified.
+4. HTTP/2 and HTTP/3 half-close cases send empty, 7-byte, and 256 KiB requests through SOCKS5, shut down the write half twice, and receive the complete 256 KiB response emitted only after destination EOF. Each transport repeats these cases with three fresh ClashRS instances.
+5. HTTP/2 and HTTP/3 each send twelve datagrams across two destination ports within one SOCKS5 UDP association, checking response sources and 1-, 2048-, and 4096-byte payloads. This crosses the initial eight padding frames in both directions.
 
 Without `CLASH_DOCKER_TEST`, the Docker tests are excluded at compile time, matching the other protocol modules. `--ignored` is not needed. Run the adapter's configuration, handshake error propagation, and cancellation tests separately with:
 

@@ -75,6 +75,12 @@ pub struct DockerTestRunner {
 }
 
 impl DockerTestRunner {
+    /// Share this container's network namespace with a test fixture.
+    #[allow(dead_code)]
+    pub fn container_id(&self) -> &str {
+        &self.id
+    }
+
     pub async fn try_new(
         image_conf: Option<CreateImageOptions>,
         mut container_conf: ContainerCreateBody,
