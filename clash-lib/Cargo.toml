@@ -193,9 +193,9 @@ tor-rtcompat = { version = "0.47", optional = true, default-features = false, fe
 
 
 # Keep all Wind crates on the same exact revision.
-wind-tuic = { git = "https://github.com/rust-proxy/wind", rev = "075cee4120cc91a8bfeb2864d68f585df2909797", optional = true, default-features = false, features = ["client", "decode", "quinn"] }
-wind-core = { git = "https://github.com/rust-proxy/wind", rev = "075cee4120cc91a8bfeb2864d68f585df2909797", optional = true, default-features = false }
-wind-quic = { git = "https://github.com/rust-proxy/wind", rev = "075cee4120cc91a8bfeb2864d68f585df2909797", optional = true, default-features = false, features = ["quinn"] }
+wind-tuic = { git = "https://github.com/rust-proxy/wind", rev = "09dd567c71ae0bd26d18a9f6c250a694d702753c", optional = true, default-features = false, features = ["client", "decode", "quinn"] }
+wind-core = { git = "https://github.com/rust-proxy/wind", rev = "09dd567c71ae0bd26d18a9f6c250a694d702753c", optional = true, default-features = false }
+wind-quic = { git = "https://github.com/rust-proxy/wind", rev = "09dd567c71ae0bd26d18a9f6c250a694d702753c", optional = true, default-features = false, features = ["quinn"] }
 # Keep Wind's Quinn fork separate from the crates.io Quinn used by Hysteria2.
 wind-quinn = { package = "quinn", git = "https://github.com/Tipuch/quinn.git", branch = "bbrv3", optional = true, default-features = false, features = ["runtime-tokio"] }
 
@@ -249,8 +249,8 @@ reqwest = { version = "0.13", features = ["socks"] }
 # Only network enumeration is needed; the default system feature fails on musl.
 sysinfo = { version = "0.40", default-features = false, features = ["network"]}
 moka = { version = "0.12", features = ["future"] }
-wind-tuic = { git = "https://github.com/rust-proxy/wind", rev = "075cee4120cc91a8bfeb2864d68f585df2909797", default-features = false, features = ["server", "client", "quinn"] }
-wind-base = { git = "https://github.com/rust-proxy/wind", rev = "075cee4120cc91a8bfeb2864d68f585df2909797" }
+wind-tuic = { git = "https://github.com/rust-proxy/wind", rev = "09dd567c71ae0bd26d18a9f6c250a694d702753c", default-features = false, features = ["server", "client", "quinn"] }
+wind-base = { git = "https://github.com/rust-proxy/wind", rev = "09dd567c71ae0bd26d18a9f6c250a694d702753c" }
 eyre = "0.6"
 
 [build-dependencies]
@@ -285,10 +285,10 @@ windows = { version = "0.62", features = [
 # Cronet is loaded at runtime on desktop Linux/Windows. Apple and Android
 # builds need a matching static archive (CRONET_LIB_DIR).
 [target.'cfg(not(any(target_vendor = "apple", target_os = "android")))'.dependencies]
-wind-naive = { git = "https://github.com/rust-proxy/wind", rev = "075cee4120cc91a8bfeb2864d68f585df2909797", optional = true, default-features = false, features = ["dynamic"] }
+wind-naive = { git = "https://github.com/rust-proxy/wind", rev = "09dd567c71ae0bd26d18a9f6c250a694d702753c", optional = true, default-features = false, features = ["dynamic"] }
 
 [target.'cfg(any(target_vendor = "apple", target_os = "android"))'.dependencies]
-wind-naive = { git = "https://github.com/rust-proxy/wind", rev = "075cee4120cc91a8bfeb2864d68f585df2909797", optional = true, default-features = false, features = ["static-link"] }
+wind-naive = { git = "https://github.com/rust-proxy/wind", rev = "09dd567c71ae0bd26d18a9f6c250a694d702753c", optional = true, default-features = false, features = ["static-link"] }
 
 [lints]
 workspace = true

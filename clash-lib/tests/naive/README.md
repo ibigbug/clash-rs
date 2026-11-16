@@ -22,8 +22,8 @@ This overrides dynamic loading, including when Cargo unifies both features.
 Linux requires a matching glibc/musl `libcronet.a`. Windows MSVC requires
 `cronet.lib` and its generated `link_flags.txt` in the same directory. No runtime
 `cronet-lib-path` or `CLASH_NAIVE_CRONET_LIB` is needed in static builds. Existing
-Apple/Android builds remain static. Linux/Windows static downloads are not yet
-checksum-pinned; use a locally built archive. A supplied `CRONET_LIB_DIR` bypasses
+Apple/Android builds remain static. Enable `naive-download` together with
+`naive-static` to fetch a checksum-pinned archive. A supplied `CRONET_LIB_DIR` bypasses
 automatic downloads. Static Cronet does not imply a fully static executable:
 platform system libraries may remain dynamic.
 
@@ -116,8 +116,8 @@ Static linkage takes precedence when Cargo enables both backends. A supplied
 `CRONET_LIB_DIR` overrides downloading. The legacy `download` feature retains
 its existing behavior.
 
-Apple/Android assets already have pinned checksums. Linux/Windows static
-release assets are still pending publication; until then supply a local archive.
+Static archives for Linux (glibc/musl), Windows MSVC, Apple, and Android
+are pinned to the `static-20261116` release with SHA-256 verification.
 Custom unpinned assets require `CRONET_DOWNLOAD_SHA256`. Windows also downloads
 the matching `.link-flags.txt` and requires its pinned checksum or
 `CRONET_DOWNLOAD_LINK_FLAGS_SHA256`.
