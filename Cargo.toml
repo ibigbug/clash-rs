@@ -46,6 +46,10 @@ redundant_clone = "deny"
 needless_collect = "deny"
 
 [patch.crates-io]
+# Keep the mandatory Wind QUIC backend on the same portable fork revision.
+quiche = { git = "https://github.com/rust-proxy/quiche", rev = "b25abcc4077ef03de1272832d6427ecfe761c09c" }
+datagram-socket = { git = "https://github.com/rust-proxy/quiche", rev = "b25abcc4077ef03de1272832d6427ecfe761c09c" }
+tokio-quiche = { git = "https://github.com/rust-proxy/quiche", rev = "b25abcc4077ef03de1272832d6427ecfe761c09c" }
 rustls = { git = "https://github.com/Watfaq/rustls.git", branch = "watfaq/0.23.45" }
 tokio-rustls = { git = "https://github.com/Watfaq/tokio-rustls.git", branch = "watfaq/0.26.4" }
 # tailscale-rs 0.6.1 from git, until the next tailscale release:

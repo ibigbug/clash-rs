@@ -28,6 +28,8 @@ pub mod reject;
 
 pub mod http;
 pub mod mixed;
+#[cfg(feature = "naive")]
+pub mod naive;
 #[cfg(all(target_os = "linux", feature = "tproxy"))]
 pub mod tproxy;
 
@@ -181,6 +183,7 @@ pub enum OutboundType {
     WireGuard,
     Tor,
     Tuic,
+    Naive,
     Socks5,
     Hysteria2,
     Ssh,
@@ -210,6 +213,7 @@ impl Display for OutboundType {
             OutboundType::WireGuard => write!(f, "WireGuard"),
             OutboundType::Tor => write!(f, "Tor"),
             OutboundType::Tuic => write!(f, "Tuic"),
+            OutboundType::Naive => write!(f, "Naive"),
             OutboundType::Socks5 => write!(f, "Socks5"),
             OutboundType::Hysteria2 => write!(f, "Hysteria2"),
             OutboundType::Ssh => write!(f, "ssh"),
