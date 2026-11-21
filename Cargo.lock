@@ -1391,7 +1391,7 @@ dependencies = [
  "shadowsocks",
  "smoltcp 0.14.0",
  "sock2proc",
- "socket2 0.6.5",
+ "socket2",
  "ssh-key 0.6.7",
  "sysinfo 0.40.0",
  "tailscale",
@@ -3914,7 +3914,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.6.5",
+ "socket2",
  "system-configuration",
  "tokio",
  "tower-service",
@@ -4193,7 +4193,7 @@ version = "0.3.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4d40460c0ce33d6ce4b0630ad68ff63d6661961c48b6dba35e5a4d81cfb48222"
 dependencies = [
- "socket2 0.6.5",
+ "socket2",
  "widestring",
  "windows-registry",
  "windows-result 0.4.1",
@@ -5190,7 +5190,7 @@ dependencies = [
  "pin-project-lite",
  "rustc-hash 2.1.2",
  "rustls",
- "socket2 0.6.5",
+ "socket2",
  "thiserror 2.0.21",
  "tokio",
  "tokio-stream",
@@ -5234,7 +5234,7 @@ checksum = "3137a52df66c20090a889828d1c655f21f52294cba64e5c4fbb04fc83eee7c8e"
 dependencies = [
  "cfg_aliases",
  "libc",
- "socket2 0.6.5",
+ "socket2",
  "tracing",
  "windows-sys 0.61.2",
 ]
@@ -6595,7 +6595,7 @@ dependencies = [
  "quinn-udp 0.5.14",
  "rustc-hash 2.1.2",
  "rustls",
- "socket2 0.6.5",
+ "socket2",
  "thiserror 2.0.21",
  "tokio",
  "tracing",
@@ -6614,7 +6614,7 @@ dependencies = [
  "quinn-udp 0.6.1",
  "rustc-hash 2.1.2",
  "rustls",
- "socket2 0.6.5",
+ "socket2",
  "thiserror 2.0.21",
  "tokio",
  "tracing",
@@ -6645,7 +6645,7 @@ dependencies = [
  "quinn-udp-jls",
  "rustc-hash 2.1.2",
  "rustls-jls",
- "socket2 0.6.5",
+ "socket2",
  "thiserror 2.0.21",
  "tokio",
  "tracing",
@@ -6731,7 +6731,7 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.6.5",
+ "socket2",
  "tracing",
  "windows-sys 0.60.2",
 ]
@@ -6743,7 +6743,7 @@ source = "git+https://github.com/Tipuch/quinn.git?branch=bbrv3#762128e9e8017e8ff
 dependencies = [
  "cfg_aliases",
  "libc",
- "socket2 0.6.5",
+ "socket2",
  "tracing",
  "windows-sys 0.61.2",
 ]
@@ -6756,7 +6756,7 @@ checksum = "5d5749a7be268ab1c4fb36b2d6011bffb2c692a7d668c0116663289aa2e91b6d"
 dependencies = [
  "cfg_aliases",
  "libc",
- "socket2 0.6.5",
+ "socket2",
  "tracing",
  "windows-sys 0.61.2",
 ]
@@ -8153,7 +8153,7 @@ dependencies = [
  "serde",
  "serde-saphyr",
  "shadowquic-macros",
- "socket2 0.6.5",
+ "socket2",
  "thiserror 2.0.21",
  "time",
  "tokio",
@@ -8204,7 +8204,7 @@ dependencies = [
  "serde_json",
  "serde_urlencoded",
  "shadowsocks-crypto",
- "socket2 0.6.5",
+ "socket2",
  "spin 0.12.3",
  "thiserror 2.0.21",
  "tokio",
@@ -8459,16 +8459,6 @@ dependencies = [
  "sysctl",
  "tracing",
  "windows-sys 0.52.0",
-]
-
-[[package]]
-name = "socket2"
-version = "0.4.10"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9f7916fc008ca5542385b89a3d3ce689953c143e9304a9bf8beec1de48994c0d"
-dependencies = [
- "libc",
- "winapi",
 ]
 
 [[package]]
@@ -9110,7 +9100,7 @@ dependencies = [
  "parking_lot",
  "pin-project-lite",
  "signal-hook-registry",
- "socket2 0.6.5",
+ "socket2",
  "tokio-macros",
  "tracing",
  "windows-sys 0.61.2",
@@ -9171,7 +9161,7 @@ dependencies = [
  "log",
  "once_cell",
  "pin-project",
- "socket2 0.6.5",
+ "socket2",
  "tokio",
  "windows-sys 0.60.2",
 ]
@@ -9328,7 +9318,7 @@ dependencies = [
  "hyper-util",
  "percent-encoding",
  "pin-project",
- "socket2 0.6.5",
+ "socket2",
  "sync_wrapper",
  "tokio",
  "tokio-stream",
@@ -10328,7 +10318,7 @@ dependencies = [
  "rustls",
  "rustls-pki-types",
  "rustls-webpki",
- "socket2 0.6.5",
+ "socket2",
  "thiserror 2.0.21",
  "tokio",
  "tokio-util",
@@ -10891,7 +10881,7 @@ dependencies = [
  "regex",
  "rtnetlink 0.21.0",
  "smallvec",
- "socket2 0.6.5",
+ "socket2",
  "static_assertions",
  "tokio",
  "tokio-stream",
@@ -11284,15 +11274,15 @@ dependencies = [
 
 [[package]]
 name = "unix-udp-sock"
-version = "0.7.0"
-source = "git+https://github.com/Watfaq-legacy/unix-udp-sock.git?rev=4d99109f8a709944203f44da33b2742e5b64e534#4d99109f8a709944203f44da33b2742e5b64e534"
+version = "0.9.0-alpha"
+source = "git+https://github.com/Watfaq-legacy/unix-udp-sock.git?rev=1dbc471f32f594ea89faedaf64b5bfed529e3810#1dbc471f32f594ea89faedaf64b5bfed529e3810"
 dependencies = [
  "bytes",
  "futures-core",
  "futures-sink",
  "libc",
  "pin-project-lite",
- "socket2 0.4.10",
+ "socket2",
  "tokio",
  "tokio-util",
  "tracing",
@@ -11601,7 +11591,7 @@ dependencies = [
  "netstack-smoltcp",
  "rand 0.10.3",
  "smoltcp 0.14.0",
- "socket2 0.6.5",
+ "socket2",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -11711,7 +11701,7 @@ dependencies = [
  "bytes",
  "eyre",
  "libc",
- "socket2 0.6.5",
+ "socket2",
  "tokio",
  "tokio-util",
  "tracing",
@@ -11735,7 +11725,7 @@ dependencies = [
  "quinn 0.12.0",
  "rand 0.10.3",
  "serde",
- "socket2 0.6.5",
+ "socket2",
  "tokio",
  "tokio-util",
  "tracing",
@@ -11801,7 +11791,7 @@ dependencies = [
  "secrecy",
  "serde",
  "snafu",
- "socket2 0.6.5",
+ "socket2",
  "thiserror 2.0.21",
  "tokio",
  "tokio-rustls",

@@ -161,6 +161,10 @@ impl InboundHandlerTrait for TproxyInbound {
         socket.bind(&self.addr.into())?;
 
         let listener = unix_udp_sock::UdpSocket::from_std(socket.into())?;
+        // GRO is optional on the running kernel.
+        if let Err(err) = listener.set_gro(true) {
+            trace!("TPROXY UDP GRO unavailable: {err}");
+        }
 
         handle_inbound_datagram(
             self.allow_lan,

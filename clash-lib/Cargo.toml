@@ -261,7 +261,7 @@ sock2proc = { git = "https://github.com/Watfaq/sock2proc.git", rev = "9f9e630" }
 hyperlocal = { version = "0.9", features = ["client"] }
 
 [target.'cfg(any(target_os="linux", target_os="android"))'.dependencies]
-unix-udp-sock = { git = "https://github.com/Watfaq-legacy/unix-udp-sock.git", rev = "4d99109f8a709944203f44da33b2742e5b64e534", optional = true }
+unix-udp-sock = { git = "https://github.com/Watfaq-legacy/unix-udp-sock.git", rev = "1dbc471f32f594ea89faedaf64b5bfed529e3810", optional = true }
 
 [target.'cfg(macos)'.dependencies]
 security-framework = "3.7.0"
