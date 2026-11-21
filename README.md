@@ -67,6 +67,12 @@ A custom protocol, rule based network proxy software.
   process with transparent and raw socket access, a TPROXY-capable kernel and
   separately configured policy routing are required. The listener can run
   without a TUN device. Use `tproxy-port` to configure the inbound port.
+  For Android socket marking, use only vendor bits allocated for this purpose
+  on the device (bits 29 and 30). For example, if bit 29 is allocated to Clash,
+  set the listener's `fw-mark` (or top-level `routing-mark` for `tproxy-port`)
+  to `536870912` and match `0x20000000/0x20000000` in routing rules.
+  Android adds its own network ID and flags. Leave the mark unset if neither
+  vendor bit is available.
 - macOS
 - Windows
   - You need to copy the [wintun.dll](https://wintun.net/) file which matches your architecture to the same directory as your executable and run your program as administrator.

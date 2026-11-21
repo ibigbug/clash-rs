@@ -197,9 +197,7 @@ fn new_unbound_socket(
     };
     socket.set_nonblocking(true)?;
     // socket.set_reuse_address(true)?;
-    if let Some(so_mark) = fw_mark {
-        socket.set_mark(so_mark)?;
-    }
+    crate::proxy::utils::apply_socket_mark(&socket, fw_mark)?;
     // SAFETY: AsyncFd owns this socket until deregistration.
     unsafe { Ok(tokio::io::unix::AsyncFd::register(socket)?) }
 }

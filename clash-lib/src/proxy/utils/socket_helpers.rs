@@ -13,6 +13,33 @@ use tokio::{
 };
 use tracing::{debug, error, instrument, trace};
 
+#[cfg(socket_mark)]
+pub(crate) fn apply_socket_mark(
+    socket: &socket2::Socket,
+    mark: Option<u32>,
+) -> io::Result<()> {
+    let Some(mark) = mark else { return Ok(()) };
+    #[cfg(target_os = "android")]
+    let mark = {
+        // AOSP netd's Fwmark reserves bits 29 and 30 for the vendor. ON_CONNECT
+        // rewrites netId and permissions before the kernel does its route
+        // lookup.
+        const VENDOR_MASK: u32 = 0x6000_0000;
+        if mark & !VENDOR_MASK != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Android socket marks may only use deployment-assigned vendor bits \
+                 (mask 0x60000000)",
+            ));
+        }
+        if mark == 0 {
+            return Ok(());
+        }
+        socket.mark()? | mark
+    };
+    socket.set_mark(mark)
+}
+
 pub fn apply_tcp_options(s: &TcpStream) -> std::io::Result<()> {
     #[cfg(not(target_os = "windows"))]
     {
@@ -74,9 +101,7 @@ pub async fn new_tcp_stream(
     }
 
     #[cfg(socket_mark)]
-    if let Some(so_mark) = so_mark {
-        socket.set_mark(so_mark)?;
-    }
+    apply_socket_mark(&socket, so_mark)?;
 
     socket.set_keepalive(true)?;
     socket.set_tcp_nodelay(true)?;
@@ -372,9 +397,7 @@ pub fn new_udp_socket_blocking(
     }
 
     #[cfg(socket_mark)]
-    if let Some(so_mark) = so_mark {
-        socket.set_mark(so_mark)?;
-    }
+    apply_socket_mark(&socket, so_mark)?;
 
     socket.set_broadcast(true)?;
     socket.set_nonblocking(true)?;
@@ -479,9 +502,7 @@ pub fn new_dual_stack_udp_socket(
     socket.bind(&bind_addr.into())?;
 
     #[cfg(socket_mark)]
-    if let Some(so_mark) = so_mark {
-        socket.set_mark(so_mark)?;
-    }
+    apply_socket_mark(&socket, so_mark)?;
 
     socket.set_broadcast(true)?;
     socket.set_nonblocking(true)?;
@@ -508,6 +529,38 @@ pub fn try_create_dualstack_tcplistener(
 mod tests {
     use super::*;
     use std::{net::SocketAddrV6, time::Duration};
+
+    #[cfg(all(target_os = "android", socket_mark))]
+    #[tokio::test]
+    #[ignore = "requires SO_MARK, an active Android network and an available bit 29"]
+    async fn android_mark_preserves_netd_selection() {
+        const MARK: u32 = 1 << 29;
+        // Check the pre-connect merge on a socket that already has a netId.
+        let socket =
+            socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None)
+                .unwrap();
+        socket.set_mark(100).unwrap();
+        apply_socket_mark(&socket, Some(MARK)).unwrap();
+        assert_eq!(socket.mark().unwrap(), 100 | MARK);
+
+        for addr in ["127.0.0.1:0", "[::1]:0"] {
+            let listener = TcpListener::bind(addr).await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let control = new_tcp_stream(addr, None, None).await.unwrap();
+            let expected = socket2::SockRef::from(&control).mark().unwrap();
+            assert_ne!(expected & 0xffff, 0, "netd must select a network");
+            assert_eq!(expected & MARK, 0);
+
+            let marked = new_tcp_stream(addr, None, Some(MARK)).await.unwrap();
+            assert_eq!(
+                socket2::SockRef::from(&marked).mark().unwrap(),
+                expected | MARK
+            );
+
+            let err = new_tcp_stream(addr, None, Some(256)).await.unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        }
+    }
 
     /// Locate the loopback network interface on the current host.
     /// Returns `None` if the interface cannot be found or enumeration fails.
