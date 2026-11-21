@@ -202,7 +202,7 @@ impl Handler {
             new_udp_socket(
                 None,
                 sess.iface.as_ref(),
-                #[cfg(target_os = "linux")]
+                #[cfg(socket_mark)]
                 sess.so_mark,
                 Some(server_socket_addr),
             )
@@ -216,7 +216,7 @@ impl Handler {
                     port_gen.clone(),
                     self.opts.hop_interval,
                     sess.iface.clone(),
-                    #[cfg(target_os = "linux")]
+                    #[cfg(socket_mark)]
                     sess.so_mark,
                 )?;
                 let obfs = super::salamander::Salamander::from_abstract(
@@ -236,7 +236,7 @@ impl Handler {
                     port_gen.clone(),
                     self.opts.hop_interval,
                     sess.iface.clone(),
-                    #[cfg(target_os = "linux")]
+                    #[cfg(socket_mark)]
                     sess.so_mark,
                 )?;
                 quinn::Endpoint::new_with_abstract_socket(

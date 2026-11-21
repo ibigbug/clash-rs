@@ -53,7 +53,7 @@ where
         let stream = crate::proxy::utils::new_tcp_stream(
             *addr,
             self.iface.as_ref(),
-            #[cfg(target_os = "linux")]
+            #[cfg(socket_mark)]
             self.so_mark,
         )
         .await?;

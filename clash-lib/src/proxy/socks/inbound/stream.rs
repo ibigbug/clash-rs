@@ -160,7 +160,7 @@ pub async fn handle_tcp(
             let udp_inbound = new_udp_socket(
                 Some(udp_addr),
                 None,
-                #[cfg(target_os = "linux")]
+                #[cfg(socket_mark)]
                 None,
                 None,
             )

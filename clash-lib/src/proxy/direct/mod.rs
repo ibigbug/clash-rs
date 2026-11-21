@@ -97,7 +97,7 @@ impl OutboundHandler for Handler {
         let s = new_tcp_stream_happy_eyeballs(
             &addrs,
             sess.iface.as_ref(),
-            #[cfg(target_os = "linux")]
+            #[cfg(socket_mark)]
             sess.so_mark,
         )
         .await?;
@@ -118,7 +118,7 @@ impl OutboundHandler for Handler {
         // without EAFNOSUPPORT.
         let udp = new_dual_stack_udp_socket(
             sess.iface.as_ref(),
-            #[cfg(target_os = "linux")]
+            #[cfg(socket_mark)]
             sess.so_mark,
         )?;
         let d = InstrumentedDatagramWrapper::new(OutboundDatagramImpl::new(
@@ -144,7 +144,7 @@ impl OutboundHandler for Handler {
                 sess.destination.host().as_str(),
                 sess.destination.port(),
                 sess.iface.as_ref(),
-                #[cfg(target_os = "linux")]
+                #[cfg(socket_mark)]
                 sess.so_mark,
             )
             .await?;
@@ -165,7 +165,7 @@ impl OutboundHandler for Handler {
                 None,
                 sess.destination.clone(),
                 sess.iface.as_ref(),
-                #[cfg(target_os = "linux")]
+                #[cfg(socket_mark)]
                 sess.so_mark,
             )
             .await?;

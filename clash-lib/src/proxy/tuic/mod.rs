@@ -260,13 +260,13 @@ impl Handler {
         // egress (or route it back through the tunnel).
         let socket_factory: UdpSocketFactory = {
             let iface = sess.iface.clone();
-            #[cfg(target_os = "linux")]
+            #[cfg(socket_mark)]
             let so_mark = sess.so_mark;
             Arc::new(move |peer: std::net::SocketAddr| {
                 new_udp_socket_blocking(
                     None,
                     iface.as_ref(),
-                    #[cfg(target_os = "linux")]
+                    #[cfg(socket_mark)]
                     so_mark,
                     Some(peer),
                 )

@@ -259,7 +259,7 @@ impl InboundHandlerTrait for ShadowsocksInbound {
             let socket = new_udp_socket(
                 Some(self.addr),
                 None,
-                #[cfg(target_os = "linux")]
+                #[cfg(socket_mark)]
                 self.fw_mark,
                 None,
             )

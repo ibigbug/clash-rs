@@ -43,7 +43,7 @@ pub fn apply_tcp_options(s: &TcpStream) -> std::io::Result<()> {
 pub async fn new_tcp_stream(
     endpoint: SocketAddr,
     iface: Option<&OutboundInterface>,
-    #[cfg(target_os = "linux")] so_mark: Option<u32>,
+    #[cfg(socket_mark)] so_mark: Option<u32>,
 ) -> std::io::Result<TcpStream> {
     let (socket, family) = match endpoint {
         SocketAddr::V4(_) => (
@@ -73,8 +73,7 @@ pub async fn new_tcp_stream(
         trace!("tcp socket bound to interface: {socket:?}");
     }
 
-    #[cfg(not(target_os = "android"))]
-    #[cfg(target_os = "linux")]
+    #[cfg(socket_mark)]
     if let Some(so_mark) = so_mark {
         socket.set_mark(so_mark)?;
     }
@@ -156,7 +155,7 @@ pub fn sort_addrs_happy_eyeballs(addrs: &[SocketAddr]) -> Vec<SocketAddr> {
 pub async fn new_tcp_stream_happy_eyeballs(
     endpoints: &[SocketAddr],
     iface: Option<&OutboundInterface>,
-    #[cfg(target_os = "linux")] so_mark: Option<u32>,
+    #[cfg(socket_mark)] so_mark: Option<u32>,
 ) -> std::io::Result<TcpStream> {
     if endpoints.is_empty() {
         return Err(std::io::Error::other("no destination address provided"));
@@ -165,7 +164,7 @@ pub async fn new_tcp_stream_happy_eyeballs(
         return new_tcp_stream(
             endpoints[0],
             iface,
-            #[cfg(target_os = "linux")]
+            #[cfg(socket_mark)]
             so_mark,
         )
         .await;
@@ -174,12 +173,12 @@ pub async fn new_tcp_stream_happy_eyeballs(
     async fn connect_candidate(
         addr: SocketAddr,
         iface: Option<OutboundInterface>,
-        #[cfg(target_os = "linux")] so_mark: Option<u32>,
+        #[cfg(socket_mark)] so_mark: Option<u32>,
     ) -> (std::io::Result<TcpStream>, SocketAddr) {
         let res = new_tcp_stream(
             addr,
             iface.as_ref(),
-            #[cfg(target_os = "linux")]
+            #[cfg(socket_mark)]
             so_mark,
         )
         .await;
@@ -197,7 +196,7 @@ pub async fn new_tcp_stream_happy_eyeballs(
     in_flight.push(connect_candidate(
         first_addr,
         iface.cloned(),
-        #[cfg(target_os = "linux")]
+        #[cfg(socket_mark)]
         so_mark,
     ));
 
@@ -222,7 +221,7 @@ pub async fn new_tcp_stream_happy_eyeballs(
                             in_flight.push(connect_candidate(
                                 next_addr,
                                 iface.cloned(),
-                                #[cfg(target_os = "linux")]
+                                #[cfg(socket_mark)]
                                 so_mark,
                             ));
                             delay_timer = if candidate_idx < sorted.len() {
@@ -252,7 +251,7 @@ pub async fn new_tcp_stream_happy_eyeballs(
                 in_flight.push(connect_candidate(
                     next_addr,
                     iface.cloned(),
-                    #[cfg(target_os = "linux")]
+                    #[cfg(socket_mark)]
                     so_mark,
                 ));
                 delay_timer = if candidate_idx < sorted.len() {
@@ -272,13 +271,13 @@ pub async fn new_tcp_stream_happy_eyeballs(
 pub fn new_std_udp_socket(
     src: Option<SocketAddr>,
     iface: Option<&OutboundInterface>,
-    #[cfg(target_os = "linux")] so_mark: Option<u32>,
+    #[cfg(socket_mark)] so_mark: Option<u32>,
     family_hint: Option<std::net::SocketAddr>,
 ) -> std::io::Result<std::net::UdpSocket> {
     new_udp_socket_blocking(
         src,
         iface,
-        #[cfg(target_os = "linux")]
+        #[cfg(socket_mark)]
         so_mark,
         family_hint,
     )
@@ -288,7 +287,7 @@ pub fn new_std_udp_socket(
 pub fn new_udp_socket_blocking(
     src: Option<SocketAddr>,
     iface: Option<&OutboundInterface>,
-    #[cfg(target_os = "linux")] so_mark: Option<u32>,
+    #[cfg(socket_mark)] so_mark: Option<u32>,
     family_hint: Option<std::net::SocketAddr>,
 ) -> std::io::Result<std::net::UdpSocket> {
     // Determine the socket family based on the source address or interface
@@ -372,7 +371,7 @@ pub fn new_udp_socket_blocking(
         }
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(socket_mark)]
     if let Some(so_mark) = so_mark {
         socket.set_mark(so_mark)?;
     }
@@ -387,7 +386,7 @@ pub fn new_udp_socket_blocking(
 pub async fn new_udp_socket(
     src: Option<SocketAddr>,
     iface: Option<&OutboundInterface>,
-    #[cfg(target_os = "linux")] so_mark: Option<u32>,
+    #[cfg(socket_mark)] so_mark: Option<u32>,
     // Optional family hint for the socket.
     // If not provided, the family will be determined based on the source
     // address or interface.
@@ -396,7 +395,7 @@ pub async fn new_udp_socket(
     let std_socket = new_std_udp_socket(
         src,
         iface,
-        #[cfg(target_os = "linux")]
+        #[cfg(socket_mark)]
         so_mark,
         family_hint,
     )?;
@@ -449,7 +448,7 @@ pub fn try_create_dualstack_socket(
 /// different address families (e.g. in the DIRECT handler).
 pub fn new_dual_stack_udp_socket(
     iface: Option<&OutboundInterface>,
-    #[cfg(target_os = "linux")] so_mark: Option<u32>,
+    #[cfg(socket_mark)] so_mark: Option<u32>,
 ) -> std::io::Result<UdpSocket> {
     let dual_stack = SocketAddr::from((Ipv6Addr::UNSPECIFIED, 0));
     let ipv4_only = SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0));
@@ -479,7 +478,7 @@ pub fn new_dual_stack_udp_socket(
     // platforms — required on Windows to avoid WSAEINVAL (10022) from sendto.
     socket.bind(&bind_addr.into())?;
 
-    #[cfg(target_os = "linux")]
+    #[cfg(socket_mark)]
     if let Some(so_mark) = so_mark {
         socket.set_mark(so_mark)?;
     }
@@ -546,7 +545,7 @@ mod tests {
     async fn test_dual_stack_no_iface_is_bound_and_sends_ipv4_mapped() {
         let sock = new_dual_stack_udp_socket(
             None,
-            #[cfg(target_os = "linux")]
+            #[cfg(socket_mark)]
             None,
         )
         .expect("failed to create dual-stack socket");
@@ -601,7 +600,7 @@ mod tests {
 
         let result = new_dual_stack_udp_socket(
             Some(&iface),
-            #[cfg(target_os = "linux")]
+            #[cfg(socket_mark)]
             None,
         );
 
@@ -654,7 +653,7 @@ mod tests {
         let stream = super::new_tcp_stream_happy_eyeballs(
             &[dummy_addr, working_addr],
             None,
-            #[cfg(target_os = "linux")]
+            #[cfg(socket_mark)]
             None,
         )
         .await;

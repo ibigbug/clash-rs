@@ -63,6 +63,10 @@ A custom protocol, rule based network proxy software.
 ## 🖥 Environment Support
 
 - Linux
+- Android: the `android` CLI feature includes TCP and UDP TPROXY. A privileged
+  process with transparent and raw socket access, a TPROXY-capable kernel and
+  separately configured policy routing are required. The listener can run
+  without a TUN device. Use `tproxy-port` to configure the inbound port.
 - macOS
 - Windows
   - You need to copy the [wintun.dll](https://wintun.net/) file which matches your architecture to the same directory as your executable and run your program as administrator.

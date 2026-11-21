@@ -172,7 +172,7 @@ async fn listen_dhcp_client(iface: &OutboundInterface) -> io::Result<UdpSocket> 
     new_udp_socket(
         Some(listen_addr.parse().expect("must parse")),
         Some(iface),
-        #[cfg(target_os = "linux")]
+        #[cfg(socket_mark)]
         None,
         None,
     )
