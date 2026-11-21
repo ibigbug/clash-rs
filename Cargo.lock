@@ -11285,6 +11285,7 @@ dependencies = [
 [[package]]
 name = "unix-udp-sock"
 version = "0.7.0"
+source = "git+https://github.com/Watfaq-legacy/unix-udp-sock.git?rev=4d99109f8a709944203f44da33b2742e5b64e534#4d99109f8a709944203f44da33b2742e5b64e534"
 dependencies = [
  "bytes",
  "futures-core",

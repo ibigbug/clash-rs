@@ -1,6 +1,5 @@
 [workspace]
 resolver = "3"
-exclude = ["vendor/unix-udp-sock"]
 
 members = [
     "clash-bin",
