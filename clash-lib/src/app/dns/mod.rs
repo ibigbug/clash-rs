@@ -27,7 +27,10 @@ pub use rule_dispatch::{PendingOutboundManager, PendingRouter, RuleDispatch};
 pub use resolver::{EnhancedResolver, SystemResolver, new as new_resolver};
 
 pub use server::DnsRunner;
-#[cfg(feature = "tun")]
+#[cfg(any(
+    feature = "tun",
+    all(feature = "tproxy", any(target_os = "linux", target_os = "android"))
+))]
 pub use server::exchange_with_resolver;
 
 #[async_trait]

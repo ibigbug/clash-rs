@@ -28,12 +28,17 @@ pub mod reject;
 
 pub mod http;
 pub mod mixed;
-#[cfg(all(target_os = "linux", feature = "tproxy"))]
+#[cfg(all(any(target_os = "linux", target_os = "android"), feature = "tproxy"))]
 pub mod tproxy;
 
 #[cfg(all(target_os = "linux", feature = "redir"))]
 pub mod redir;
 
+#[cfg(any(
+    feature = "tun",
+    all(feature = "tproxy", any(target_os = "linux", target_os = "android"))
+))]
+mod channel_datagram;
 pub(crate) mod datagram;
 
 pub mod anytls;

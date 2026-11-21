@@ -182,7 +182,7 @@ impl OutboundHandler for Handler {
                 self.opts.server.as_str(),
                 self.opts.port,
                 sess.iface.as_ref(),
-                #[cfg(target_os = "linux")]
+                #[cfg(socket_mark)]
                 sess.so_mark,
             )
             .await?;
@@ -207,7 +207,7 @@ impl OutboundHandler for Handler {
                 None,
                 (self.opts.server.clone(), self.opts.port).try_into()?,
                 sess.iface.as_ref(),
-                #[cfg(target_os = "linux")]
+                #[cfg(socket_mark)]
                 sess.so_mark,
             )
             .await?;

@@ -12,6 +12,15 @@ fn main() -> anyhow::Result<()> {
     // instead of repeating the long target predicate.
     println!("cargo::rustc-check-cfg=cfg(qemu_emulated)");
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    // Android VpnService builds without TPROXY use the system's socket marks.
+    // Only the privileged Android backend opts into setting SO_MARK itself.
+    println!("cargo::rustc-check-cfg=cfg(socket_mark)");
+    if target_os == "linux"
+        || (target_os == "android"
+            && std::env::var_os("CARGO_FEATURE_TPROXY").is_some())
+    {
+        println!("cargo::rustc-cfg=socket_mark");
+    }
     let target_arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
     if target_os == "linux" && target_arch != "x86_64" && target_arch != "x86" {
         println!("cargo::rustc-cfg=qemu_emulated");

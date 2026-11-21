@@ -16,7 +16,10 @@ use crate::{
 
 #[cfg(all(target_os = "linux", feature = "redir"))]
 use crate::proxy::redir::RedirInbound;
-#[cfg(all(target_os = "linux", feature = "tproxy"))]
+#[cfg(all(
+    any(target_os = "linux", target_os = "android"),
+    feature = "tproxy"
+))]
 use crate::proxy::tproxy::TproxyInbound;
 
 use crate::Dispatcher;
@@ -126,13 +129,13 @@ fn build_handler(
         ))),
         #[cfg(feature = "tproxy")]
         InboundOpts::TProxy {
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "android"))]
             common_opts,
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "android"))]
             dns_hijack,
             ..
         } => {
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "android"))]
             {
                 Some(Arc::new(TproxyInbound::new(
                     (common_opts.listen.0, common_opts.port).into(),
@@ -144,7 +147,7 @@ fn build_handler(
                 )))
             }
 
-            #[cfg(not(target_os = "linux"))]
+            #[cfg(not(any(target_os = "linux", target_os = "android")))]
             {
                 warn!("tproxy is not supported on this platform");
                 None

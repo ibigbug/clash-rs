@@ -4,8 +4,8 @@ pub mod runner;
 pub use runner::TunRunner;
 mod stream;
 
-#[cfg(target_os = "linux")] // for tproxy
-pub use datagram::TunDatagram;
+#[cfg(target_os = "linux")] // Preserve the existing public TUN adapter name.
+pub use super::channel_datagram::ChannelDatagram as TunDatagram;
 
 #[cfg(test)]
 mod tests {

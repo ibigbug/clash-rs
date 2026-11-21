@@ -102,7 +102,7 @@ impl WireguardTunnel {
                 None,
                 remote_endpoint.into(),
                 sess.iface.as_ref(),
-                #[cfg(target_os = "linux")]
+                #[cfg(socket_mark)]
                 sess.so_mark,
             )
             .await?;
