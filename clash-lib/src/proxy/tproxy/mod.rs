@@ -1,3 +1,5 @@
+mod udp;
+
 use super::{channel_datagram::ChannelDatagram, inbound::InboundHandlerTrait};
 use crate::{
     app::dispatcher::Dispatcher,
@@ -11,9 +13,10 @@ use crate::{
 
 use async_trait::async_trait;
 use etherparse::PacketBuilder;
-use std::{io, net::SocketAddr, os::fd::AsRawFd, sync::Arc};
+use std::{io, net::SocketAddr, sync::Arc};
 use tokio::net::TcpListener;
 use tracing::{trace, warn};
+use udp::UdpReceiver;
 
 use crate::app::dns::{ThreadSafeDNSResolver, exchange_with_resolver};
 
@@ -147,29 +150,12 @@ impl InboundHandlerTrait for TproxyInbound {
         socket.set_reuse_port(true)?;
         socket.set_nonblocking(true)?;
         socket.set_broadcast(true)?;
-        set_ip_recv_orig_dstaddr(
-            if self.addr.is_ipv4() {
-                libc::IPPROTO_IP
-            } else {
-                libc::IPPROTO_IPV6
-            },
-            &socket,
-        )?;
-        if dual_stack {
-            set_ip_recv_orig_dstaddr(libc::IPPROTO_IP, &socket)?;
-        }
-        socket.bind(&self.addr.into())?;
-
-        let listener = unix_udp_sock::UdpSocket::from_std(socket.into())?;
-        // GRO is optional on the running kernel.
-        if let Err(err) = listener.set_gro(true) {
-            trace!("TPROXY UDP GRO unavailable: {err}");
-        }
+        let listener = UdpReceiver::bind(socket, self.addr, dual_stack)?;
 
         handle_inbound_datagram(
             self.allow_lan,
             self.fw_mark,
-            Arc::new(listener),
+            listener,
             self.dispatcher.clone(),
             self.dns_resolver.clone(),
             self.dns_hijack,
@@ -251,7 +237,7 @@ async fn sendto_with_src(
 async fn handle_inbound_datagram(
     _allow_lan: bool,
     fw_mark: Option<u32>,
-    socket: Arc<unix_udp_sock::UdpSocket>,
+    mut socket: UdpReceiver,
     dispatcher: Arc<Dispatcher>,
     dns_resolver: Option<ThreadSafeDNSResolver>,
     dns_hijack: bool,
@@ -300,9 +286,7 @@ async fn handle_inbound_datagram(
 
                     trace!(
                         "recv msg:{:?} orig_dst:{:?}, local_addr:{:?}",
-                        meta,
-                        orig_dst,
-                        socket.local_addr()
+                        meta, orig_dst, socket.local_addr
                     );
                     let chunk_size = gro_chunk_size(meta.len, meta.stride);
                     if chunk_size == 0 {
@@ -401,11 +385,7 @@ async fn handle_inbound_datagram(
                     }
                 }
                 None => {
-                    trace!(
-                        "recv msg:{:?} local_addr:{:?}",
-                        meta,
-                        socket.local_addr()
-                    );
+                    trace!("recv msg:{:?} local_addr:{:?}", meta, socket.local_addr);
                     warn!("failed to get orig_dst");
                     continue;
                 }
@@ -422,20 +402,6 @@ async fn handle_inbound_datagram(
 
 fn gro_chunk_size(len: usize, stride: usize) -> usize {
     if stride == 0 { len } else { stride }
-}
-
-fn set_ip_recv_orig_dstaddr(
-    level: libc::c_int,
-    socket: &socket2::Socket,
-) -> io::Result<()> {
-    let opt = match level {
-        libc::IPPROTO_IP => libc::IP_RECVORIGDSTADDR,
-        libc::IPPROTO_IPV6 => libc::IPV6_RECVORIGDSTADDR,
-        _ => unreachable!("invalid sockopt level {}", level),
-    };
-
-    let enable: libc::c_int = 1;
-    set_socket_option(socket, level, opt, enable)
 }
 
 async fn handle_packet_from_dispatcher(
@@ -470,33 +436,6 @@ async fn handle_packet_from_dispatcher(
             Err(e) => warn!("tproxy raw socket unavailable for {src}: {e}"),
         }
     }
-}
-
-fn set_socket_option(
-    socket: &socket2::Socket,
-    level: i32,
-    opt: i32,
-    val: i32,
-) -> io::Result<()> {
-    let fd = socket.as_raw_fd();
-
-    let enable: libc::c_int = val;
-
-    unsafe {
-        let ret = libc::setsockopt(
-            fd,
-            level,
-            opt,
-            &enable as *const _ as *const _,
-            std::mem::size_of_val(&enable) as libc::socklen_t,
-        );
-
-        if ret != 0 {
-            return Err(io::Error::last_os_error());
-        }
-    }
-
-    Ok(())
 }
 
 #[cfg(test)]

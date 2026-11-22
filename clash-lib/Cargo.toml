@@ -45,7 +45,7 @@ wireguard = ["dep:boringtun", "dep:smoltcp"]
 tailscale = ["dep:tailscale"]
 tproxy = [
     "dep:etherparse",
-    "dep:unix-udp-sock",
+    "dep:nix",
 ]
 tun = [
     "dep:tun-rs",
@@ -261,7 +261,7 @@ sock2proc = { git = "https://github.com/Watfaq/sock2proc.git", rev = "9f9e630" }
 hyperlocal = { version = "0.9", features = ["client"] }
 
 [target.'cfg(any(target_os="linux", target_os="android"))'.dependencies]
-unix-udp-sock = { git = "https://github.com/Watfaq-legacy/unix-udp-sock.git", rev = "32479fa93cee1012384b7f97d5ea2da566a7361e", optional = true }
+nix = { version = "0.31.4", features = ["net", "uio"], optional = true }
 
 [target.'cfg(macos)'.dependencies]
 security-framework = "3.7.0"
