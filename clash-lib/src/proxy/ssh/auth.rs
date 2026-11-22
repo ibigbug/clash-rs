@@ -11,7 +11,8 @@ use crate::common::errors::new_io_error;
 
 use super::{HandlerOptions, connector::Client};
 
-/// Hashable authentication methods for tracking configured and attempted methods.
+/// Hashable authentication methods for tracking configured and attempted
+/// methods.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum MethodKindAdapter {
     None,
