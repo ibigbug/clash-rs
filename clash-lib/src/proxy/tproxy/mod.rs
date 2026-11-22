@@ -202,6 +202,8 @@ async fn sendto_with_src(
     dst: SocketAddr,
     src: SocketAddr,
 ) -> io::Result<()> {
+    let src = src.to_canonical();
+    let dst = dst.to_canonical();
     let socket = if src.is_ipv4() {
         &sockets.v4
     } else {
@@ -214,8 +216,6 @@ async fn sendto_with_src(
             "reply address family is not enabled",
         )
     })?;
-    let src = src.to_canonical();
-    let dst = dst.to_canonical();
     let mut packet: Vec<u8>;
     let builder;
     match (src, dst) {
@@ -446,7 +446,8 @@ async fn handle_packet_from_dispatcher(
 
 #[cfg(test)]
 mod tests {
-    use super::udp_datagrams;
+    use super::{ReplySockets, new_unbound_socket, sendto_with_src, udp_datagrams};
+    use std::{io, net::SocketAddr, time::Duration};
 
     #[test]
     fn empty_datagram_has_one_payload() {
@@ -459,5 +460,26 @@ mod tests {
     fn gro_preserves_datagram_boundaries() {
         assert!(udp_datagrams(b"abcde", 0).eq([b"abcde".as_slice()]));
         assert!(udp_datagrams(b"abcde", 2).eq([b"ab".as_slice(), b"cd", b"e"]));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires CAP_NET_RAW"]
+    async fn mapped_source_uses_ipv4_reply_socket() -> io::Result<()> {
+        let receiver = tokio::net::UdpSocket::bind("127.0.0.1:0").await?;
+        let sockets = ReplySockets {
+            v4: Some(new_unbound_socket(socket2::Domain::IPV4, None)?),
+            v6: None,
+        };
+        let src = "[::ffff:127.0.0.1]:32188".parse::<SocketAddr>().unwrap();
+        sendto_with_src(&sockets, b"reply", receiver.local_addr()?, src).await?;
+        let mut buf = [0; 5];
+        let (len, peer) = tokio::time::timeout(
+            Duration::from_secs(5),
+            receiver.recv_from(&mut buf),
+        )
+        .await??;
+        assert_eq!(&buf[..len], b"reply");
+        assert_eq!(peer, "127.0.0.1:32188".parse::<SocketAddr>().unwrap());
+        Ok(())
     }
 }
