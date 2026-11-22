@@ -141,7 +141,9 @@ impl InboundHandlerTrait for TproxyInbound {
     async fn listen_udp(&self) -> std::io::Result<()> {
         let (socket, dual_stack) =
             try_create_dualstack_socket(self.addr, socket2::Type::DGRAM)?;
-        if dual_stack || self.addr.is_ipv4() {
+        let bind_ip = self.addr.ip().to_canonical();
+        let receive_ipv4 = dual_stack || bind_ip.is_ipv4();
+        if receive_ipv4 {
             socket.set_ip_transparent_v4(true)?;
         }
         if self.addr.is_ipv6() {
@@ -150,7 +152,7 @@ impl InboundHandlerTrait for TproxyInbound {
         socket.set_reuse_port(true)?;
         socket.set_nonblocking(true)?;
         socket.set_broadcast(true)?;
-        let listener = UdpReceiver::bind(socket, self.addr, dual_stack)?;
+        let listener = UdpReceiver::bind(socket, self.addr, receive_ipv4)?;
 
         handle_inbound_datagram(
             self.allow_lan,

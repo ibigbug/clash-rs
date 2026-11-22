@@ -25,9 +25,9 @@ impl UdpReceiver {
     pub(super) fn bind(
         socket: socket2::Socket,
         addr: SocketAddr,
-        dual_stack: bool,
+        receive_ipv4: bool,
     ) -> io::Result<Self> {
-        if dual_stack || addr.is_ipv4() {
+        if receive_ipv4 {
             setsockopt(&socket, sockopt::Ipv4OrigDstAddr, &true)?;
         }
         if addr.is_ipv6() {
@@ -143,8 +143,7 @@ mod tests {
                 socket.set_only_v6(false)?;
             }
             socket.set_nonblocking(true)?;
-            let mut receiver =
-                UdpReceiver::bind(socket, bind_addr, bind_addr.is_ipv6())?;
+            let mut receiver = UdpReceiver::bind(socket, bind_addr, true)?;
             let port = receiver.local_addr.port();
             for dst in [
                 SocketAddr::from((Ipv4Addr::LOCALHOST, port)),
