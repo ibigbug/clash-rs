@@ -153,9 +153,19 @@ impl InboundHandlerTrait for TproxyInbound {
         socket.set_nonblocking(true)?;
         socket.set_broadcast(true)?;
         let listener = UdpReceiver::bind(socket, self.addr, receive_ipv4)?;
+        let replies = ReplySockets {
+            v4: receive_ipv4
+                .then(|| new_unbound_socket(socket2::Domain::IPV4, self.fw_mark))
+                .transpose()?,
+            v6: bind_ip
+                .is_ipv6()
+                .then(|| new_unbound_socket(socket2::Domain::IPV6, self.fw_mark))
+                .transpose()?,
+        };
 
         handle_inbound_datagram(
             self.allow_lan,
+            Arc::new(replies),
             self.fw_mark,
             listener,
             self.dispatcher.clone(),
@@ -166,23 +176,20 @@ impl InboundHandlerTrait for TproxyInbound {
     }
 }
 
+struct ReplySockets {
+    v4: Option<tokio::io::unix::AsyncFd<socket2::Socket>>,
+    v6: Option<tokio::io::unix::AsyncFd<socket2::Socket>>,
+}
+
 fn new_unbound_socket(
-    family_hint: SocketAddr,
+    domain: socket2::Domain,
     fw_mark: Option<u32>,
 ) -> io::Result<tokio::io::unix::AsyncFd<socket2::Socket>> {
-    let socket = if family_hint.is_ipv4() {
-        socket2::Socket::new(
-            socket2::Domain::IPV4,
-            socket2::Type::RAW,
-            Some(libc::IPPROTO_RAW.into()),
-        )?
-    } else {
-        socket2::Socket::new(
-            socket2::Domain::IPV6,
-            socket2::Type::RAW,
-            Some(libc::IPPROTO_RAW.into()),
-        )?
-    };
+    let socket = socket2::Socket::new(
+        domain,
+        socket2::Type::RAW,
+        Some(libc::IPPROTO_RAW.into()),
+    )?;
     socket.set_nonblocking(true)?;
     // socket.set_reuse_address(true)?;
     crate::proxy::utils::apply_socket_mark(&socket, fw_mark)?;
@@ -190,11 +197,23 @@ fn new_unbound_socket(
     unsafe { Ok(tokio::io::unix::AsyncFd::register(socket)?) }
 }
 async fn sendto_with_src(
-    socket: &tokio::io::unix::AsyncFd<socket2::Socket>,
+    sockets: &ReplySockets,
     buf: &[u8],
     dst: SocketAddr,
     src: SocketAddr,
 ) -> io::Result<()> {
+    let socket = if src.is_ipv4() {
+        &sockets.v4
+    } else {
+        &sockets.v6
+    }
+    .as_ref()
+    .ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "reply address family is not enabled",
+        )
+    })?;
     let src = src.to_canonical();
     let dst = dst.to_canonical();
     let mut packet: Vec<u8>;
@@ -238,6 +257,7 @@ async fn sendto_with_src(
 
 async fn handle_inbound_datagram(
     _allow_lan: bool,
+    reply_sockets: Arc<ReplySockets>,
     fw_mark: Option<u32>,
     mut socket: UdpReceiver,
     dispatcher: Arc<Dispatcher>,
@@ -270,11 +290,11 @@ async fn handle_inbound_datagram(
     }
 
     // dispatcher -> tproxy
-    let replies = handle_packet_from_dispatcher(l_rx, fw_mark);
+    let replies = handle_packet_from_dispatcher(l_rx, &reply_sockets);
 
     // tproxy -> dispatcher
     let dns_limit = Arc::new(tokio::sync::Semaphore::new(256));
-    let incoming = async move {
+    let incoming = async {
         let mut buf = vec![0_u8; 1024 * 64];
         loop {
             let meta = socket.recv_msg(&mut buf).await?;
@@ -324,6 +344,7 @@ async fn handle_inbound_datagram(
                                     let resolver = resolver.clone();
                                     let client_addr = meta.addr.to_canonical();
                                     let dns_server_addr = orig_dst.to_canonical();
+                                    let reply_sockets = reply_sockets.clone();
                                     tokio::spawn(async move {
                                         let _permit = permit;
                                         let mut resp = match exchange_with_resolver(
@@ -347,13 +368,8 @@ async fn handle_inbound_datagram(
                                             resp
                                         );
                                         if let Ok(data) = resp.to_vec()
-                                            && let Ok(socket_raw) =
-                                                new_unbound_socket(
-                                                    dns_server_addr,
-                                                    fw_mark,
-                                                )
                                             && let Err(e) = sendto_with_src(
-                                                &socket_raw,
+                                                &reply_sockets,
                                                 &data,
                                                 client_addr,
                                                 dns_server_addr,
@@ -409,11 +425,8 @@ fn udp_datagrams(payload: &[u8], stride: usize) -> impl Iterator<Item = &[u8]> {
 
 async fn handle_packet_from_dispatcher(
     mut l_rx: tokio::sync::mpsc::Receiver<UdpPacket>,
-    fw_mark: Option<u32>,
+    sockets: &ReplySockets,
 ) {
-    let socket_v4 = new_unbound_socket(SocketAddr::from(([0, 0, 0, 0], 0)), fw_mark);
-    let socket_v6 =
-        new_unbound_socket(SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 0], 0)), fw_mark);
     while let Some(pkt) = l_rx.recv().await {
         trace!("tproxy <- dispatcher: {:?}", pkt);
         // Send the reply with the original destination as its source address.
@@ -425,18 +438,8 @@ async fn handle_packet_from_dispatcher(
             warn!("tproxy: reply destination is a domain");
             continue;
         };
-        let socket = if src.is_ipv4() {
-            &socket_v4
-        } else {
-            &socket_v6
-        };
-        match socket {
-            Ok(socket) => {
-                if let Err(e) = sendto_with_src(socket, &pkt.data, dst, src).await {
-                    warn!("tproxy UDP reply from {src} to {dst} failed: {e}");
-                }
-            }
-            Err(e) => warn!("tproxy raw socket unavailable for {src}: {e}"),
+        if let Err(e) = sendto_with_src(sockets, &pkt.data, dst, src).await {
+            warn!("tproxy UDP reply from {src} to {dst} failed: {e}");
         }
     }
 }
