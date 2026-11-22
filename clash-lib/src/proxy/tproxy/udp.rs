@@ -139,6 +139,16 @@ mod tests {
                 socket2::Type::DGRAM,
                 None,
             )?;
+            // Both listeners need IP_RECVORIGDSTADDR for IPv4 packets.
+            // Some qemu-user versions cannot forward this socket option.
+            if cfg!(qemu_emulated)
+                && bind_addr.is_ipv4()
+                && setsockopt(&socket, sockopt::Ipv4OrigDstAddr, &true)
+                    == Err(nix::errno::Errno::ENOPROTOOPT)
+            {
+                eprintln!("skipping: IP_RECVORIGDSTADDR unavailable under QEMU");
+                return Ok(());
+            }
             if bind_addr.is_ipv6() {
                 socket.set_only_v6(false)?;
             }
