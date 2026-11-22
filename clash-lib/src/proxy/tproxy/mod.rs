@@ -285,7 +285,8 @@ async fn handle_inbound_datagram(
     let dns_limit = Arc::new(tokio::sync::Semaphore::new(256));
     let incoming = async move {
         let mut buf = vec![0_u8; 1024 * 64];
-        while let Ok(meta) = socket.recv_msg(&mut buf).await {
+        loop {
+            let meta = socket.recv_msg(&mut buf).await?;
             match meta.orig_dst {
                 Some(orig_dst) => {
                     if orig_dst.ip().is_multicast()
@@ -410,14 +411,13 @@ async fn handle_inbound_datagram(
                 }
             }
         }
-        warn!("tproxy udp listening ended");
     };
-    tokio::select! {
-        () = replies => {},
-        () = incoming => {},
-    }
+    let result = tokio::select! {
+        () = replies => Ok(()),
+        result = incoming => result,
+    };
     let _ = closer.send(0);
-    Ok(())
+    result
 }
 
 fn gro_chunk_size(len: usize, stride: usize) -> usize {
