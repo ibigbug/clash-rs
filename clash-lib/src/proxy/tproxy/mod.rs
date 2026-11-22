@@ -260,9 +260,12 @@ async fn handle_inbound_datagram(
         ..Default::default()
     };
 
-    let closer: tokio::sync::oneshot::Sender<u8> = dispatcher
+    let closer = dispatcher
         .dispatch_datagram(sess, Box::new(udp_stream))
         .await;
+    crate::defer! {
+        let _ = closer.send(0);
+    }
 
     // dispatcher -> tproxy
     let replies = handle_packet_from_dispatcher(l_rx, fw_mark);
@@ -392,12 +395,10 @@ async fn handle_inbound_datagram(
             }
         }
     };
-    let result = tokio::select! {
+    tokio::select! {
         () = replies => Ok(()),
         result = incoming => result,
-    };
-    let _ = closer.send(0);
-    result
+    }
 }
 
 fn gro_chunk_size(len: usize, stride: usize) -> usize {
