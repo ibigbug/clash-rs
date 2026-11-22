@@ -60,14 +60,6 @@ jobs:
           uname -a
           echo "Network namespaces support:"
           sudo ip netns list || echo "No namespaces yet"
-          # Clean up any leftover network state from previous runs
-          echo "Cleaning up any leftover network state..."
-          sudo ip netns del benchns 2>/dev/null || true
-          sudo ip link del veth0 2>/dev/null || true
-          sudo ip link del clash-bench 2>/dev/null || true
-          sudo pkill -9 iperf3 2>/dev/null || true
-          sudo pkill -9 clash-rs 2>/dev/null || true
-          echo "Cleanup complete"
 
       - name: Build clash-rs (release mode)
         run: |
@@ -82,7 +74,11 @@ jobs:
         id: pr_benchmark
         run: |
           echo "Starting TUN benchmark..."
-          sudo python3 bench/run_tun_benchmark.py \
+          # Make the benchmark veth the only eligible outbound interface.
+          sudo unshare --net --pid --fork --mount-proc bash -ec '
+            ip link set lo up
+            exec python3 bench/run_tun_benchmark.py "$@"
+          ' benchmark \
             --config bench/tun-benchmark.yaml \
             --duration ${{ env.BENCH_DURATION }} \
             --output benchmark-pr.json || {
