@@ -293,11 +293,7 @@ async fn handle_inbound_datagram(
                         "recv msg:{:?} orig_dst:{:?}, local_addr:{:?}",
                         meta, orig_dst, socket.local_addr
                     );
-                    let chunk_size = gro_chunk_size(meta.len, meta.stride);
-                    if chunk_size == 0 {
-                        continue;
-                    }
-                    for chunk in buf[0..meta.len].chunks(chunk_size) {
+                    for chunk in udp_datagrams(&buf[..meta.len], meta.stride) {
                         let pkt = UdpPacket {
                             data: chunk.to_vec(),
                             src_addr: meta.addr.to_canonical().into(),
@@ -403,8 +399,12 @@ async fn handle_inbound_datagram(
     }
 }
 
-fn gro_chunk_size(len: usize, stride: usize) -> usize {
-    if stride == 0 { len } else { stride }
+fn udp_datagrams(payload: &[u8], stride: usize) -> impl Iterator<Item = &[u8]> {
+    let size = if stride == 0 { payload.len() } else { stride };
+    // An empty UDP datagram has one payload, while chunks() yields none.
+    payload
+        .chunks(size.max(1))
+        .chain(payload.is_empty().then_some(payload))
 }
 
 async fn handle_packet_from_dispatcher(
@@ -443,15 +443,18 @@ async fn handle_packet_from_dispatcher(
 
 #[cfg(test)]
 mod tests {
-    use super::gro_chunk_size;
+    use super::udp_datagrams;
 
     #[test]
-    fn gro_chunk_size_uses_len_when_stride_is_zero() {
-        assert_eq!(gro_chunk_size(1024, 0), 1024);
+    fn empty_datagram_has_one_payload() {
+        for stride in [0, 5] {
+            assert!(udp_datagrams(b"", stride).eq([b"".as_slice()]));
+        }
     }
 
     #[test]
-    fn gro_chunk_size_uses_stride_when_non_zero() {
-        assert_eq!(gro_chunk_size(1024, 128), 128);
+    fn gro_preserves_datagram_boundaries() {
+        assert!(udp_datagrams(b"abcde", 0).eq([b"abcde".as_slice()]));
+        assert!(udp_datagrams(b"abcde", 2).eq([b"ab".as_slice(), b"cd", b"e"]));
     }
 }
