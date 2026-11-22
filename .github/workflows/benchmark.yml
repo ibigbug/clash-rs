@@ -170,6 +170,11 @@ jobs:
               commentBody = '⚠️ Benchmark comparison failed - check workflow logs for details.';
             }
 
+            if (context.payload.pull_request.head.repo.full_name !== process.env.GITHUB_REPOSITORY) {
+              await core.summary.addRaw(commentBody).write();
+              return;
+            }
+
             // Find existing benchmark comment
             const { data: comments } = await github.rest.issues.listComments({
               owner: context.repo.owner,
@@ -216,4 +221,4 @@ jobs:
       - name: Note on performance comparison
         if: steps.compare.outcome == 'failure'
         run: |
-          echo "::notice::Performance comparison detected a change (>10%) — see PR comment for details"
+          echo "::notice::Performance comparison detected a change (>10%) — see benchmark artifacts for details"
