@@ -3711,6 +3711,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f558a64ac9af88b5ba400d99b579451af0d39c6d360980045b91aac966d705e2"
 
 [[package]]
+name = "hotpath"
+version = "0.31.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f41c413153d29c7665f7a1a21b1fed9816c9be794fc7e58f48d420ce3e60b403"
+dependencies = [
+ "hotpath-macros",
+ "tokio",
+]
+
+[[package]]
+name = "hotpath-macros"
+version = "0.31.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "183e2530804a17d4aeef73a9d613a6977ad220cc11a1cd9312b9b6e52852ead4"
+
+[[package]]
 name = "http"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8128,9 +8144,9 @@ dependencies = [
 
 [[package]]
 name = "shadowquic"
-version = "0.4.6"
+version = "0.4.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ef53cb7ae41b57edf30fe61332050a307d949c0ccc0b6b05071342a64695542d"
+checksum = "a101ab40c57901cdde56bc52bea38619fe2623b5a9a8908671bdaa6d457862b9"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -8140,6 +8156,7 @@ dependencies = [
  "cc",
  "clap",
  "educe 0.8.1",
+ "hotpath",
  "libc",
  "noq",
  "noq-proto",
