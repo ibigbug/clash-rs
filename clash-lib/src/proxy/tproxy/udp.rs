@@ -111,7 +111,8 @@ fn recv<S: SockaddrLike + Into<SocketAddr> + Copy>(
         .flags
         .intersects(MsgFlags::MSG_TRUNC | MsgFlags::MSG_CTRUNC)
     {
-        trace!("discarding truncated TPROXY UDP datagram");
+        // With UDP GRO, discarding this read drops the entire batch.
+        trace!("discarding truncated TPROXY UDP receive");
         return Ok(None);
     }
     let Some(addr) = msg.address else {
