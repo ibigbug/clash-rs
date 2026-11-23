@@ -15,7 +15,7 @@ use crate::{
 use async_trait::async_trait;
 use etherparse::PacketBuilder;
 use std::{io, net::SocketAddr, sync::Arc};
-use tokio::net::TcpListener;
+use tokio::{net::TcpListener, task::JoinSet};
 use tracing::{info, trace, warn};
 use udp::UdpReceiver;
 
@@ -312,8 +312,9 @@ async fn handle_inbound_datagram(
     let replies = handle_packet_from_dispatcher(l_rx, &reply_sockets);
 
     // tproxy -> dispatcher
-    let dns_limit = Arc::new(tokio::sync::Semaphore::new(256));
     let incoming = async {
+        // Abort pending DNS replies when the listener is dropped.
+        let mut dns_tasks = JoinSet::new();
         let mut buf = vec![0_u8; 1024 * 64];
         loop {
             let meta = socket.recv_msg(&mut buf).await?;
@@ -351,21 +352,19 @@ async fn handle_inbound_datagram(
                             );
                             match hickory_proto::op::Message::from_vec(&pkt.data) {
                                 Ok(msg) => {
-                                    let Ok(permit) =
-                                        dns_limit.clone().try_acquire_owned()
-                                    else {
+                                    while dns_tasks.try_join_next().is_some() {}
+                                    if dns_tasks.len() >= 256 {
                                         warn!(
                                             "too many in-flight hijacked dns \
                                              queries, dropping query"
                                         );
                                         continue;
-                                    };
+                                    }
                                     let resolver = resolver.clone();
                                     let client_addr = meta.addr.to_canonical();
                                     let dns_server_addr = orig_dst.to_canonical();
                                     let reply_sockets = reply_sockets.clone();
-                                    tokio::spawn(async move {
-                                        let _permit = permit;
+                                    dns_tasks.spawn(async move {
                                         let mut resp = match exchange_with_resolver(
                                             &resolver, &msg, true,
                                         )
