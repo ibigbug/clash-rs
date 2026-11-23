@@ -6,6 +6,8 @@ use std::{
 use async_trait::async_trait;
 
 use compat::UdpSessionWrapper;
+#[cfg(socket_mark)]
+use shadowquic::utils::socket_opt::SocketFactory;
 use shadowquic::{
     config,
     dns::ResolverManager,
@@ -37,6 +39,22 @@ use crate::app::dispatcher::InstrumentedStream;
 // This is ugly, it may be exposed better by shadowquic in the future
 type SQConn = shadowquic::squic::SQConn<<EndClient as QuicClient>::C>;
 pub type HandlerOptions = config::ShadowQuicClientCfg;
+
+#[cfg(socket_mark)]
+struct MarkedSocketFactory {
+    inner: Arc<dyn SocketFactory>,
+    mark: u32,
+}
+
+#[cfg(socket_mark)]
+#[async_trait]
+impl SocketFactory for MarkedSocketFactory {
+    async fn create_socket(&self) -> io::Result<socket2::Socket> {
+        let socket = self.inner.create_socket().await?;
+        super::utils::apply_socket_mark(&socket, Some(self.mark))?;
+        Ok(socket)
+    }
+}
 
 pub struct Handler {
     name: String,
@@ -93,13 +111,23 @@ impl Handler {
                     SocksAddr::Ip(socket_addr) => socket_addr,
                 };
                 let mut cfg = self.opts.clone();
-                cfg.socket_opt.fw_mark = sess.so_mark;
+                // ShadowQUIC writes fw_mark verbatim. Keep marking under
+                // Clash's platform policy, after the socket has
+                // been bound and protected.
+                cfg.socket_opt.fw_mark = None;
                 cfg.socket_opt.bind_interface = sess
                     .iface
                     .as_ref()
                     .map(|iface| config::Interface::Device(iface.name.clone()));
                 let mut ep =
                     ShadowQuicClient::new(cfg, Arc::new(ResolverManager::new()));
+                #[cfg(socket_mark)]
+                if let Some(mark) = sess.so_mark {
+                    ep.socket_factory = Arc::new(MarkedSocketFactory {
+                        inner: ep.socket_factory,
+                        mark,
+                    });
+                }
                 ep.config.addr = addr.to_string();
                 Ok(ep) as io::Result<ShadowQuicClient>
             })
@@ -254,6 +282,32 @@ fn to_clash_socks_addr(x: SQAddr) -> SocksAddr {
             SocksAddr::Domain(String::from_utf8(domain.contents).unwrap(), x.port)
         }
     }
+}
+
+#[cfg(all(test, target_os = "android"))]
+#[tokio::test]
+async fn android_socket_factory_respects_mark_policy() -> anyhow::Result<()> {
+    let handler = Handler::new(
+        "test".into(),
+        HandlerOptions {
+            addr: "127.0.0.1:443".into(),
+            ..Default::default()
+        },
+    );
+    // A netId bit is ignored in VpnService builds and rejected with TPROXY.
+    let sess = Session {
+        so_mark: Some(1),
+        ..Default::default()
+    };
+    let resolver = Arc::new(crate::app::dns::SystemResolver::new(false)?);
+    let ep = handler.prepare_endpoint(&sess, resolver).await?;
+    assert_eq!(ep.config.socket_opt.fw_mark, None);
+    let socket = ep.socket_factory.create_socket().await;
+    #[cfg(socket_mark)]
+    assert_eq!(socket.unwrap_err().kind(), io::ErrorKind::InvalidInput);
+    #[cfg(not(socket_mark))]
+    drop(socket?);
+    Ok(())
 }
 
 #[cfg(all(test, docker_test))]
