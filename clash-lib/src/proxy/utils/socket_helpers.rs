@@ -13,6 +13,20 @@ use tokio::{
 };
 use tracing::{debug, error, instrument, trace};
 
+#[cfg(all(socket_mark, target_os = "android"))]
+pub(crate) fn validate_android_socket_mark(mark: u32) -> io::Result<()> {
+    // AOSP netd's Fwmark reserves bits 29 and 30 for the vendor.
+    const VENDOR_MASK: u32 = 0x6000_0000;
+    if mark & !VENDOR_MASK != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Android socket marks may only use deployment-assigned vendor bits \
+             (mask 0x60000000)",
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(socket_mark)]
 pub(crate) fn apply_socket_mark(
     socket: &socket2::Socket,
@@ -21,20 +35,11 @@ pub(crate) fn apply_socket_mark(
     let Some(mark) = mark else { return Ok(()) };
     #[cfg(target_os = "android")]
     let mark = {
-        // AOSP netd's Fwmark reserves bits 29 and 30 for the vendor. ON_CONNECT
-        // rewrites netId and permissions before the kernel does its route
-        // lookup.
-        const VENDOR_MASK: u32 = 0x6000_0000;
-        if mark & !VENDOR_MASK != 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "Android socket marks may only use deployment-assigned vendor bits \
-                 (mask 0x60000000)",
-            ));
-        }
+        validate_android_socket_mark(mark)?;
         if mark == 0 {
             return Ok(());
         }
+        // Preserve the network and permissions selected by netd.
         socket.mark()? | mark
     };
     socket.set_mark(mark)

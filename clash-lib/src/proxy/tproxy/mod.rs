@@ -139,6 +139,10 @@ impl InboundHandlerTrait for TproxyInbound {
     }
 
     async fn listen_udp(&self) -> std::io::Result<()> {
+        #[cfg(target_os = "android")]
+        if let Some(mark) = self.fw_mark {
+            crate::proxy::utils::validate_android_socket_mark(mark)?;
+        }
         let (socket, dual_stack) =
             try_create_dualstack_socket(self.addr, socket2::Type::DGRAM)?;
         let bind_ip = self.addr.ip().to_canonical();
@@ -155,11 +159,11 @@ impl InboundHandlerTrait for TproxyInbound {
         let listener = UdpReceiver::bind(socket, self.addr, receive_ipv4)?;
         let replies = ReplySockets {
             v4: receive_ipv4
-                .then(|| new_unbound_socket(socket2::Domain::IPV4, self.fw_mark))
+                .then(|| new_reply_socket(socket2::Domain::IPV4))
                 .transpose()?,
             v6: bind_ip
                 .is_ipv6()
-                .then(|| new_unbound_socket(socket2::Domain::IPV6, self.fw_mark))
+                .then(|| new_reply_socket(socket2::Domain::IPV6))
                 .transpose()?,
         };
 
@@ -181,9 +185,10 @@ struct ReplySockets {
     v6: Option<tokio::io::unix::AsyncFd<socket2::Socket>>,
 }
 
-fn new_unbound_socket(
+// Client replies follow the route to the client. The outbound session mark
+// can select an upstream routing table with no return path to that client.
+fn new_reply_socket(
     domain: socket2::Domain,
-    fw_mark: Option<u32>,
 ) -> io::Result<tokio::io::unix::AsyncFd<socket2::Socket>> {
     let socket = socket2::Socket::new(
         domain,
@@ -191,8 +196,6 @@ fn new_unbound_socket(
         Some(libc::IPPROTO_RAW.into()),
     )?;
     socket.set_nonblocking(true)?;
-    // socket.set_reuse_address(true)?;
-    crate::proxy::utils::apply_socket_mark(&socket, fw_mark)?;
     // SAFETY: AsyncFd owns this socket until deregistration.
     unsafe { Ok(tokio::io::unix::AsyncFd::register(socket)?) }
 }
@@ -446,7 +449,7 @@ async fn handle_packet_from_dispatcher(
 
 #[cfg(test)]
 mod tests {
-    use super::{ReplySockets, new_unbound_socket, sendto_with_src, udp_datagrams};
+    use super::{ReplySockets, new_reply_socket, sendto_with_src, udp_datagrams};
     use std::{io, net::SocketAddr, time::Duration};
 
     #[test]
@@ -467,7 +470,7 @@ mod tests {
     async fn mapped_source_uses_ipv4_reply_socket() -> io::Result<()> {
         let receiver = tokio::net::UdpSocket::bind("127.0.0.1:0").await?;
         let sockets = ReplySockets {
-            v4: Some(new_unbound_socket(socket2::Domain::IPV4, None)?),
+            v4: Some(new_reply_socket(socket2::Domain::IPV4)?),
             v6: None,
         };
         let src = "[::ffff:127.0.0.1]:32188".parse::<SocketAddr>().unwrap();
