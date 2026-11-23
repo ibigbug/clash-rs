@@ -1,4 +1,4 @@
-use crate::app::net::OutboundInterface;
+use crate::app::net::{OutboundInterface, SocketMark};
 use anyhow::anyhow;
 use bytes::{Buf, BufMut};
 use erased_serde::Serialize as ESerialize;
@@ -473,7 +473,7 @@ pub struct Session {
     /// The locally resolved IP address of the destination domain.
     pub resolved_ip: Option<IpAddr>,
     /// The packet mark SO_MARK
-    pub so_mark: Option<u32>,
+    pub so_mark: Option<SocketMark>,
     /// The bind interface
     pub iface: Option<OutboundInterface>,
     /// ISO 3166-1 alpha-2 country code from country mmdb. Only for display.

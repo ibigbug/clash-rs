@@ -1,4 +1,4 @@
-use crate::common::utils::default_bool_true;
+use crate::{app::net::SocketMark, common::utils::default_bool_true};
 use serde::{Deserialize, Serialize};
 use serde_yaml::Value;
 use std::collections::HashMap;
@@ -442,5 +442,5 @@ pub struct CommonInboundOpts {
     pub allow_lan: bool,
     pub port: u16,
     /// Linux routing mark
-    pub fw_mark: Option<u32>,
+    pub fw_mark: Option<SocketMark>,
 }

@@ -2,7 +2,7 @@ use crate::{
     Error,
     app::{
         dns,
-        net::Interface,
+        net::{Interface, SocketMark},
         remote_content_manager::providers::rule_provider::{
             RuleSetBehavior, RuleSetFormat,
         },
@@ -88,7 +88,7 @@ pub struct General {
     pub log_level: LogLevel,
     pub ipv6: bool,
     pub interface: Option<Interface>,
-    pub routing_mask: Option<u32>,
+    pub routing_mask: Option<SocketMark>,
     pub mmdb: Option<String>,
     pub mmdb_download_url: Option<String>,
     pub asn_mmdb: Option<String>,
@@ -114,7 +114,7 @@ pub struct TunConfig {
     pub gateway: Ipv4Net,
     pub gateway_v6: Option<Ipv6Net>,
     pub mtu: Option<u16>,
-    pub so_mark: Option<u32>,
+    pub so_mark: Option<SocketMark>,
     pub route_table: u32,
     pub dns_hijack: bool,
 }

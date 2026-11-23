@@ -1,5 +1,5 @@
 use super::platform::must_bind_socket_on_interface;
-use crate::app::net::OutboundInterface;
+use crate::app::net::{OutboundInterface, SocketMark};
 
 use futures::{StreamExt, io, stream::FuturesUnordered};
 use socket2::TcpKeepalive;
@@ -43,7 +43,7 @@ pub fn apply_tcp_options(s: &TcpStream) -> std::io::Result<()> {
 pub async fn new_tcp_stream(
     endpoint: SocketAddr,
     iface: Option<&OutboundInterface>,
-    #[cfg(target_os = "linux")] so_mark: Option<u32>,
+    so_mark: Option<SocketMark>,
 ) -> std::io::Result<TcpStream> {
     let (socket, family) = match endpoint {
         SocketAddr::V4(_) => (
@@ -73,10 +73,8 @@ pub async fn new_tcp_stream(
         trace!("tcp socket bound to interface: {socket:?}");
     }
 
-    #[cfg(not(target_os = "android"))]
-    #[cfg(target_os = "linux")]
-    if let Some(so_mark) = so_mark {
-        socket.set_mark(so_mark)?;
+    if let Some(mark) = so_mark {
+        mark.apply_to(&socket)?;
     }
 
     socket.set_keepalive(true)?;
@@ -156,33 +154,21 @@ pub fn sort_addrs_happy_eyeballs(addrs: &[SocketAddr]) -> Vec<SocketAddr> {
 pub async fn new_tcp_stream_happy_eyeballs(
     endpoints: &[SocketAddr],
     iface: Option<&OutboundInterface>,
-    #[cfg(target_os = "linux")] so_mark: Option<u32>,
+    so_mark: Option<SocketMark>,
 ) -> std::io::Result<TcpStream> {
     if endpoints.is_empty() {
         return Err(std::io::Error::other("no destination address provided"));
     }
     if endpoints.len() == 1 {
-        return new_tcp_stream(
-            endpoints[0],
-            iface,
-            #[cfg(target_os = "linux")]
-            so_mark,
-        )
-        .await;
+        return new_tcp_stream(endpoints[0], iface, so_mark).await;
     }
 
     async fn connect_candidate(
         addr: SocketAddr,
         iface: Option<OutboundInterface>,
-        #[cfg(target_os = "linux")] so_mark: Option<u32>,
+        so_mark: Option<SocketMark>,
     ) -> (std::io::Result<TcpStream>, SocketAddr) {
-        let res = new_tcp_stream(
-            addr,
-            iface.as_ref(),
-            #[cfg(target_os = "linux")]
-            so_mark,
-        )
-        .await;
+        let res = new_tcp_stream(addr, iface.as_ref(), so_mark).await;
         (res, addr)
     }
 
@@ -194,12 +180,7 @@ pub async fn new_tcp_stream_happy_eyeballs(
     // Start dialing the first candidate immediately
     let first_addr = sorted[candidate_idx];
     candidate_idx += 1;
-    in_flight.push(connect_candidate(
-        first_addr,
-        iface.cloned(),
-        #[cfg(target_os = "linux")]
-        so_mark,
-    ));
+    in_flight.push(connect_candidate(first_addr, iface.cloned(), so_mark));
 
     let mut delay_timer = Some(Box::pin(tokio::time::sleep(HAPPY_EYEBALLS_DELAY)));
 
@@ -222,7 +203,6 @@ pub async fn new_tcp_stream_happy_eyeballs(
                             in_flight.push(connect_candidate(
                                 next_addr,
                                 iface.cloned(),
-                                #[cfg(target_os = "linux")]
                                 so_mark,
                             ));
                             delay_timer = if candidate_idx < sorted.len() {
@@ -252,7 +232,6 @@ pub async fn new_tcp_stream_happy_eyeballs(
                 in_flight.push(connect_candidate(
                     next_addr,
                     iface.cloned(),
-                    #[cfg(target_os = "linux")]
                     so_mark,
                 ));
                 delay_timer = if candidate_idx < sorted.len() {
@@ -272,29 +251,23 @@ pub async fn new_tcp_stream_happy_eyeballs(
 pub fn new_std_udp_socket(
     src: Option<SocketAddr>,
     iface: Option<&OutboundInterface>,
-    #[cfg(target_os = "linux")] so_mark: Option<u32>,
+    so_mark: Option<SocketMark>,
     family_hint: Option<std::net::SocketAddr>,
 ) -> std::io::Result<std::net::UdpSocket> {
-    new_udp_socket_blocking(
-        src,
-        iface,
-        #[cfg(target_os = "linux")]
-        so_mark,
-        family_hint,
-    )
+    new_udp_socket_blocking(src, iface, so_mark, family_hint)
 }
 
 /// Synchronous core of [`new_udp_socket`], for callers that cannot await
 pub fn new_udp_socket_blocking(
     src: Option<SocketAddr>,
     iface: Option<&OutboundInterface>,
-    #[cfg(target_os = "linux")] so_mark: Option<u32>,
+    so_mark: Option<SocketMark>,
     family_hint: Option<std::net::SocketAddr>,
 ) -> std::io::Result<std::net::UdpSocket> {
     // Determine the socket family based on the source address or interface
     // logic:
     // - If family_hint is provided, use it.
-    // - If src is provided and is IPv6, use IPv6.
+    // - Use the explicit source family on Android, or IPv6 for an IPv6 source.
     // - If iface is provided and is IPv6, use IPv6.
     // - Otherwise, default to IPv4.
     let (socket, family) = match (family_hint, src, iface) {
@@ -305,9 +278,9 @@ pub fn new_udp_socket_blocking(
                 domain,
             )
         }
-        (None, Some(src), _) if src.is_ipv6() => (
+        (None, Some(src), _) if src.is_ipv6() || cfg!(target_os = "android") => (
             try_create_dualstack_socket(src, socket2::Type::DGRAM)?.0,
-            socket2::Domain::IPV6,
+            socket2::Domain::for_address(src),
         ),
         (None, _, Some(iface)) if iface.addr_v6.is_some() => (
             socket2::Socket::new(socket2::Domain::IPV6, socket2::Type::DGRAM, None)?,
@@ -320,61 +293,53 @@ pub fn new_udp_socket_blocking(
     };
     debug!("created udp socket");
 
-    if !cfg!(target_os = "android") {
-        // Skip interface binding for loopback destinations — binding a socket
-        // to an outbound interface prevents reaching localhost addresses.
-        let dst_is_loopback =
-            family_hint.map(|a| a.ip().is_loopback()).unwrap_or(false);
-        match (src, iface) {
-            (_, Some(iface)) if !dst_is_loopback => {
-                must_bind_socket_on_interface(&socket, iface, family).inspect_err(
-                    |x| {
-                        error!("failed to bind socket to interface: {}", x);
-                    },
-                )?;
-                // binding is not necessary for linux but is required on windows
-                // Without binding local_addr can't be obtained by system call
-                // which is required on quinn.
-                #[cfg(target_os = "windows")]
-                if let Some(addr) = src {
-                    socket.bind(&socket2::SockAddr::from(addr))?;
-                }
+    // Android handles interface routing. Binding to an interface would
+    // also prevent reaching loopback destinations on other platforms.
+    let dst_is_loopback = family_hint.map(|a| a.ip().is_loopback()).unwrap_or(false);
+    match (src, iface) {
+        (_, Some(iface)) if !cfg!(target_os = "android") && !dst_is_loopback => {
+            must_bind_socket_on_interface(&socket, iface, family).inspect_err(
+                |x| {
+                    error!("failed to bind socket to interface: {}", x);
+                },
+            )?;
+            // binding is not necessary for linux but is required on windows
+            // Without binding local_addr can't be obtained by system call
+            // which is required on quinn.
+            #[cfg(target_os = "windows")]
+            if let Some(addr) = src {
+                socket.bind(&socket2::SockAddr::from(addr))?;
+            }
 
-                trace!(iface = ?iface, "udp socket bound: {socket:?}");
+            trace!(iface = ?iface, "udp socket bound: {socket:?}");
+        }
+        (Some(src), _) => {
+            socket.bind(&src.into())?;
+            trace!(src = ?src, "udp socket bound: {socket:?}");
+        }
+        (None, _) => {
+            // On Windows, UDP sockets must be bound to get a valid
+            // local_addr which is required for some
+            // operations (e.g., quinn/QUIC)
+            #[cfg(target_os = "windows")]
+            {
+                let bind_addr = match family {
+                    socket2::Domain::IPV4 => {
+                        "0.0.0.0:0".parse::<SocketAddr>().unwrap()
+                    }
+                    socket2::Domain::IPV6 => "[::]:0".parse::<SocketAddr>().unwrap(),
+                    _ => "0.0.0.0:0".parse::<SocketAddr>().unwrap(),
+                };
+                socket.bind(&socket2::SockAddr::from(bind_addr))?;
+                trace!(addr = ?bind_addr, "udp socket bound to default address on Windows: {socket:?}");
             }
-            (Some(src), _) => {
-                // Either no interface, or destination is loopback (skip iface
-                // binding so localhost is reachable).
-                socket.bind(&src.into())?;
-                trace!(src = ?src, "udp socket bound: {socket:?}");
-            }
-            (None, _) => {
-                // On Windows, UDP sockets must be bound to get a valid
-                // local_addr which is required for some
-                // operations (e.g., quinn/QUIC)
-                #[cfg(target_os = "windows")]
-                {
-                    let bind_addr = match family {
-                        socket2::Domain::IPV4 => {
-                            "0.0.0.0:0".parse::<SocketAddr>().unwrap()
-                        }
-                        socket2::Domain::IPV6 => {
-                            "[::]:0".parse::<SocketAddr>().unwrap()
-                        }
-                        _ => "0.0.0.0:0".parse::<SocketAddr>().unwrap(),
-                    };
-                    socket.bind(&socket2::SockAddr::from(bind_addr))?;
-                    trace!(addr = ?bind_addr, "udp socket bound to default address on Windows: {socket:?}");
-                }
-                #[cfg(not(target_os = "windows"))]
-                trace!("udp socket not bound to any specific address: {socket:?}");
-            }
+            #[cfg(not(target_os = "windows"))]
+            trace!("udp socket not bound to any specific address: {socket:?}");
         }
     }
 
-    #[cfg(target_os = "linux")]
-    if let Some(so_mark) = so_mark {
-        socket.set_mark(so_mark)?;
+    if let Some(mark) = so_mark {
+        mark.apply_to(&socket)?;
     }
 
     socket.set_broadcast(true)?;
@@ -387,19 +352,13 @@ pub fn new_udp_socket_blocking(
 pub async fn new_udp_socket(
     src: Option<SocketAddr>,
     iface: Option<&OutboundInterface>,
-    #[cfg(target_os = "linux")] so_mark: Option<u32>,
+    so_mark: Option<SocketMark>,
     // Optional family hint for the socket.
     // If not provided, the family will be determined based on the source
     // address or interface.
     family_hint: Option<std::net::SocketAddr>,
 ) -> std::io::Result<UdpSocket> {
-    let std_socket = new_std_udp_socket(
-        src,
-        iface,
-        #[cfg(target_os = "linux")]
-        so_mark,
-        family_hint,
-    )?;
+    let std_socket = new_std_udp_socket(src, iface, so_mark, family_hint)?;
     UdpSocket::from_std(std_socket)
 }
 
@@ -449,7 +408,7 @@ pub fn try_create_dualstack_socket(
 /// different address families (e.g. in the DIRECT handler).
 pub fn new_dual_stack_udp_socket(
     iface: Option<&OutboundInterface>,
-    #[cfg(target_os = "linux")] so_mark: Option<u32>,
+    so_mark: Option<SocketMark>,
 ) -> std::io::Result<UdpSocket> {
     let dual_stack = SocketAddr::from((Ipv6Addr::UNSPECIFIED, 0));
     let ipv4_only = SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0));
@@ -479,9 +438,8 @@ pub fn new_dual_stack_udp_socket(
     // platforms — required on Windows to avoid WSAEINVAL (10022) from sendto.
     socket.bind(&bind_addr.into())?;
 
-    #[cfg(target_os = "linux")]
-    if let Some(so_mark) = so_mark {
-        socket.set_mark(so_mark)?;
+    if let Some(mark) = so_mark {
+        mark.apply_to(&socket)?;
     }
 
     socket.set_broadcast(true)?;
@@ -509,6 +467,73 @@ pub fn try_create_dualstack_tcplistener(
 mod tests {
     use super::*;
     use std::{net::SocketAddrV6, time::Duration};
+
+    #[cfg(target_os = "android")]
+    #[tokio::test]
+    async fn android_udp_binds_explicit_source() -> io::Result<()> {
+        let iface = find_loopback_iface().expect("missing loopback interface");
+        for src in [
+            SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
+            SocketAddr::from((Ipv6Addr::LOCALHOST, 0)),
+        ] {
+            for iface in [None, Some(&iface)] {
+                let socket = new_udp_socket(Some(src), iface, None, None).await?;
+                let local = socket.local_addr()?;
+                assert_eq!(local.ip(), src.ip());
+                assert_ne!(local.port(), 0);
+
+                let peer = UdpSocket::bind(src).await?;
+                peer.send_to(b"ping", local).await?;
+                let mut buf = [0; 4];
+                let (n, from) =
+                    timeout(Duration::from_secs(2), socket.recv_from(&mut buf))
+                        .await??;
+                assert_eq!(&buf[..n], b"ping");
+                assert_eq!(from, peer.local_addr()?);
+                let err =
+                    new_std_udp_socket(Some(local), iface, None, None).unwrap_err();
+                assert_eq!(err.kind(), io::ErrorKind::AddrInUse);
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(all(target_os = "android", socket_mark))]
+    #[tokio::test]
+    #[ignore = "requires SO_MARK, an active Android network and an available bit 29"]
+    async fn android_mark_preserves_netd_selection() {
+        const MARK: u32 = 1 << 29;
+        // Check the pre-connect merge on a socket that already has a netId.
+        let socket =
+            socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None)
+                .unwrap();
+        socket.set_mark(100).unwrap();
+        let reserved_bit = 1 << 28;
+        SocketMark::from(reserved_bit).apply_to(&socket).unwrap();
+        SocketMark::from(MARK).apply_to(&socket).unwrap();
+        assert_eq!(socket.mark().unwrap(), 100 | reserved_bit | MARK);
+
+        for addr in ["127.0.0.1:0", "[::1]:0"] {
+            let listener = TcpListener::bind(addr).await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let control = new_tcp_stream(addr, None, None).await.unwrap();
+            let expected = socket2::SockRef::from(&control).mark().unwrap();
+            assert_ne!(expected & 0xffff, 0, "netd must select a network");
+            assert_eq!(expected & MARK, 0);
+
+            let marked =
+                new_tcp_stream(addr, None, Some(MARK.into())).await.unwrap();
+            assert_eq!(
+                socket2::SockRef::from(&marked).mark().unwrap(),
+                expected | MARK
+            );
+
+            let err = new_tcp_stream(addr, None, Some(256.into()))
+                .await
+                .unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        }
+    }
 
     /// Locate the loopback network interface on the current host.
     /// Returns `None` if the interface cannot be found or enumeration fails.
@@ -544,12 +569,8 @@ mod tests {
     /// Without an iface: socket is bound and IPv4-mapped round-trip works.
     #[tokio::test]
     async fn test_dual_stack_no_iface_is_bound_and_sends_ipv4_mapped() {
-        let sock = new_dual_stack_udp_socket(
-            None,
-            #[cfg(target_os = "linux")]
-            None,
-        )
-        .expect("failed to create dual-stack socket");
+        let sock = new_dual_stack_udp_socket(None, None)
+            .expect("failed to create dual-stack socket");
 
         let local = sock.local_addr().expect("local_addr failed");
         assert_ne!(local.port(), 0, "socket must have a non-zero local port");
@@ -599,11 +620,7 @@ mod tests {
             return;
         };
 
-        let result = new_dual_stack_udp_socket(
-            Some(&iface),
-            #[cfg(target_os = "linux")]
-            None,
-        );
+        let result = new_dual_stack_udp_socket(Some(&iface), None);
 
         // On Linux, SO_BINDTODEVICE requires CAP_NET_RAW; skip gracefully.
         #[cfg(target_os = "linux")]
@@ -654,7 +671,6 @@ mod tests {
         let stream = super::new_tcp_stream_happy_eyeballs(
             &[dummy_addr, working_addr],
             None,
-            #[cfg(target_os = "linux")]
             None,
         )
         .await;

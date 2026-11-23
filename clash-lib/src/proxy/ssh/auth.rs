@@ -11,7 +11,8 @@ use crate::common::errors::new_io_error;
 
 use super::{HandlerOptions, connector::Client};
 
-/// russh::MethodKind is not Debug
+/// Hashable authentication methods for tracking configured and attempted
+/// methods.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum MethodKindAdapter {
     None,
@@ -19,6 +20,7 @@ enum MethodKindAdapter {
     PublicKey,
     HostBased,
     KeyboardInteractive,
+    GssapiWithMic,
 }
 
 impl From<MethodKind> for MethodKindAdapter {
@@ -28,6 +30,7 @@ impl From<MethodKind> for MethodKindAdapter {
             MethodKind::Password => MethodKindAdapter::Password,
             MethodKind::PublicKey => MethodKindAdapter::PublicKey,
             MethodKind::HostBased => MethodKindAdapter::HostBased,
+            MethodKind::GssapiWithMic => MethodKindAdapter::GssapiWithMic,
             MethodKind::KeyboardInteractive => {
                 MethodKindAdapter::KeyboardInteractive
             }
@@ -42,6 +45,7 @@ impl From<MethodKindAdapter> for MethodKind {
             MethodKindAdapter::Password => MethodKind::Password,
             MethodKindAdapter::PublicKey => MethodKind::PublicKey,
             MethodKindAdapter::HostBased => MethodKind::HostBased,
+            MethodKindAdapter::GssapiWithMic => MethodKind::GssapiWithMic,
             MethodKindAdapter::KeyboardInteractive => {
                 MethodKind::KeyboardInteractive
             }

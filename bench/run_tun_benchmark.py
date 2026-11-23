@@ -280,13 +280,9 @@ def run_clash_rs(config_path, log_file):
     print(f"Starting clash-rs with config: {config_path}")
     print(f"Logs will be written to: {log_file}")
 
-    cmd = ["sudo", clash_binary, "-c", config_path, "-l", log_file]
-
-    proc = subprocess.Popen(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
+    cmd = ["sudo", clash_binary, "-c", config_path]
+    with open(log_file, "w") as log:
+        proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT)
 
     # Wait for clash-rs to initialize TUN device
     print("Waiting for TUN device initialization...")
@@ -294,9 +290,7 @@ def run_clash_rs(config_path, log_file):
 
     # Check if process is still running
     if proc.poll() is not None:
-        stdout, stderr = proc.communicate()
-        print(f"✗ clash-rs failed to start", file=sys.stderr)
-        print(f"stderr: {stderr.decode()}", file=sys.stderr)
+        print(f"✗ clash-rs failed to start; see {log_file}", file=sys.stderr)
         return None
 
     # Verify TUN device exists with retries
@@ -350,11 +344,13 @@ def run_iperf_test(server_ip, duration=10, bind_address=None, retries=2):
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=duration + 10)
 
             if result.returncode != 0:
+                # With -J, iperf3 can report the error in JSON on stdout.
+                error = result.stderr.strip() or result.stdout.strip()
                 if attempt < retries:
-                    print(f"  iperf3 attempt {attempt + 1} failed, retrying...", file=sys.stderr)
+                    print(f"  iperf3 attempt {attempt + 1} failed, retrying: {error}", file=sys.stderr)
                     time.sleep(2)
                     continue
-                print(f"✗ iperf3 test failed after {retries + 1} attempts: {result.stderr}", file=sys.stderr)
+                print(f"✗ iperf3 test failed after {retries + 1} attempts: {error}", file=sys.stderr)
                 return None
 
             data = json.loads(result.stdout)

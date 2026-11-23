@@ -1,3 +1,4 @@
+use crate::app::net::SocketMark;
 use std::{
     fmt::Debug,
     io,
@@ -57,8 +58,7 @@ pub struct UdpHop {
     port_range: PortGenerator,
     interval: Duration,
     iface: Option<OutboundInterface>,
-    #[cfg(target_os = "linux")]
-    so_mark: Option<u32>,
+    so_mark: Option<SocketMark>,
 }
 
 impl UdpHop {
@@ -69,7 +69,7 @@ impl UdpHop {
         port_range: PortGenerator,
         interval: Option<Duration>,
         iface: Option<OutboundInterface>,
-        #[cfg(target_os = "linux")] so_mark: Option<u32>,
+        so_mark: Option<SocketMark>,
     ) -> io::Result<Self> {
         let bind_addr = if server_addr.is_ipv6() {
             SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 0], 0))
@@ -79,7 +79,6 @@ impl UdpHop {
         let std_socket = crate::proxy::utils::new_std_udp_socket(
             Some(bind_addr),
             iface.as_ref(),
-            #[cfg(target_os = "linux")]
             so_mark,
             Some(server_addr),
         )?;
@@ -102,7 +101,6 @@ impl UdpHop {
             port_range,
             interval: interval.unwrap_or(Self::DEFAULT_INTERVAL),
             iface,
-            #[cfg(target_os = "linux")]
             so_mark,
         })
     }
@@ -131,7 +129,6 @@ impl UdpHop {
             port_range,
             interval: interval.unwrap_or(Self::DEFAULT_INTERVAL),
             iface: None,
-            #[cfg(target_os = "linux")]
             so_mark: None,
         }
     }
@@ -154,7 +151,6 @@ impl UdpHop {
         let std_socket = crate::proxy::utils::new_std_udp_socket(
             Some(bind_addr),
             self.iface.as_ref(),
-            #[cfg(target_os = "linux")]
             self.so_mark,
             Some(self.server_addr),
         )?;
@@ -397,7 +393,6 @@ mod tests {
             port_gen.clone(),
             Some(Duration::from_secs(10)),
             None,
-            #[cfg(target_os = "linux")]
             None,
         )
         .expect("IPv4 hop creation failed");
@@ -408,7 +403,6 @@ mod tests {
             port_gen,
             Some(Duration::from_secs(10)),
             None,
-            #[cfg(target_os = "linux")]
             None,
         )
         .expect("IPv6 hop creation failed");
@@ -426,7 +420,6 @@ mod tests {
             port_gen,
             Some(Duration::from_millis(10)),
             None,
-            #[cfg(target_os = "linux")]
             None,
         )
         .unwrap();
@@ -493,7 +486,6 @@ mod tests {
                 port_gen,
                 Some(Duration::from_millis(300)),
                 None,
-                #[cfg(target_os = "linux")]
                 None,
             )
             .unwrap(),
@@ -612,7 +604,6 @@ mod tests {
             port_gen,
             Some(Duration::from_millis(10)),
             None,
-            #[cfg(target_os = "linux")]
             None,
         )
         .unwrap();

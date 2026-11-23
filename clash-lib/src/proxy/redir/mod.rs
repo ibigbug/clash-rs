@@ -1,6 +1,6 @@
 use super::inbound::InboundHandlerTrait;
 use crate::{
-    app::dispatcher::Dispatcher,
+    app::{dispatcher::Dispatcher, net::SocketMark},
     common::errors::new_io_error,
     proxy::utils::{
         ToCanonical, apply_tcp_options, try_create_dualstack_tcplistener,
@@ -17,7 +17,7 @@ pub struct RedirInbound {
     addr: SocketAddr,
     allow_lan: bool,
     dispatcher: Arc<Dispatcher>,
-    fw_mark: Option<u32>,
+    fw_mark: Option<SocketMark>,
 }
 
 impl Drop for RedirInbound {
@@ -31,7 +31,7 @@ impl RedirInbound {
         addr: SocketAddr,
         allow_lan: bool,
         dispatcher: Arc<Dispatcher>,
-        fw_mark: Option<u32>,
+        fw_mark: Option<SocketMark>,
     ) -> Self {
         Self {
             addr,

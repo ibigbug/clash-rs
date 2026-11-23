@@ -63,6 +63,13 @@ A custom protocol, rule based network proxy software.
 ## 🖥 Environment Support
 
 - Linux
+- Android ([clash-android](https://github.com/rust-proxy/clash-android))
+  - On Android builds with `tproxy`, an explicit `routing-mark` may set bits 21–23 and 26–30.
+    Clash excludes bits 24 and 25 because Android uses them for cleartext policy in the connection mark.
+    AOSP reserves bits 21–28 for future use. Check their use on the target device,
+    including its firewall and policy routing rules, before assigning them.
+    Bits 29–30 are reserved for vendors. Use them only when assigned to your deployment.
+    A value that sets any other bit (for example, `6666`) prevents the profile from loading.
 - macOS
 - Windows
   - You need to copy the [wintun.dll](https://wintun.net/) file which matches your architecture to the same directory as your executable and run your program as administrator.

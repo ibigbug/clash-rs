@@ -1,4 +1,5 @@
 use crate::{
+    app::net::SocketMark,
     dns::{
         Client, EnhancedResolver, ThreadSafeDNSClient, dns_client::DNSNetMode,
         helper::make_clients,
@@ -37,7 +38,7 @@ struct Inner {
 
 pub struct DhcpClient {
     iface: OutboundInterface,
-    fw_mark: Option<u32>,
+    fw_mark: Option<SocketMark>,
 
     inner: Mutex<Inner>,
 }
@@ -72,7 +73,7 @@ impl Client for DhcpClient {
 }
 
 impl DhcpClient {
-    pub async fn new(iface: &str, fw_mark: Option<u32>) -> Self {
+    pub async fn new(iface: &str, fw_mark: Option<SocketMark>) -> Self {
         let iface = get_interface_by_name(iface)
             .unwrap_or_else(|| panic!("can not find interface: {iface}"));
         Self {
@@ -172,7 +173,6 @@ async fn listen_dhcp_client(iface: &OutboundInterface) -> io::Result<UdpSocket> 
     new_udp_socket(
         Some(listen_addr.parse().expect("must parse")),
         Some(iface),
-        #[cfg(target_os = "linux")]
         None,
         None,
     )

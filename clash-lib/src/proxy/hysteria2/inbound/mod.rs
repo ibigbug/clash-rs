@@ -10,6 +10,7 @@
 //!    proxying (Hysteria2 frame format) and sends QUIC datagrams for UDP
 //!    proxying.
 
+use crate::app::net::SocketMark;
 use std::{
     collections::HashMap,
     net::SocketAddr,
@@ -117,7 +118,7 @@ pub struct InboundOptions {
     pub private_key: Option<String>,
     pub allow_lan: bool,
     pub dispatcher: Arc<Dispatcher>,
-    pub fw_mark: Option<u32>,
+    pub fw_mark: Option<SocketMark>,
     pub users_rx: tokio::sync::watch::Receiver<Vec<InboundUser>>,
 }
 
@@ -125,7 +126,7 @@ pub struct Hysteria2Inbound {
     addr: SocketAddr,
     allow_lan: bool,
     dispatcher: Arc<Dispatcher>,
-    fw_mark: Option<u32>,
+    fw_mark: Option<SocketMark>,
     server_config: ServerConfig,
     password: String,
     users_rx: tokio::sync::watch::Receiver<Vec<InboundUser>>,
@@ -251,7 +252,7 @@ async fn handle_connection(
     conn: Connection,
     src_addr: SocketAddr,
     dispatcher: Arc<Dispatcher>,
-    fw_mark: Option<u32>,
+    fw_mark: Option<SocketMark>,
     user_map: Arc<HashMap<String, String>>,
 ) {
     let (inbound_user, _h3_conn) = match authenticate(&conn, &user_map).await {
@@ -413,7 +414,7 @@ async fn handle_tcp_stream(
     recv: quinn::RecvStream,
     src_addr: SocketAddr,
     dispatcher: Arc<Dispatcher>,
-    fw_mark: Option<u32>,
+    fw_mark: Option<SocketMark>,
     inbound_user: Option<String>,
 ) {
     // Parse the Hysteria2 TCP request from the client
@@ -483,7 +484,7 @@ async fn handle_udp_datagrams(
     conn: Connection,
     src_addr: SocketAddr,
     dispatcher: Arc<Dispatcher>,
-    fw_mark: Option<u32>,
+    fw_mark: Option<SocketMark>,
     inbound_user: Option<String>,
     sessions: Arc<Mutex<HashMap<u32, UdpSession>>>,
 ) {

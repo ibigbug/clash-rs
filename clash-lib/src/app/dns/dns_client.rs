@@ -1,4 +1,5 @@
 use super::{ClashResolver, Client, EdnsClientSubnet, runtime::DnsRuntimeProvider};
+use crate::app::net::SocketMark;
 use std::{
     fmt::{Debug, Display, Formatter},
     net::{self, IpAddr},
@@ -193,7 +194,7 @@ pub struct Opts {
     pub iface: Option<OutboundInterface>,
     pub proxy: Arc<dyn OutboundHandler>,
     pub ecs: Option<EdnsClientSubnet>,
-    pub fw_mark: Option<u32>,
+    pub fw_mark: Option<SocketMark>,
     /// When set, upstream dials consult the rule engine (see
     /// `DnsRuntimeProvider::pick_outbound`). Only populated for `nameserver`,
     /// `fallback`, and `nameserver-policy` clients when `dns.respect-rules`
@@ -202,34 +203,32 @@ pub struct Opts {
     pub rule_dispatch: Option<Arc<RuleDispatch>>,
 }
 
-type FwMark = Option<u32>;
-
 enum DnsConfig {
     Udp(
         net::SocketAddr,
         Option<OutboundInterface>,
         Arc<dyn OutboundHandler>,
-        FwMark,
+        Option<SocketMark>,
     ),
     Tcp(
         net::SocketAddr,
         Option<OutboundInterface>,
         Arc<dyn OutboundHandler>,
-        FwMark,
+        Option<SocketMark>,
     ),
     Tls(
         net::SocketAddr,
         url::Host<String>,
         Option<OutboundInterface>,
         Arc<dyn OutboundHandler>,
-        FwMark,
+        Option<SocketMark>,
     ),
     Https(
         net::SocketAddr,
         url::Host<String>,
         Option<OutboundInterface>,
         Arc<dyn OutboundHandler>,
-        FwMark,
+        Option<SocketMark>,
     ),
 }
 

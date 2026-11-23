@@ -4,9 +4,6 @@ pub mod runner;
 pub use runner::TunRunner;
 mod stream;
 
-#[cfg(target_os = "linux")] // for tproxy
-pub use datagram::TunDatagram;
-
 #[cfg(test)]
 mod tests {
     use std::thread;

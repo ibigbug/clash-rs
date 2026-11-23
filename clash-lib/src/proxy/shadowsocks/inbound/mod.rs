@@ -1,3 +1,4 @@
+use crate::app::net::SocketMark;
 mod datagram;
 
 use crate::{
@@ -38,7 +39,7 @@ pub struct ShadowsocksInbound {
     dispatcher: Arc<Dispatcher>,
     #[allow(unused)]
     authenticator: ThreadSafeAuthenticator,
-    fw_mark: Option<u32>,
+    fw_mark: Option<SocketMark>,
     /// Watch receiver for the user list. The manager pushes updated user lists
     /// here without restarting the listener; TCP picks them up between accepts
     /// and UDP restarts its socket gracefully.
@@ -61,7 +62,7 @@ pub struct InboundOptions {
     pub allow_lan: bool,
     pub dispatcher: Arc<Dispatcher>,
     pub authenticator: ThreadSafeAuthenticator,
-    pub fw_mark: Option<u32>,
+    pub fw_mark: Option<SocketMark>,
     /// Watch receiver for the live user list. Pass the receiver half of a
     /// `tokio::sync::watch::channel(initial_users)` created by the caller.
     pub users_rx: tokio::sync::watch::Receiver<Vec<InboundUser>>,
@@ -256,14 +257,12 @@ impl InboundHandlerTrait for ShadowsocksInbound {
                 }
             }
 
-            let socket = new_udp_socket(
-                Some(self.addr),
-                None,
-                #[cfg(target_os = "linux")]
-                self.fw_mark,
-                None,
-            )
-            .await?;
+            let socket =
+                new_udp_socket(Some(self.addr), None, self.fw_mark, None).await?;
+            info!(
+                "Shadowsocks UDP listening at: {}",
+                socket.local_addr().unwrap_or(self.addr)
+            );
 
             let proxy_socket: ProxySocket<shadowsocks::net::UdpSocket> =
                 ProxySocket::from_socket(

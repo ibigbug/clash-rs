@@ -13,7 +13,7 @@ standard = ["shadowsocks", "tuic", "ssh", "shadowquic", "wireguard", "tailscale"
 plus = ["standard", "onion"]
 perf = ["plus", "jemallocator"]
 
-android = ["shadowsocks", "tuic", "aws-lc-rs", "wireguard", "clash-lib/zero_copy", "tproxy"] # Android build failed with libc
+android = ["shadowsocks", "tuic", "aws-lc-rs", "wireguard", "clash-lib/zero_copy", "tproxy"]
 bsd = ["shadowsocks", "tuic", "ring", "clash-lib/zero_copy", "tun"]  # enable tun via FIB multi-table routing
 
 shadowsocks = ["clash-lib/shadowsocks"]

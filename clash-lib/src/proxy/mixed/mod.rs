@@ -1,5 +1,6 @@
 use crate::{
     Dispatcher,
+    app::net::SocketMark,
     common::auth::ThreadSafeAuthenticator,
     proxy::utils::{ToCanonical, try_create_dualstack_tcplistener},
     session::{Network, Session},
@@ -17,7 +18,7 @@ pub struct MixedInbound {
     allow_lan: bool,
     dispatcher: Arc<Dispatcher>,
     authenticator: ThreadSafeAuthenticator,
-    fw_mark: Option<u32>,
+    fw_mark: Option<SocketMark>,
 }
 
 impl Drop for MixedInbound {
@@ -32,7 +33,7 @@ impl MixedInbound {
         allow_lan: bool,
         dispatcher: Arc<Dispatcher>,
         authenticator: ThreadSafeAuthenticator,
-        fw_mark: Option<u32>,
+        fw_mark: Option<SocketMark>,
     ) -> Self {
         Self {
             addr,

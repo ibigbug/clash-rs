@@ -1,4 +1,7 @@
-use super::{inbound::InboundHandlerTrait, tun::TunDatagram};
+use crate::app::net::SocketMark;
+mod udp;
+
+use super::{channel_datagram::ChannelDatagram, inbound::InboundHandlerTrait};
 use crate::{
     app::dispatcher::Dispatcher,
     common::errors::new_io_error,
@@ -11,10 +14,10 @@ use crate::{
 
 use async_trait::async_trait;
 use etherparse::PacketBuilder;
-use futures::future;
-use std::{io, net::SocketAddr, os::fd::AsRawFd, sync::Arc, task::Poll};
-use tokio::net::TcpListener;
-use tracing::{trace, warn};
+use std::{io, net::SocketAddr, sync::Arc};
+use tokio::{net::TcpListener, task::JoinSet};
+use tracing::{info, trace, warn};
+use udp::UdpReceiver;
 
 use crate::app::dns::{ThreadSafeDNSResolver, exchange_with_resolver};
 
@@ -22,7 +25,7 @@ pub struct TproxyInbound {
     addr: SocketAddr,
     allow_lan: bool,
     dispatcher: Arc<Dispatcher>,
-    fw_mark: Option<u32>,
+    fw_mark: Option<SocketMark>,
     dns_resolver: Option<ThreadSafeDNSResolver>,
     dns_hijack: bool,
 }
@@ -38,7 +41,7 @@ impl TproxyInbound {
         addr: SocketAddr,
         allow_lan: bool,
         dispatcher: Arc<Dispatcher>,
-        fw_mark: Option<u32>,
+        fw_mark: Option<SocketMark>,
         dns_resolver: Option<ThreadSafeDNSResolver>,
         dns_hijack: bool,
     ) -> Self {
@@ -67,9 +70,10 @@ impl InboundHandlerTrait for TproxyInbound {
         let (socket, dualstack) =
             try_create_dualstack_socket(self.addr, socket2::Type::STREAM)?;
         if dualstack || self.addr.is_ipv4() {
-            // set ipv4 transparent
-            // IPV6 doesn't require this
             socket.set_ip_transparent_v4(true)?;
+        }
+        if self.addr.is_ipv6() {
+            socket.set_ip_transparent_v6(true)?;
         }
         socket.set_nonblocking(true)?;
         socket.bind(&self.addr.into())?;
@@ -136,39 +140,40 @@ impl InboundHandlerTrait for TproxyInbound {
     }
 
     async fn listen_udp(&self) -> std::io::Result<()> {
+        #[cfg(target_os = "android")]
+        if let Some(mark) = self.fw_mark {
+            mark.validate()?;
+        }
         let (socket, dual_stack) =
             try_create_dualstack_socket(self.addr, socket2::Type::DGRAM)?;
-        if dual_stack || self.addr.is_ipv4() {
-            // set ipv4 transparent
-            // IPv6 doesn't require this
+        let bind_ip = self.addr.ip().to_canonical();
+        let receive_ipv4 = dual_stack || bind_ip.is_ipv4();
+        if receive_ipv4 {
             socket.set_ip_transparent_v4(true)?;
         }
         if self.addr.is_ipv6() {
-            // This might not be necessary
-            set_ip_transparent_v6(&socket)?;
+            socket.set_ip_transparent_v6(true)?;
         }
         socket.set_reuse_port(true)?;
         socket.set_nonblocking(true)?;
         socket.set_broadcast(true)?;
-        set_ip_recv_orig_dstaddr(
-            if self.addr.is_ipv4() {
-                libc::IPPROTO_IP
-            } else {
-                libc::IPPROTO_IPV6
-            },
-            &socket,
-        )?;
-        if dual_stack {
-            set_ip_recv_orig_dstaddr(libc::IPPROTO_IP, &socket)?;
-        }
-        socket.bind(&self.addr.into())?;
-
-        let listener = unix_udp_sock::UdpSocket::from_std(socket.into())?;
+        let listener = UdpReceiver::bind(socket, self.addr, receive_ipv4)?;
+        let replies = ReplySockets {
+            v4: receive_ipv4
+                .then(|| new_reply_socket(socket2::Domain::IPV4))
+                .transpose()?,
+            v6: bind_ip
+                .is_ipv6()
+                .then(|| new_reply_socket(socket2::Domain::IPV6))
+                .transpose()?,
+        };
+        info!("TPROXY UDP listening at: {}", listener.local_addr);
 
         handle_inbound_datagram(
             self.allow_lan,
+            Arc::new(replies),
             self.fw_mark,
-            Arc::new(listener),
+            listener,
             self.dispatcher.clone(),
             self.dns_resolver.clone(),
             self.dns_hijack,
@@ -177,38 +182,59 @@ impl InboundHandlerTrait for TproxyInbound {
     }
 }
 
-fn new_unbound_socket(
-    family_hint: SocketAddr,
-    fw_mark: Option<u32>,
-) -> io::Result<socket2::Socket> {
-    let socket = if family_hint.is_ipv4() {
-        socket2::Socket::new(
-            socket2::Domain::IPV4,
-            socket2::Type::RAW,
-            Some(libc::IPPROTO_RAW.into()),
-        )?
-    } else {
-        socket2::Socket::new(
-            socket2::Domain::IPV6,
-            socket2::Type::RAW,
-            Some(libc::IPPROTO_RAW.into()),
-        )?
-    };
+struct ReplySockets {
+    v4: Option<tokio::io::unix::AsyncFd<socket2::Socket>>,
+    v6: Option<tokio::io::unix::AsyncFd<socket2::Socket>>,
+}
+
+// Client replies follow the route to the client. The outbound session mark
+// can select an upstream routing table with no return path to that client.
+fn new_reply_socket(
+    domain: socket2::Domain,
+) -> io::Result<tokio::io::unix::AsyncFd<socket2::Socket>> {
+    let socket = socket2::Socket::new(
+        domain,
+        socket2::Type::RAW,
+        Some(libc::IPPROTO_RAW.into()),
+    )
+    .map_err(|err| {
+        let hint = if err.kind() == io::ErrorKind::PermissionDenied {
+            " (check CAP_NET_RAW and the process security policy)"
+        } else {
+            ""
+        };
+        io::Error::new(
+            err.kind(),
+            format!(
+                "failed to create TPROXY UDP raw reply socket ({domain:?}): \
+                 {err}{hint}"
+            ),
+        )
+    })?;
     socket.set_nonblocking(true)?;
-    // socket.set_reuse_address(true)?;
-    if let Some(so_mark) = fw_mark {
-        socket.set_mark(so_mark)?;
-    }
-    Ok(socket)
+    // SAFETY: AsyncFd owns this socket until deregistration.
+    unsafe { Ok(tokio::io::unix::AsyncFd::register(socket)?) }
 }
 async fn sendto_with_src(
-    socket: &socket2::Socket,
+    sockets: &ReplySockets,
     buf: &[u8],
     dst: SocketAddr,
     src: SocketAddr,
 ) -> io::Result<()> {
     let src = src.to_canonical();
     let dst = dst.to_canonical();
+    let socket = if src.is_ipv4() {
+        &sockets.v4
+    } else {
+        &sockets.v6
+    }
+    .as_ref()
+    .ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "reply address family is not enabled",
+        )
+    })?;
     let mut packet: Vec<u8>;
     let builder;
     match (src, dst) {
@@ -232,45 +258,27 @@ async fn sendto_with_src(
     builder
         .write(&mut packet, buf)
         .map_err(|x| new_io_error(format!("failed to build udp packet:{}", x)))?;
-    // SAFETY: `socket` is borrowed for the whole lifetime of `afd`, so the fd
-    // stays open and refers to the same socket until `afd` is dropped.
-    let afd = unsafe { tokio::io::unix::AsyncFd::register(socket.as_raw_fd()) }?;
-    future::poll_fn(|cx: &mut futures::task::Context<'_>| {
-        let _guard = futures::ready!(afd.poll_write_ready(cx))?;
-        let addr = if dst.is_ipv6() {
-            // Must set port to 0 for ipv6 raw socket to avoid EINVAL error
-            // see https://stackoverflow.com/questions/31419727/how-to-send-modified-ipv6-packet-through-raw-socket
-            // and https://nick-black.com/dankwiki/index.php/Packet_sockets
-            let dst = SocketAddr::new(dst.ip(), 0);
-            socket2::SockAddr::from(dst)
-        } else {
-            socket2::SockAddr::from(dst)
-        };
-
-        let errno = unsafe {
-            libc::sendto(
-                afd.as_raw_fd(),
-                packet.as_ptr() as *const _,
-                packet.len(),
-                0,
-                &addr as *const _ as *const _,
-                addr.len(),
-            )
-        };
-        if errno < 0 {
-            return Poll::Ready(Err(io::Error::last_os_error()));
-        }
-        Poll::Ready(Ok(())) as Poll<io::Result<()>>
-    })
-    .await?;
-
+    let addr = if let SocketAddr::V6(mut v6) = dst {
+        // Linux requires port zero on an IPv6 raw socket.
+        v6.set_port(0);
+        SocketAddr::V6(v6)
+    } else {
+        dst
+    };
+    let addr = socket2::SockAddr::from(addr);
+    socket
+        .async_io(tokio::io::Interest::WRITABLE, |socket| {
+            socket.send_to(&packet, &addr)
+        })
+        .await?;
     Ok(())
 }
 
 async fn handle_inbound_datagram(
     _allow_lan: bool,
-    fw_mark: Option<u32>,
-    socket: Arc<unix_udp_sock::UdpSocket>,
+    reply_sockets: Arc<ReplySockets>,
+    fw_mark: Option<SocketMark>,
+    mut socket: UdpReceiver,
     dispatcher: Arc<Dispatcher>,
     dns_resolver: Option<ThreadSafeDNSResolver>,
     dns_hijack: bool,
@@ -284,7 +292,7 @@ async fn handle_inbound_datagram(
     // for dispatcher - the dispatcher would receive packets from this channel,
     // which is from the stack and send back packets to this channel, which is
     // to the tproxy
-    let udp_stream = TunDatagram::new(l_tx, d_rx);
+    let udp_stream = ChannelDatagram::new(l_tx, d_rx);
 
     let sess = Session {
         network: Network::Udp,
@@ -293,18 +301,23 @@ async fn handle_inbound_datagram(
         ..Default::default()
     };
 
-    let closer: tokio::sync::oneshot::Sender<u8> = dispatcher
+    let closer = dispatcher
         .dispatch_datagram(sess, Box::new(udp_stream))
         .await;
+    crate::defer! {
+        let _ = closer.send(0);
+    }
 
     // dispatcher -> tproxy
-    let fut1 = tokio::spawn(handle_packet_from_dispatcher(l_rx));
+    let replies = handle_packet_from_dispatcher(l_rx, &reply_sockets);
 
     // tproxy -> dispatcher
-    let dns_limit = Arc::new(tokio::sync::Semaphore::new(256));
-    let fut2 = tokio::spawn(async move {
+    let incoming = async {
+        // Abort pending DNS replies when the listener is dropped.
+        let mut dns_tasks = JoinSet::new();
         let mut buf = vec![0_u8; 1024 * 64];
-        while let Ok(meta) = socket.recv_msg(&mut buf).await {
+        loop {
+            let meta = socket.recv_msg(&mut buf).await?;
             match meta.orig_dst {
                 Some(orig_dst) => {
                     if orig_dst.ip().is_multicast()
@@ -318,15 +331,9 @@ async fn handle_inbound_datagram(
 
                     trace!(
                         "recv msg:{:?} orig_dst:{:?}, local_addr:{:?}",
-                        meta,
-                        orig_dst,
-                        socket.local_addr()
+                        meta, orig_dst, socket.local_addr
                     );
-                    let chunk_size = gro_chunk_size(meta.len, meta.stride);
-                    if chunk_size == 0 {
-                        continue;
-                    }
-                    for chunk in buf[0..meta.len].chunks(chunk_size) {
+                    for chunk in udp_datagrams(&buf[..meta.len], meta.stride) {
                         let pkt = UdpPacket {
                             data: chunk.to_vec(),
                             src_addr: meta.addr.to_canonical().into(),
@@ -345,20 +352,19 @@ async fn handle_inbound_datagram(
                             );
                             match hickory_proto::op::Message::from_vec(&pkt.data) {
                                 Ok(msg) => {
-                                    let Ok(permit) =
-                                        dns_limit.clone().try_acquire_owned()
-                                    else {
+                                    while dns_tasks.try_join_next().is_some() {}
+                                    if dns_tasks.len() >= 256 {
                                         warn!(
                                             "too many in-flight hijacked dns \
                                              queries, dropping query"
                                         );
                                         continue;
-                                    };
+                                    }
                                     let resolver = resolver.clone();
                                     let client_addr = meta.addr.to_canonical();
                                     let dns_server_addr = orig_dst.to_canonical();
-                                    tokio::spawn(async move {
-                                        let _permit = permit;
+                                    let reply_sockets = reply_sockets.clone();
+                                    dns_tasks.spawn(async move {
                                         let mut resp = match exchange_with_resolver(
                                             &resolver, &msg, true,
                                         )
@@ -380,13 +386,8 @@ async fn handle_inbound_datagram(
                                             resp
                                         );
                                         if let Ok(data) = resp.to_vec()
-                                            && let Ok(socket_raw) =
-                                                new_unbound_socket(
-                                                    dns_server_addr,
-                                                    fw_mark,
-                                                )
                                             && let Err(e) = sendto_with_src(
-                                                &socket_raw,
+                                                &reply_sockets,
                                                 &data,
                                                 client_addr,
                                                 dns_server_addr,
@@ -419,146 +420,104 @@ async fn handle_inbound_datagram(
                     }
                 }
                 None => {
-                    trace!(
-                        "recv msg:{:?} local_addr:{:?}",
-                        meta,
-                        socket.local_addr()
-                    );
+                    trace!("recv msg:{:?} local_addr:{:?}", meta, socket.local_addr);
                     warn!("failed to get orig_dst");
                     continue;
                 }
             }
         }
-        warn!("tproxy udp listening ended");
-
-        closer.send(0).ok();
-    });
-
-    let _ = futures::future::join(fut1, fut2).await;
-    Ok(())
-}
-
-fn gro_chunk_size(len: usize, stride: usize) -> usize {
-    if stride == 0 { len } else { stride }
-}
-
-fn set_ip_recv_orig_dstaddr(
-    level: libc::c_int,
-    socket: &socket2::Socket,
-) -> io::Result<()> {
-    let opt = match level {
-        libc::IPPROTO_IP => libc::IP_RECVORIGDSTADDR,
-        libc::IPPROTO_IPV6 => libc::IPV6_RECVORIGDSTADDR,
-        _ => unreachable!("invalid sockopt level {}", level),
     };
+    tokio::select! {
+        result = replies => result,
+        result = incoming => result,
+    }
+}
 
-    let enable: libc::c_int = 1;
-    set_socket_option(socket, level, opt, enable)
+fn udp_datagrams(payload: &[u8], stride: usize) -> impl Iterator<Item = &[u8]> {
+    let size = if stride == 0 { payload.len() } else { stride };
+    // An empty UDP datagram has one payload, while chunks() yields none.
+    payload
+        .chunks(size.max(1))
+        .chain(payload.is_empty().then_some(payload))
 }
 
 async fn handle_packet_from_dispatcher(
     mut l_rx: tokio::sync::mpsc::Receiver<UdpPacket>,
-) {
-    let socket_v4 = new_unbound_socket(SocketAddr::from(([0, 0, 0, 0], 0)), None);
-    let socket_v6 =
-        new_unbound_socket(SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 0], 0)), None);
-    loop {
-        tokio::select! {
-                 Some(pkt) = l_rx.recv() =>  {
-                trace!("tproxy <- dispatcher: {:?}", pkt);
-
-                // We must modify set the src address for the outgoing packet by binding
-                // address to src_addr
-                // use raw socket to send packet with custom src address
-                // This requires CAP_NET_RAW capability
-                // remote -> local
-                let src_addr = match pkt.src_addr.try_into_socket_addr() {
-                    Some(a) => a,
-                    None => {
-                        tracing::warn!("tproxy: src_addr is domain, skipping");
-                        continue;
-                    }
-                };
-                let dst_addr = match pkt.dst_addr.try_into_socket_addr() {
-                    Some(a) => a,
-                    None => {
-                        tracing::warn!("tproxy: dst_addr is domain, skipping");
-                        continue;
-                    }
-                };
-                match (src_addr, &socket_v4, &socket_v6) {
-                    (SocketAddr::V4(_), Ok(socket), _) => {
-                        let _ = sendto_with_src(socket, &pkt.data, dst_addr, src_addr).await
-                        .map_err(|e|tracing::error!("failed to send v4 packet to local through tproxy:{}",e));
-
-                    }
-                    (SocketAddr::V6(_), _, Ok(socket)) => {
-                        let _ = sendto_with_src(socket, &pkt.data, dst_addr, src_addr).await
-                        .map_err(|e|tracing::error!("failed to send v6 packet to local through tproxy:{}",e));
-
-                    }
-                    (SocketAddr::V4(_),Err(e),_) => {
-                        tracing::error!("No v4 socket available for sending tproxy udp packet to local:{}",e);
-                    }
-                    (SocketAddr::V6(_),_,Err(e)) => {
-                        tracing::error!("No v6 socket available for sending tproxy udp packet to local:{}",e);
-                    }
-                }
-            },
-            else => {
-                tracing::error!("dispatcher channel to tproxy is closed");
-            }
-        };
-    }
-}
-
-// socket2 doesn't provide set_ip_transparent_v6
-// So we must implement it ourselves
-fn set_ip_transparent_v6(socket: &socket2::Socket) -> io::Result<()> {
-    let (opt, level) = (libc::IPV6_TRANSPARENT, libc::IPPROTO_IPV6);
-
-    let enable: libc::c_int = 1;
-    set_socket_option(socket, level, opt, enable)
-}
-
-fn set_socket_option(
-    socket: &socket2::Socket,
-    level: i32,
-    opt: i32,
-    val: i32,
+    sockets: &ReplySockets,
 ) -> io::Result<()> {
-    let fd = socket.as_raw_fd();
-
-    let enable: libc::c_int = val;
-
-    unsafe {
-        let ret = libc::setsockopt(
-            fd,
-            level,
-            opt,
-            &enable as *const _ as *const _,
-            std::mem::size_of_val(&enable) as libc::socklen_t,
-        );
-
-        if ret != 0 {
-            return Err(io::Error::last_os_error());
+    while let Some(pkt) = l_rx.recv().await {
+        trace!("tproxy <- dispatcher: {:?}", pkt);
+        // Send the reply with the original destination as its source address.
+        let Some(src) = pkt.src_addr.try_into_socket_addr() else {
+            warn!("tproxy: reply source is a domain");
+            continue;
+        };
+        let Some(dst) = pkt.dst_addr.try_into_socket_addr() else {
+            warn!("tproxy: reply destination is a domain");
+            continue;
+        };
+        if let Err(e) = sendto_with_src(sockets, &pkt.data, dst, src).await {
+            warn!("tproxy UDP reply from {src} to {dst} failed: {e}");
         }
     }
-
-    Ok(())
+    Err(io::Error::new(
+        io::ErrorKind::BrokenPipe,
+        "dispatcher reply channel closed",
+    ))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::gro_chunk_size;
+    use super::{
+        ReplySockets, handle_packet_from_dispatcher, new_reply_socket,
+        sendto_with_src, udp_datagrams,
+    };
+    use std::{io, net::SocketAddr, time::Duration};
 
-    #[test]
-    fn gro_chunk_size_uses_len_when_stride_is_zero() {
-        assert_eq!(gro_chunk_size(1024, 0), 1024);
+    #[tokio::test]
+    async fn closed_dispatcher_reply_channel_returns_broken_pipe() {
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        let sockets = ReplySockets { v4: None, v6: None };
+        drop(tx);
+
+        let err = handle_packet_from_dispatcher(rx, &sockets)
+            .await
+            .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::BrokenPipe);
+        assert_eq!(err.to_string(), "dispatcher reply channel closed");
     }
 
     #[test]
-    fn gro_chunk_size_uses_stride_when_non_zero() {
-        assert_eq!(gro_chunk_size(1024, 128), 128);
+    fn empty_datagram_has_one_payload() {
+        for stride in [0, 5] {
+            assert!(udp_datagrams(b"", stride).eq([b"".as_slice()]));
+        }
+    }
+
+    #[test]
+    fn gro_preserves_datagram_boundaries() {
+        assert!(udp_datagrams(b"abcde", 0).eq([b"abcde".as_slice()]));
+        assert!(udp_datagrams(b"abcde", 2).eq([b"ab".as_slice(), b"cd", b"e"]));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires CAP_NET_RAW"]
+    async fn mapped_source_uses_ipv4_reply_socket() -> io::Result<()> {
+        let receiver = tokio::net::UdpSocket::bind("127.0.0.1:0").await?;
+        let sockets = ReplySockets {
+            v4: Some(new_reply_socket(socket2::Domain::IPV4)?),
+            v6: None,
+        };
+        let src = "[::ffff:127.0.0.1]:32188".parse::<SocketAddr>().unwrap();
+        sendto_with_src(&sockets, b"reply", receiver.local_addr()?, src).await?;
+        let mut buf = [0; 5];
+        let (len, peer) = tokio::time::timeout(
+            Duration::from_secs(5),
+            receiver.recv_from(&mut buf),
+        )
+        .await??;
+        assert_eq!(&buf[..len], b"reply");
+        assert_eq!(peer, "127.0.0.1:32188".parse::<SocketAddr>().unwrap());
+        Ok(())
     }
 }

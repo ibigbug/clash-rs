@@ -129,7 +129,7 @@ Key features that can be enabled:
 - `wireguard` - WireGuard support via boringtun
 - `tailscale` - Tailscale integration
 - `tun` - TUN device / transparent proxy
-- `tproxy` - Linux TPROXY support
+- `tproxy` - Linux and Android TPROXY support
 - `redir` - TCP redirect support
 - `telemetry` - OpenTelemetry tracing
 - `dashboard` - Embedded web dashboard (default on)

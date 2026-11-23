@@ -1,5 +1,5 @@
 use crate::{
-    app::dispatcher::Dispatcher,
+    app::{dispatcher::Dispatcher, net::SocketMark},
     common::errors::new_io_error,
     proxy::utils::{ToCanonical, try_create_dualstack_tcplistener},
     session::{Network, Session, SocksAddr, Type},
@@ -28,7 +28,7 @@ pub struct TunnelInbound {
     dispatcher: Arc<Dispatcher>,
     network: Vec<String>,
     target: SocksAddr,
-    fw_mark: Option<u32>,
+    fw_mark: Option<SocketMark>,
 }
 
 impl Drop for TunnelInbound {
@@ -43,7 +43,7 @@ impl TunnelInbound {
         dispatcher: Arc<Dispatcher>,
         network: Vec<String>,
         target: String,
-        fw_mark: Option<u32>,
+        fw_mark: Option<SocketMark>,
     ) -> crate::Result<Self> {
         Ok(Self {
             listen: addr,
@@ -110,11 +110,12 @@ impl InboundHandlerTrait for TunnelInbound {
         if !self.network.contains(&"udp".to_string()) {
             return Ok(());
         }
+        let socket = UdpSocket::bind(self.listen).await?;
         info!(
             "[Tunnel-UDP] listening on {}, remote: {}",
-            self.listen, self.target
+            socket.local_addr().unwrap_or(self.listen),
+            self.target
         );
-        let socket = UdpSocket::bind(self.listen).await?;
         let sess = Session {
             network: Network::Udp,
             typ: Type::Tunnel,
