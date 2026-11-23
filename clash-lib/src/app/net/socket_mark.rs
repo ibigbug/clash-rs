@@ -33,15 +33,16 @@ impl fmt::Display for SocketMark {
 impl SocketMark {
     #[cfg(all(target_os = "android", socket_mark))]
     pub(crate) fn validate(self) -> io::Result<()> {
-        // AOSP reserves Fwmark bits 29 and 30 for the vendor.
-        const VENDOR_MASK: u32 = 0x6000_0000;
-        if self.0 & !VENDOR_MASK != 0 {
+        // AOSP reserves bits 21–28 for future use and bits 29–30 for vendors.
+        // Keep netd's cleartext policy bits (24–25) intact if copied to
+        // connmark.
+        const ALLOWED_MASK: u32 = 0x7ce0_0000;
+        if self.0 & !ALLOWED_MASK != 0 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!(
-                    "invalid Android routing-mark {0} ({0:#010x}): only \
-                     deployment-assigned vendor bits are allowed (mask \
-                     {VENDOR_MASK:#010x})",
+                    "invalid Android routing-mark {0} ({0:#010x}): only bits 21–23 \
+                     and 26–30 are allowed (mask {ALLOWED_MASK:#010x})",
                     self.0
                 ),
             ));
@@ -76,12 +77,12 @@ mod tests {
 
     #[cfg(all(target_os = "android", socket_mark))]
     #[test]
-    fn invalid_mark_reports_value_and_vendor_mask() {
+    fn invalid_mark_reports_value_and_allowed_mask() {
         let err = SocketMark::from(0x2000_0100).validate().unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
         let message = err.to_string();
         assert!(message.contains("0x20000100"));
-        assert!(message.contains("0x60000000"));
+        assert!(message.contains("0x7ce00000"));
     }
 
     #[test]

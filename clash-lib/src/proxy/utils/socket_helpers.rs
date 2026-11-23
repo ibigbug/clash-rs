@@ -508,8 +508,10 @@ mod tests {
             socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None)
                 .unwrap();
         socket.set_mark(100).unwrap();
+        let reserved_bit = 1 << 28;
+        SocketMark::from(reserved_bit).apply_to(&socket).unwrap();
         SocketMark::from(MARK).apply_to(&socket).unwrap();
-        assert_eq!(socket.mark().unwrap(), 100 | MARK);
+        assert_eq!(socket.mark().unwrap(), 100 | reserved_bit | MARK);
 
         for addr in ["127.0.0.1:0", "[::1]:0"] {
             let listener = TcpListener::bind(addr).await.unwrap();

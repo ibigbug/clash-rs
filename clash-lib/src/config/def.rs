@@ -921,8 +921,25 @@ mod tests {
     }
 
     #[test]
-    fn parse_legacy_routing_marks() {
-        for value in [100, 6666] {
+    fn parse_routing_marks() {
+        for value in [1 << 21, 1 << 23, 1 << 26, 1 << 28, 0x7ce0_0000] {
+            let yaml = format!("routing-mark: {value}");
+            for parsed in
+                [yaml.parse::<Config>(), super::check_unknown_fields(&yaml)]
+            {
+                assert_eq!(parsed.unwrap().routing_mark, Some(value.into()));
+            }
+        }
+        for value in [
+            100,
+            6666,
+            1 << 20,
+            1 << 24,
+            1 << 25,
+            (1 << 28) | (1 << 24),
+            (1 << 29) | (1 << 25),
+            1u32 << 31,
+        ] {
             let yaml = format!("routing-mark: {value}");
             for parsed in
                 [yaml.parse::<Config>(), super::check_unknown_fields(&yaml)]
@@ -937,7 +954,7 @@ mod tests {
                         )),
                         "{message}"
                     );
-                    assert!(message.contains("mask 0x60000000"), "{message}");
+                    assert!(message.contains("mask 0x7ce00000"), "{message}");
                 }
                 #[cfg(not(all(target_os = "android", socket_mark)))]
                 assert_eq!(mark.unwrap(), Some(value.into()));
