@@ -429,7 +429,7 @@ async fn handle_inbound_datagram(
         }
     };
     tokio::select! {
-        () = replies => Ok(()),
+        result = replies => result,
         result = incoming => result,
     }
 }
@@ -445,7 +445,7 @@ fn udp_datagrams(payload: &[u8], stride: usize) -> impl Iterator<Item = &[u8]> {
 async fn handle_packet_from_dispatcher(
     mut l_rx: tokio::sync::mpsc::Receiver<UdpPacket>,
     sockets: &ReplySockets,
-) {
+) -> io::Result<()> {
     while let Some(pkt) = l_rx.recv().await {
         trace!("tproxy <- dispatcher: {:?}", pkt);
         // Send the reply with the original destination as its source address.
@@ -461,12 +461,32 @@ async fn handle_packet_from_dispatcher(
             warn!("tproxy UDP reply from {src} to {dst} failed: {e}");
         }
     }
+    Err(io::Error::new(
+        io::ErrorKind::BrokenPipe,
+        "dispatcher reply channel closed",
+    ))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{ReplySockets, new_reply_socket, sendto_with_src, udp_datagrams};
+    use super::{
+        ReplySockets, handle_packet_from_dispatcher, new_reply_socket,
+        sendto_with_src, udp_datagrams,
+    };
     use std::{io, net::SocketAddr, time::Duration};
+
+    #[tokio::test]
+    async fn closed_dispatcher_reply_channel_returns_broken_pipe() {
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        let sockets = ReplySockets { v4: None, v6: None };
+        drop(tx);
+
+        let err = handle_packet_from_dispatcher(rx, &sockets)
+            .await
+            .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::BrokenPipe);
+        assert_eq!(err.to_string(), "dispatcher reply channel closed");
+    }
 
     #[test]
     fn empty_datagram_has_one_payload() {
