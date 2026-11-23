@@ -50,7 +50,8 @@ impl Sink<UdpPacket> for ChannelDatagram {
         mut self: Pin<&mut Self>,
         item: UdpPacket,
     ) -> Result<(), Self::Error> {
-        // A reserved permit stays usable even after the receiver closes.
+        // Reject a close we can already observe. If the receiver drops after
+        // this check, send_item can still return Ok using the reserved permit.
         if self.tx.get_ref().is_some_and(mpsc::Sender::is_closed) {
             self.tx.abort_send();
             return Err(io::ErrorKind::BrokenPipe.into());
