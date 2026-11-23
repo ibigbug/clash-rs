@@ -259,6 +259,10 @@ impl InboundHandlerTrait for ShadowsocksInbound {
 
             let socket =
                 new_udp_socket(Some(self.addr), None, self.fw_mark, None).await?;
+            info!(
+                "Shadowsocks UDP listening at: {}",
+                socket.local_addr().unwrap_or(self.addr)
+            );
 
             let proxy_socket: ProxySocket<shadowsocks::net::UdpSocket> =
                 ProxySocket::from_socket(

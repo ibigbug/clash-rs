@@ -110,11 +110,12 @@ impl InboundHandlerTrait for TunnelInbound {
         if !self.network.contains(&"udp".to_string()) {
             return Ok(());
         }
+        let socket = UdpSocket::bind(self.listen).await?;
         info!(
             "[Tunnel-UDP] listening on {}, remote: {}",
-            self.listen, self.target
+            socket.local_addr().unwrap_or(self.listen),
+            self.target
         );
-        let socket = UdpSocket::bind(self.listen).await?;
         let sess = Session {
             network: Network::Udp,
             typ: Type::Tunnel,

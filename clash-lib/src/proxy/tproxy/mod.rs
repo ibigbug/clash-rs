@@ -16,7 +16,7 @@ use async_trait::async_trait;
 use etherparse::PacketBuilder;
 use std::{io, net::SocketAddr, sync::Arc};
 use tokio::net::TcpListener;
-use tracing::{trace, warn};
+use tracing::{info, trace, warn};
 use udp::UdpReceiver;
 
 use crate::app::dns::{ThreadSafeDNSResolver, exchange_with_resolver};
@@ -167,6 +167,7 @@ impl InboundHandlerTrait for TproxyInbound {
                 .then(|| new_reply_socket(socket2::Domain::IPV6))
                 .transpose()?,
         };
+        info!("TPROXY UDP listening at: {}", listener.local_addr);
 
         handle_inbound_datagram(
             self.allow_lan,
@@ -195,7 +196,21 @@ fn new_reply_socket(
         domain,
         socket2::Type::RAW,
         Some(libc::IPPROTO_RAW.into()),
-    )?;
+    )
+    .map_err(|err| {
+        let hint = if err.kind() == io::ErrorKind::PermissionDenied {
+            " (check CAP_NET_RAW and the process security policy)"
+        } else {
+            ""
+        };
+        io::Error::new(
+            err.kind(),
+            format!(
+                "failed to create TPROXY UDP raw reply socket ({domain:?}): \
+                 {err}{hint}"
+            ),
+        )
+    })?;
     socket.set_nonblocking(true)?;
     // SAFETY: AsyncFd owns this socket until deregistration.
     unsafe { Ok(tokio::io::unix::AsyncFd::register(socket)?) }

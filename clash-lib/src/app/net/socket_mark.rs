@@ -27,8 +27,12 @@ impl SocketMark {
         if self.0 & !VENDOR_MASK != 0 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "Android socket marks may only use deployment-assigned vendor bits \
-                 (mask 0x60000000)",
+                format!(
+                    "invalid Android socket mark {:#010x}: only \
+                     deployment-assigned vendor bits are allowed (mask \
+                     {VENDOR_MASK:#010x})",
+                    self.0
+                ),
             ));
         }
         Ok(())
@@ -58,6 +62,16 @@ impl SocketMark {
 #[cfg(test)]
 mod tests {
     use super::SocketMark;
+
+    #[cfg(all(target_os = "android", socket_mark))]
+    #[test]
+    fn invalid_mark_reports_value_and_vendor_mask() {
+        let err = SocketMark::from(0x2000_0100).validate().unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        let message = err.to_string();
+        assert!(message.contains("0x20000100"));
+        assert!(message.contains("0x60000000"));
+    }
 
     #[test]
     fn optional_marks_keep_their_numeric_representation() {
