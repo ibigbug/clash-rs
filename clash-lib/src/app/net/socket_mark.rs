@@ -3,9 +3,20 @@ use std::{fmt, io};
 
 /// A routing mark supplied by the profile. An absent mark is represented by
 /// `Option<SocketMark>`, since explicitly setting zero clears SO_MARK on Linux.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize)]
 #[serde(transparent)]
 pub struct SocketMark(u32);
+
+impl<'de> Deserialize<'de> for SocketMark {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Self, D::Error> {
+        let mark = Self(u32::deserialize(deserializer)?);
+        #[cfg(all(target_os = "android", socket_mark))]
+        mark.validate().map_err(serde::de::Error::custom)?;
+        Ok(mark)
+    }
+}
 
 impl From<u32> for SocketMark {
     fn from(value: u32) -> Self {
@@ -28,7 +39,7 @@ impl SocketMark {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!(
-                    "invalid Android socket mark {:#010x}: only \
+                    "invalid Android routing-mark {0} ({0:#010x}): only \
                      deployment-assigned vendor bits are allowed (mask \
                      {VENDOR_MASK:#010x})",
                     self.0
@@ -75,7 +86,14 @@ mod tests {
 
     #[test]
     fn optional_marks_keep_their_numeric_representation() {
-        for mark in [0, 0x2000_0000, u32::MAX] {
+        for mark in [
+            0,
+            0x2000_0000,
+            0x4000_0000,
+            0x6000_0000,
+            #[cfg(not(all(target_os = "android", socket_mark)))]
+            u32::MAX,
+        ] {
             let value = Some(SocketMark::from(mark));
             let encoded = serde_json::to_string(&value).unwrap();
             assert_eq!(encoded, mark.to_string());

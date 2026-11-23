@@ -921,6 +921,31 @@ mod tests {
     }
 
     #[test]
+    fn parse_legacy_routing_marks() {
+        for value in [100, 6666] {
+            let yaml = format!("routing-mark: {value}");
+            for parsed in
+                [yaml.parse::<Config>(), super::check_unknown_fields(&yaml)]
+            {
+                let mark = parsed.map(|cfg| cfg.routing_mark);
+                #[cfg(all(target_os = "android", socket_mark))]
+                {
+                    let message = mark.unwrap_err().to_string();
+                    assert!(
+                        message.contains(&format!(
+                            "routing-mark {value} ({value:#010x})"
+                        )),
+                        "{message}"
+                    );
+                    assert!(message.contains("mask 0x60000000"), "{message}");
+                }
+                #[cfg(not(all(target_os = "android", socket_mark)))]
+                assert_eq!(mark.unwrap(), Some(value.into()));
+            }
+        }
+    }
+
+    #[test]
     fn test_str_port() {
         let cfg = r#"
         port: "9090"
@@ -1146,7 +1171,7 @@ ipv6: false
 external-controller: 127.0.0.1:9090
 external-ui: folder
 interface: en0
-routing-mark: 6666
+routing-mark: 0x20000000
 
 hosts: {}
 
