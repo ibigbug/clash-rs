@@ -318,7 +318,7 @@ pub fn new_udp_socket_blocking(
     // Determine the socket family based on the source address or interface
     // logic:
     // - If family_hint is provided, use it.
-    // - If src is provided and is IPv6, use IPv6.
+    // - Use the explicit source family on Android, or IPv6 for an IPv6 source.
     // - If iface is provided and is IPv6, use IPv6.
     // - Otherwise, default to IPv4.
     let (socket, family) = match (family_hint, src, iface) {
@@ -329,9 +329,9 @@ pub fn new_udp_socket_blocking(
                 domain,
             )
         }
-        (None, Some(src), _) if src.is_ipv6() => (
+        (None, Some(src), _) if src.is_ipv6() || cfg!(target_os = "android") => (
             try_create_dualstack_socket(src, socket2::Type::DGRAM)?.0,
-            socket2::Domain::IPV6,
+            socket2::Domain::for_address(src),
         ),
         (None, _, Some(iface)) if iface.addr_v6.is_some() => (
             socket2::Socket::new(socket2::Domain::IPV6, socket2::Type::DGRAM, None)?,
@@ -344,55 +344,48 @@ pub fn new_udp_socket_blocking(
     };
     debug!("created udp socket");
 
-    if !cfg!(target_os = "android") {
-        // Skip interface binding for loopback destinations — binding a socket
-        // to an outbound interface prevents reaching localhost addresses.
-        let dst_is_loopback =
-            family_hint.map(|a| a.ip().is_loopback()).unwrap_or(false);
-        match (src, iface) {
-            (_, Some(iface)) if !dst_is_loopback => {
-                must_bind_socket_on_interface(&socket, iface, family).inspect_err(
-                    |x| {
-                        error!("failed to bind socket to interface: {}", x);
-                    },
-                )?;
-                // binding is not necessary for linux but is required on windows
-                // Without binding local_addr can't be obtained by system call
-                // which is required on quinn.
-                #[cfg(target_os = "windows")]
-                if let Some(addr) = src {
-                    socket.bind(&socket2::SockAddr::from(addr))?;
-                }
+    // Android handles interface routing. Binding to an interface would
+    // also prevent reaching loopback destinations on other platforms.
+    let dst_is_loopback = family_hint.map(|a| a.ip().is_loopback()).unwrap_or(false);
+    match (src, iface) {
+        (_, Some(iface)) if !cfg!(target_os = "android") && !dst_is_loopback => {
+            must_bind_socket_on_interface(&socket, iface, family).inspect_err(
+                |x| {
+                    error!("failed to bind socket to interface: {}", x);
+                },
+            )?;
+            // binding is not necessary for linux but is required on windows
+            // Without binding local_addr can't be obtained by system call
+            // which is required on quinn.
+            #[cfg(target_os = "windows")]
+            if let Some(addr) = src {
+                socket.bind(&socket2::SockAddr::from(addr))?;
+            }
 
-                trace!(iface = ?iface, "udp socket bound: {socket:?}");
+            trace!(iface = ?iface, "udp socket bound: {socket:?}");
+        }
+        (Some(src), _) => {
+            socket.bind(&src.into())?;
+            trace!(src = ?src, "udp socket bound: {socket:?}");
+        }
+        (None, _) => {
+            // On Windows, UDP sockets must be bound to get a valid
+            // local_addr which is required for some
+            // operations (e.g., quinn/QUIC)
+            #[cfg(target_os = "windows")]
+            {
+                let bind_addr = match family {
+                    socket2::Domain::IPV4 => {
+                        "0.0.0.0:0".parse::<SocketAddr>().unwrap()
+                    }
+                    socket2::Domain::IPV6 => "[::]:0".parse::<SocketAddr>().unwrap(),
+                    _ => "0.0.0.0:0".parse::<SocketAddr>().unwrap(),
+                };
+                socket.bind(&socket2::SockAddr::from(bind_addr))?;
+                trace!(addr = ?bind_addr, "udp socket bound to default address on Windows: {socket:?}");
             }
-            (Some(src), _) => {
-                // Either no interface, or destination is loopback (skip iface
-                // binding so localhost is reachable).
-                socket.bind(&src.into())?;
-                trace!(src = ?src, "udp socket bound: {socket:?}");
-            }
-            (None, _) => {
-                // On Windows, UDP sockets must be bound to get a valid
-                // local_addr which is required for some
-                // operations (e.g., quinn/QUIC)
-                #[cfg(target_os = "windows")]
-                {
-                    let bind_addr = match family {
-                        socket2::Domain::IPV4 => {
-                            "0.0.0.0:0".parse::<SocketAddr>().unwrap()
-                        }
-                        socket2::Domain::IPV6 => {
-                            "[::]:0".parse::<SocketAddr>().unwrap()
-                        }
-                        _ => "0.0.0.0:0".parse::<SocketAddr>().unwrap(),
-                    };
-                    socket.bind(&socket2::SockAddr::from(bind_addr))?;
-                    trace!(addr = ?bind_addr, "udp socket bound to default address on Windows: {socket:?}");
-                }
-                #[cfg(not(target_os = "windows"))]
-                trace!("udp socket not bound to any specific address: {socket:?}");
-            }
+            #[cfg(not(target_os = "windows"))]
+            trace!("udp socket not bound to any specific address: {socket:?}");
         }
     }
 
@@ -529,6 +522,49 @@ pub fn try_create_dualstack_tcplistener(
 mod tests {
     use super::*;
     use std::{net::SocketAddrV6, time::Duration};
+
+    #[cfg(target_os = "android")]
+    #[tokio::test]
+    async fn android_udp_binds_explicit_source() -> io::Result<()> {
+        let iface = find_loopback_iface().expect("missing loopback interface");
+        for src in [
+            SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
+            SocketAddr::from((Ipv6Addr::LOCALHOST, 0)),
+        ] {
+            for iface in [None, Some(&iface)] {
+                let socket = new_udp_socket(
+                    Some(src),
+                    iface,
+                    #[cfg(socket_mark)]
+                    None,
+                    None,
+                )
+                .await?;
+                let local = socket.local_addr()?;
+                assert_eq!(local.ip(), src.ip());
+                assert_ne!(local.port(), 0);
+
+                let peer = UdpSocket::bind(src).await?;
+                peer.send_to(b"ping", local).await?;
+                let mut buf = [0; 4];
+                let (n, from) =
+                    timeout(Duration::from_secs(2), socket.recv_from(&mut buf))
+                        .await??;
+                assert_eq!(&buf[..n], b"ping");
+                assert_eq!(from, peer.local_addr()?);
+                let err = new_std_udp_socket(
+                    Some(local),
+                    iface,
+                    #[cfg(socket_mark)]
+                    None,
+                    None,
+                )
+                .unwrap_err();
+                assert_eq!(err.kind(), io::ErrorKind::AddrInUse);
+            }
+        }
+        Ok(())
+    }
 
     #[cfg(all(target_os = "android", socket_mark))]
     #[tokio::test]
