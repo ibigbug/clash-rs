@@ -1,11 +1,11 @@
-use std::{io, io::IoSliceMut, net::SocketAddr, os::fd::AsRawFd};
+use std::{io, io::IoSliceMut, net::SocketAddr, os::fd::AsRawFd, time::Duration};
 
 use nix::sys::socket::{
     ControlMessageOwned, MsgFlags, SockaddrIn, SockaddrIn6, SockaddrLike, recvmsg,
     setsockopt, sockopt,
 };
 use tokio::{io::Interest, net::UdpSocket};
-use tracing::trace;
+use tracing::{trace, warn};
 
 pub(super) struct UdpReceiver {
     socket: UdpSocket,
@@ -50,28 +50,54 @@ impl UdpReceiver {
     }
 
     pub(super) async fn recv_msg(&mut self, buf: &mut [u8]) -> io::Result<RecvMeta> {
-        loop {
-            let meta = self
-                .socket
-                .async_io(Interest::READABLE, || {
-                    let fd = self.socket.as_raw_fd();
-                    // AF_INET6 sockets return IPv4 peers as IPv4-mapped
-                    // sockaddr_in6.
-                    if self.local_addr.is_ipv4() {
-                        recv::<SockaddrIn>(fd, buf, &mut self.control)
-                    } else {
-                        recv::<SockaddrIn6>(fd, buf, &mut self.control)
-                    }
-                })
-                .await;
-            match meta {
-                Ok(Some(meta)) => return Ok(meta),
-                Ok(None) => continue,
-                Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
-                Err(err) => return Err(err),
+        let fd = self.socket.as_raw_fd();
+        recv_next(&self.socket, || {
+            // AF_INET6 sockets return IPv4 peers as IPv4-mapped sockaddr_in6.
+            if self.local_addr.is_ipv4() {
+                recv::<SockaddrIn>(fd, buf, &mut self.control)
+            } else {
+                recv::<SockaddrIn6>(fd, buf, &mut self.control)
             }
+        })
+        .await
+    }
+}
+
+async fn recv_next(
+    socket: &UdpSocket,
+    mut receive: impl FnMut() -> io::Result<Option<RecvMeta>>,
+) -> io::Result<RecvMeta> {
+    loop {
+        match socket.async_io(Interest::READABLE, &mut receive).await {
+            Ok(Some(meta)) => return Ok(meta),
+            Ok(None) => continue,
+            Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
+            Err(err) if is_recoverable_recv_error(&err) => {
+                warn!("TPROXY UDP receive failed: {err}; retrying");
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            Err(err) => return Err(err),
         }
     }
+}
+
+fn is_recoverable_recv_error(err: &io::Error) -> bool {
+    // Resource pressure and asynchronous UDP network errors leave the socket
+    // usable.
+    matches!(
+        err.raw_os_error(),
+        Some(
+            libc::ENOBUFS
+                | libc::ENOMEM
+                | libc::ECONNREFUSED
+                | libc::ECONNRESET
+                | libc::ENETDOWN
+                | libc::ENETUNREACH
+                | libc::EHOSTUNREACH
+                | libc::EMSGSIZE
+                | libc::ETIMEDOUT
+        )
+    )
 }
 
 fn recv<S: SockaddrLike + Into<SocketAddr> + Copy>(
@@ -88,9 +114,10 @@ fn recv<S: SockaddrLike + Into<SocketAddr> + Copy>(
         trace!("discarding truncated TPROXY UDP datagram");
         return Ok(None);
     }
-    let addr = msg.address.ok_or_else(|| {
-        io::Error::new(io::ErrorKind::InvalidData, "missing UDP peer address")
-    })?;
+    let Some(addr) = msg.address else {
+        trace!("discarding TPROXY UDP datagram without a peer address");
+        return Ok(None);
+    };
     let mut meta = RecvMeta {
         addr: addr.into(),
         orig_dst: None,
@@ -106,12 +133,14 @@ fn recv<S: SockaddrLike + Into<SocketAddr> + Copy>(
                 meta.orig_dst = Some(SockaddrIn6::from(dst).into());
             }
             ControlMessageOwned::UdpGroSegments(size) => {
-                meta.stride = usize::try_from(size).map_err(|_| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "negative UDP GRO segment size",
-                    )
-                })?;
+                let Ok(stride) = usize::try_from(size) else {
+                    trace!(
+                        "discarding TPROXY UDP datagram with negative GRO segment \
+                         size"
+                    );
+                    return Ok(None);
+                };
+                meta.stride = stride;
             }
             _ => {}
         }
@@ -122,10 +151,30 @@ fn recv<S: SockaddrLike + Into<SocketAddr> + Copy>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{
-        net::{Ipv4Addr, Ipv6Addr},
-        time::Duration,
-    };
+    use std::net::{Ipv4Addr, Ipv6Addr};
+
+    #[tokio::test]
+    async fn receives_next_datagram_after_transient_errors() -> io::Result<()> {
+        let receiver = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await?;
+        let sender = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await?;
+        sender.send_to(b"next", receiver.local_addr()?).await?;
+
+        let mut errors = [libc::ENOBUFS, libc::ENOMEM].into_iter();
+        let mut buf = [0; 8];
+        let meta = tokio::time::timeout(
+            Duration::from_secs(5),
+            recv_next(&receiver, || {
+                if let Some(errno) = errors.next() {
+                    return Err(io::Error::from_raw_os_error(errno));
+                }
+                recv::<SockaddrIn>(receiver.as_raw_fd(), &mut buf, &mut [])
+            }),
+        )
+        .await??;
+        assert_eq!(&buf[..meta.len], b"next");
+        assert_eq!(meta.addr, sender.local_addr()?);
+        Ok(())
+    }
 
     #[tokio::test]
     async fn receives_original_destination_and_discards_truncated_payloads()
