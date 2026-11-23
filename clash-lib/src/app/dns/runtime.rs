@@ -1,3 +1,4 @@
+use crate::app::net::SocketMark;
 use std::{
     io,
     net::SocketAddr,
@@ -30,7 +31,7 @@ pub struct DnsRuntimeProvider {
     outbound: AnyOutboundHandler,
     dns_resolver: ThreadSafeDNSResolver,
     iface: Option<OutboundInterface>,
-    so_mark: Option<u32>,
+    so_mark: Option<SocketMark>,
     rule_dispatch: Option<Arc<RuleDispatch>>,
 }
 
@@ -39,7 +40,7 @@ impl DnsRuntimeProvider {
         outbound: AnyOutboundHandler,
         dns_resolver: ThreadSafeDNSResolver,
         iface: Option<OutboundInterface>,
-        so_mark: Option<u32>,
+        so_mark: Option<SocketMark>,
         rule_dispatch: Option<Arc<RuleDispatch>>,
     ) -> Self {
         Self {
@@ -55,7 +56,7 @@ impl DnsRuntimeProvider {
     #[cfg(test)]
     pub fn new_direct(
         iface: Option<OutboundInterface>,
-        so_mark: Option<u32>,
+        so_mark: Option<SocketMark>,
     ) -> Self {
         use crate::{app::dns, config::proxy::PROXY_DIRECT, proxy::direct};
         use std::sync::Arc;

@@ -43,7 +43,7 @@ pub type HandlerOptions = config::ShadowQuicClientCfg;
 #[cfg(socket_mark)]
 struct MarkedSocketFactory {
     inner: Arc<dyn SocketFactory>,
-    mark: u32,
+    mark: crate::app::net::SocketMark,
 }
 
 #[cfg(socket_mark)]
@@ -51,7 +51,7 @@ struct MarkedSocketFactory {
 impl SocketFactory for MarkedSocketFactory {
     async fn create_socket(&self) -> io::Result<socket2::Socket> {
         let socket = self.inner.create_socket().await?;
-        super::utils::apply_socket_mark(&socket, Some(self.mark))?;
+        self.mark.apply_to(&socket)?;
         Ok(socket)
     }
 }
@@ -296,7 +296,7 @@ async fn android_socket_factory_respects_mark_policy() -> anyhow::Result<()> {
     );
     // A netId bit is ignored in VpnService builds and rejected with TPROXY.
     let sess = Session {
-        so_mark: Some(1),
+        so_mark: Some(1.into()),
         ..Default::default()
     };
     let resolver = Arc::new(crate::app::dns::SystemResolver::new(false)?);

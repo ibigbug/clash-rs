@@ -94,13 +94,9 @@ impl OutboundHandler for Handler {
                 }
             };
 
-        let s = new_tcp_stream_happy_eyeballs(
-            &addrs,
-            sess.iface.as_ref(),
-            #[cfg(socket_mark)]
-            sess.so_mark,
-        )
-        .await?;
+        let s =
+            new_tcp_stream_happy_eyeballs(&addrs, sess.iface.as_ref(), sess.so_mark)
+                .await?;
 
         let s = InstrumentedStreamWrapper::new(s);
         s.append_to_chain(self.name()).await;
@@ -116,11 +112,7 @@ impl OutboundHandler for Handler {
         // client (keyed by src_addr only in the dispatcher). Use a dual-stack
         // socket so one socket can send to both IPv4 and IPv6 destinations
         // without EAFNOSUPPORT.
-        let udp = new_dual_stack_udp_socket(
-            sess.iface.as_ref(),
-            #[cfg(socket_mark)]
-            sess.so_mark,
-        )?;
+        let udp = new_dual_stack_udp_socket(sess.iface.as_ref(), sess.so_mark)?;
         let d = InstrumentedDatagramWrapper::new(OutboundDatagramImpl::new(
             udp, resolver,
         ));
@@ -144,7 +136,6 @@ impl OutboundHandler for Handler {
                 sess.destination.host().as_str(),
                 sess.destination.port(),
                 sess.iface.as_ref(),
-                #[cfg(socket_mark)]
                 sess.so_mark,
             )
             .await?;
@@ -165,7 +156,6 @@ impl OutboundHandler for Handler {
                 None,
                 sess.destination.clone(),
                 sess.iface.as_ref(),
-                #[cfg(socket_mark)]
                 sess.so_mark,
             )
             .await?;

@@ -1,5 +1,5 @@
 use super::platform::must_bind_socket_on_interface;
-use crate::app::net::OutboundInterface;
+use crate::app::net::{OutboundInterface, SocketMark};
 
 use futures::{StreamExt, io, stream::FuturesUnordered};
 use socket2::TcpKeepalive;
@@ -12,38 +12,6 @@ use tokio::{
     time::timeout,
 };
 use tracing::{debug, error, instrument, trace};
-
-#[cfg(all(socket_mark, target_os = "android"))]
-pub(crate) fn validate_android_socket_mark(mark: u32) -> io::Result<()> {
-    // AOSP netd's Fwmark reserves bits 29 and 30 for the vendor.
-    const VENDOR_MASK: u32 = 0x6000_0000;
-    if mark & !VENDOR_MASK != 0 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "Android socket marks may only use deployment-assigned vendor bits \
-             (mask 0x60000000)",
-        ));
-    }
-    Ok(())
-}
-
-#[cfg(socket_mark)]
-pub(crate) fn apply_socket_mark(
-    socket: &socket2::Socket,
-    mark: Option<u32>,
-) -> io::Result<()> {
-    let Some(mark) = mark else { return Ok(()) };
-    #[cfg(target_os = "android")]
-    let mark = {
-        validate_android_socket_mark(mark)?;
-        if mark == 0 {
-            return Ok(());
-        }
-        // Preserve the network and permissions selected by netd.
-        socket.mark()? | mark
-    };
-    socket.set_mark(mark)
-}
 
 pub fn apply_tcp_options(s: &TcpStream) -> std::io::Result<()> {
     #[cfg(not(target_os = "windows"))]
@@ -75,7 +43,7 @@ pub fn apply_tcp_options(s: &TcpStream) -> std::io::Result<()> {
 pub async fn new_tcp_stream(
     endpoint: SocketAddr,
     iface: Option<&OutboundInterface>,
-    #[cfg(socket_mark)] so_mark: Option<u32>,
+    so_mark: Option<SocketMark>,
 ) -> std::io::Result<TcpStream> {
     let (socket, family) = match endpoint {
         SocketAddr::V4(_) => (
@@ -105,8 +73,9 @@ pub async fn new_tcp_stream(
         trace!("tcp socket bound to interface: {socket:?}");
     }
 
-    #[cfg(socket_mark)]
-    apply_socket_mark(&socket, so_mark)?;
+    if let Some(mark) = so_mark {
+        mark.apply_to(&socket)?;
+    }
 
     socket.set_keepalive(true)?;
     socket.set_tcp_nodelay(true)?;
@@ -185,33 +154,21 @@ pub fn sort_addrs_happy_eyeballs(addrs: &[SocketAddr]) -> Vec<SocketAddr> {
 pub async fn new_tcp_stream_happy_eyeballs(
     endpoints: &[SocketAddr],
     iface: Option<&OutboundInterface>,
-    #[cfg(socket_mark)] so_mark: Option<u32>,
+    so_mark: Option<SocketMark>,
 ) -> std::io::Result<TcpStream> {
     if endpoints.is_empty() {
         return Err(std::io::Error::other("no destination address provided"));
     }
     if endpoints.len() == 1 {
-        return new_tcp_stream(
-            endpoints[0],
-            iface,
-            #[cfg(socket_mark)]
-            so_mark,
-        )
-        .await;
+        return new_tcp_stream(endpoints[0], iface, so_mark).await;
     }
 
     async fn connect_candidate(
         addr: SocketAddr,
         iface: Option<OutboundInterface>,
-        #[cfg(socket_mark)] so_mark: Option<u32>,
+        so_mark: Option<SocketMark>,
     ) -> (std::io::Result<TcpStream>, SocketAddr) {
-        let res = new_tcp_stream(
-            addr,
-            iface.as_ref(),
-            #[cfg(socket_mark)]
-            so_mark,
-        )
-        .await;
+        let res = new_tcp_stream(addr, iface.as_ref(), so_mark).await;
         (res, addr)
     }
 
@@ -223,12 +180,7 @@ pub async fn new_tcp_stream_happy_eyeballs(
     // Start dialing the first candidate immediately
     let first_addr = sorted[candidate_idx];
     candidate_idx += 1;
-    in_flight.push(connect_candidate(
-        first_addr,
-        iface.cloned(),
-        #[cfg(socket_mark)]
-        so_mark,
-    ));
+    in_flight.push(connect_candidate(first_addr, iface.cloned(), so_mark));
 
     let mut delay_timer = Some(Box::pin(tokio::time::sleep(HAPPY_EYEBALLS_DELAY)));
 
@@ -251,7 +203,6 @@ pub async fn new_tcp_stream_happy_eyeballs(
                             in_flight.push(connect_candidate(
                                 next_addr,
                                 iface.cloned(),
-                                #[cfg(socket_mark)]
                                 so_mark,
                             ));
                             delay_timer = if candidate_idx < sorted.len() {
@@ -281,7 +232,6 @@ pub async fn new_tcp_stream_happy_eyeballs(
                 in_flight.push(connect_candidate(
                     next_addr,
                     iface.cloned(),
-                    #[cfg(socket_mark)]
                     so_mark,
                 ));
                 delay_timer = if candidate_idx < sorted.len() {
@@ -301,23 +251,17 @@ pub async fn new_tcp_stream_happy_eyeballs(
 pub fn new_std_udp_socket(
     src: Option<SocketAddr>,
     iface: Option<&OutboundInterface>,
-    #[cfg(socket_mark)] so_mark: Option<u32>,
+    so_mark: Option<SocketMark>,
     family_hint: Option<std::net::SocketAddr>,
 ) -> std::io::Result<std::net::UdpSocket> {
-    new_udp_socket_blocking(
-        src,
-        iface,
-        #[cfg(socket_mark)]
-        so_mark,
-        family_hint,
-    )
+    new_udp_socket_blocking(src, iface, so_mark, family_hint)
 }
 
 /// Synchronous core of [`new_udp_socket`], for callers that cannot await
 pub fn new_udp_socket_blocking(
     src: Option<SocketAddr>,
     iface: Option<&OutboundInterface>,
-    #[cfg(socket_mark)] so_mark: Option<u32>,
+    so_mark: Option<SocketMark>,
     family_hint: Option<std::net::SocketAddr>,
 ) -> std::io::Result<std::net::UdpSocket> {
     // Determine the socket family based on the source address or interface
@@ -394,8 +338,9 @@ pub fn new_udp_socket_blocking(
         }
     }
 
-    #[cfg(socket_mark)]
-    apply_socket_mark(&socket, so_mark)?;
+    if let Some(mark) = so_mark {
+        mark.apply_to(&socket)?;
+    }
 
     socket.set_broadcast(true)?;
     socket.set_nonblocking(true)?;
@@ -407,19 +352,13 @@ pub fn new_udp_socket_blocking(
 pub async fn new_udp_socket(
     src: Option<SocketAddr>,
     iface: Option<&OutboundInterface>,
-    #[cfg(socket_mark)] so_mark: Option<u32>,
+    so_mark: Option<SocketMark>,
     // Optional family hint for the socket.
     // If not provided, the family will be determined based on the source
     // address or interface.
     family_hint: Option<std::net::SocketAddr>,
 ) -> std::io::Result<UdpSocket> {
-    let std_socket = new_std_udp_socket(
-        src,
-        iface,
-        #[cfg(socket_mark)]
-        so_mark,
-        family_hint,
-    )?;
+    let std_socket = new_std_udp_socket(src, iface, so_mark, family_hint)?;
     UdpSocket::from_std(std_socket)
 }
 
@@ -469,7 +408,7 @@ pub fn try_create_dualstack_socket(
 /// different address families (e.g. in the DIRECT handler).
 pub fn new_dual_stack_udp_socket(
     iface: Option<&OutboundInterface>,
-    #[cfg(socket_mark)] so_mark: Option<u32>,
+    so_mark: Option<SocketMark>,
 ) -> std::io::Result<UdpSocket> {
     let dual_stack = SocketAddr::from((Ipv6Addr::UNSPECIFIED, 0));
     let ipv4_only = SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0));
@@ -499,8 +438,9 @@ pub fn new_dual_stack_udp_socket(
     // platforms — required on Windows to avoid WSAEINVAL (10022) from sendto.
     socket.bind(&bind_addr.into())?;
 
-    #[cfg(socket_mark)]
-    apply_socket_mark(&socket, so_mark)?;
+    if let Some(mark) = so_mark {
+        mark.apply_to(&socket)?;
+    }
 
     socket.set_broadcast(true)?;
     socket.set_nonblocking(true)?;
@@ -537,14 +477,7 @@ mod tests {
             SocketAddr::from((Ipv6Addr::LOCALHOST, 0)),
         ] {
             for iface in [None, Some(&iface)] {
-                let socket = new_udp_socket(
-                    Some(src),
-                    iface,
-                    #[cfg(socket_mark)]
-                    None,
-                    None,
-                )
-                .await?;
+                let socket = new_udp_socket(Some(src), iface, None, None).await?;
                 let local = socket.local_addr()?;
                 assert_eq!(local.ip(), src.ip());
                 assert_ne!(local.port(), 0);
@@ -557,14 +490,8 @@ mod tests {
                         .await??;
                 assert_eq!(&buf[..n], b"ping");
                 assert_eq!(from, peer.local_addr()?);
-                let err = new_std_udp_socket(
-                    Some(local),
-                    iface,
-                    #[cfg(socket_mark)]
-                    None,
-                    None,
-                )
-                .unwrap_err();
+                let err =
+                    new_std_udp_socket(Some(local), iface, None, None).unwrap_err();
                 assert_eq!(err.kind(), io::ErrorKind::AddrInUse);
             }
         }
@@ -581,7 +508,7 @@ mod tests {
             socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None)
                 .unwrap();
         socket.set_mark(100).unwrap();
-        apply_socket_mark(&socket, Some(MARK)).unwrap();
+        SocketMark::from(MARK).apply_to(&socket).unwrap();
         assert_eq!(socket.mark().unwrap(), 100 | MARK);
 
         for addr in ["127.0.0.1:0", "[::1]:0"] {
@@ -592,13 +519,16 @@ mod tests {
             assert_ne!(expected & 0xffff, 0, "netd must select a network");
             assert_eq!(expected & MARK, 0);
 
-            let marked = new_tcp_stream(addr, None, Some(MARK)).await.unwrap();
+            let marked =
+                new_tcp_stream(addr, None, Some(MARK.into())).await.unwrap();
             assert_eq!(
                 socket2::SockRef::from(&marked).mark().unwrap(),
                 expected | MARK
             );
 
-            let err = new_tcp_stream(addr, None, Some(256)).await.unwrap_err();
+            let err = new_tcp_stream(addr, None, Some(256.into()))
+                .await
+                .unwrap_err();
             assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
         }
     }
@@ -637,12 +567,8 @@ mod tests {
     /// Without an iface: socket is bound and IPv4-mapped round-trip works.
     #[tokio::test]
     async fn test_dual_stack_no_iface_is_bound_and_sends_ipv4_mapped() {
-        let sock = new_dual_stack_udp_socket(
-            None,
-            #[cfg(socket_mark)]
-            None,
-        )
-        .expect("failed to create dual-stack socket");
+        let sock = new_dual_stack_udp_socket(None, None)
+            .expect("failed to create dual-stack socket");
 
         let local = sock.local_addr().expect("local_addr failed");
         assert_ne!(local.port(), 0, "socket must have a non-zero local port");
@@ -692,11 +618,7 @@ mod tests {
             return;
         };
 
-        let result = new_dual_stack_udp_socket(
-            Some(&iface),
-            #[cfg(socket_mark)]
-            None,
-        );
+        let result = new_dual_stack_udp_socket(Some(&iface), None);
 
         // On Linux, SO_BINDTODEVICE requires CAP_NET_RAW; skip gracefully.
         #[cfg(target_os = "linux")]
@@ -747,7 +669,6 @@ mod tests {
         let stream = super::new_tcp_stream_happy_eyeballs(
             &[dummy_addr, working_addr],
             None,
-            #[cfg(socket_mark)]
             None,
         )
         .await;

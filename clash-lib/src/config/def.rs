@@ -1,7 +1,10 @@
 use crate::{
     Error,
-    app::remote_content_manager::providers::rule_provider::{
-        RuleSetBehavior, RuleSetFormat,
+    app::{
+        net::SocketMark,
+        remote_content_manager::providers::rule_provider::{
+            RuleSetBehavior, RuleSetFormat,
+        },
     },
 };
 use educe::Educe;
@@ -75,7 +78,7 @@ pub struct TunConfig {
     pub route_all: bool,
     pub mtu: Option<u16>,
     /// fwmark on Linux only
-    pub so_mark: Option<u32>,
+    pub so_mark: Option<SocketMark>,
     /// policy routing table on Linux only
     #[serde(default = "default_route_table")]
     pub route_table: u32,
@@ -467,7 +470,7 @@ pub struct Config {
     /// - traffics originated from clash will be marked with this value
     /// - so you can use this value to match the traffic in iptables to avoid
     ///   traffic loops
-    pub routing_mark: Option<u32>,
+    pub routing_mark: Option<SocketMark>,
     #[serde(rename = "proxy-providers")]
     /// proxy provider settings
     pub proxy_provider: Option<HashMap<String, OutboundProxyProviderDef>>,

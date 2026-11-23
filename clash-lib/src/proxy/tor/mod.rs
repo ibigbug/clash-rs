@@ -1,3 +1,4 @@
+use crate::app::net::SocketMark;
 mod stream;
 
 use arti_client::{StreamPrefs, TorClientConfig};
@@ -31,7 +32,7 @@ struct CustomTcpProvider<T> {
     inner: T,
     iface: Option<crate::app::net::OutboundInterface>,
     #[allow(dead_code)]
-    so_mark: Option<u32>,
+    so_mark: Option<SocketMark>,
 }
 
 #[async_trait]
@@ -53,7 +54,6 @@ where
         let stream = crate::proxy::utils::new_tcp_stream(
             *addr,
             self.iface.as_ref(),
-            #[cfg(socket_mark)]
             self.so_mark,
         )
         .await?;
@@ -82,7 +82,7 @@ type TorRuntime = tor_rtcompat::CompoundRuntime<
 pub struct HandlerOptions {
     pub name: String,
     pub interface: Option<String>,
-    pub routing_mark: Option<u32>,
+    pub routing_mark: Option<SocketMark>,
 }
 
 pub struct Handler {

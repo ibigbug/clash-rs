@@ -17,6 +17,7 @@ use crate::{
     Error,
     app::{
         dns::ThreadSafeDNSResolver,
+        net::SocketMark,
         profile::ThreadSafeCacheFile,
         remote_content_manager::{
             ProxyManager,
@@ -97,7 +98,7 @@ impl OutboundManager {
         dns_resolver: ThreadSafeDNSResolver,
         cache_store: ThreadSafeCacheFile,
         cwd: String,
-        fw_mark: Option<u32>,
+        fw_mark: Option<SocketMark>,
         registry: OutboundHandlerRegistry,
     ) -> Result<Self, Error> {
         // Build all handlers in a plain HashMap during initialization.

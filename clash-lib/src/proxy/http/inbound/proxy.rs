@@ -1,3 +1,4 @@
+use crate::app::net::SocketMark;
 use std::{
     net::{IpAddr, SocketAddr},
     sync::Arc,
@@ -47,7 +48,7 @@ async fn proxy(
     src: SocketAddr,
     dispatcher: Arc<Dispatcher>,
     authenticator: ThreadSafeAuthenticator,
-    fw_mark: Option<u32>,
+    fw_mark: Option<SocketMark>,
 ) -> Result<Response<BoxBody<Bytes, std::io::Error>>, ProxyError> {
     if authenticator.enabled()
         && let Some(res) = authenticate_req(&req, authenticator)
@@ -121,7 +122,7 @@ struct ProxyService {
     src: SocketAddr,
     dispatcher: Arc<Dispatcher>,
     authenticator: ThreadSafeAuthenticator,
-    fw_mark: Option<u32>,
+    fw_mark: Option<SocketMark>,
 }
 
 impl hyper::service::Service<Request<hyper::body::Incoming>> for ProxyService {
@@ -146,7 +147,7 @@ pub async fn handle(
     src: SocketAddr,
     dispatcher: Arc<Dispatcher>,
     authenticator: ThreadSafeAuthenticator,
-    fw_mark: Option<u32>,
+    fw_mark: Option<SocketMark>,
 ) {
     let result = http1::Builder::new()
         .preserve_header_case(true)

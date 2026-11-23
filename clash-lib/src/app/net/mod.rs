@@ -1,3 +1,6 @@
+mod socket_mark;
+pub use socket_mark::SocketMark;
+
 use network_interface::{
     NetworkInterface, NetworkInterfaceConfig, V4IfAddr, V6IfAddr,
 };
@@ -13,14 +16,14 @@ use tracing::trace;
 pub static DEFAULT_OUTBOUND_INTERFACE: LazyLock<
     Arc<tokio::sync::RwLock<Option<OutboundInterface>>>,
 > = LazyLock::new(Default::default);
-pub static TUN_SOMARK: LazyLock<tokio::sync::RwLock<Option<u32>>> =
+pub static TUN_SOMARK: LazyLock<tokio::sync::RwLock<Option<SocketMark>>> =
     LazyLock::new(Default::default);
 
 /// Initialize network configuration
 /// globally manage default outbound interface
 /// This function should be called as early as possible
 /// so that other config initialization can use the default outbound interface
-pub async fn init_net_config(tun_somark: Option<u32>) {
+pub async fn init_net_config(tun_somark: Option<SocketMark>) {
     *DEFAULT_OUTBOUND_INTERFACE.write().await = get_outbound_interface();
     *TUN_SOMARK.write().await = tun_somark;
 

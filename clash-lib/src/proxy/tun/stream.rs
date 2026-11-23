@@ -1,3 +1,4 @@
+use crate::app::net::SocketMark;
 use std::sync::Arc;
 
 use tracing::debug;
@@ -11,7 +12,7 @@ pub(crate) async fn handle_inbound_stream(
     stream: watfaq_netstack::TcpStream,
 
     dispatcher: Arc<Dispatcher>,
-    so_mark: Option<u32>,
+    so_mark: Option<SocketMark>,
 ) {
     let sess = Session {
         network: Network::Tcp,

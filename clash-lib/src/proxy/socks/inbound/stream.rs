@@ -157,14 +157,8 @@ pub async fn handle_tcp(
         }
         socks_command::UDP_ASSOCIATE => {
             let udp_addr = SocketAddr::new(s.local_addr()?.ip(), 0);
-            let udp_inbound = new_udp_socket(
-                Some(udp_addr),
-                None,
-                #[cfg(socket_mark)]
-                None,
-                None,
-            )
-            .await?;
+            let udp_inbound =
+                new_udp_socket(Some(udp_addr), None, None, None).await?;
 
             trace!(
                 "Got a UDP_ASSOCIATE request from {}, UDP assigned at {}",

@@ -1,3 +1,4 @@
+use crate::app::net::SocketMark;
 mod udp;
 
 use super::{channel_datagram::ChannelDatagram, inbound::InboundHandlerTrait};
@@ -24,7 +25,7 @@ pub struct TproxyInbound {
     addr: SocketAddr,
     allow_lan: bool,
     dispatcher: Arc<Dispatcher>,
-    fw_mark: Option<u32>,
+    fw_mark: Option<SocketMark>,
     dns_resolver: Option<ThreadSafeDNSResolver>,
     dns_hijack: bool,
 }
@@ -40,7 +41,7 @@ impl TproxyInbound {
         addr: SocketAddr,
         allow_lan: bool,
         dispatcher: Arc<Dispatcher>,
-        fw_mark: Option<u32>,
+        fw_mark: Option<SocketMark>,
         dns_resolver: Option<ThreadSafeDNSResolver>,
         dns_hijack: bool,
     ) -> Self {
@@ -141,7 +142,7 @@ impl InboundHandlerTrait for TproxyInbound {
     async fn listen_udp(&self) -> std::io::Result<()> {
         #[cfg(target_os = "android")]
         if let Some(mark) = self.fw_mark {
-            crate::proxy::utils::validate_android_socket_mark(mark)?;
+            mark.validate()?;
         }
         let (socket, dual_stack) =
             try_create_dualstack_socket(self.addr, socket2::Type::DGRAM)?;
@@ -261,7 +262,7 @@ async fn sendto_with_src(
 async fn handle_inbound_datagram(
     _allow_lan: bool,
     reply_sockets: Arc<ReplySockets>,
-    fw_mark: Option<u32>,
+    fw_mark: Option<SocketMark>,
     mut socket: UdpReceiver,
     dispatcher: Arc<Dispatcher>,
     dns_resolver: Option<ThreadSafeDNSResolver>,

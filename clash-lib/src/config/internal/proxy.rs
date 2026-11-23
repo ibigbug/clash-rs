@@ -386,7 +386,7 @@ pub struct OutboundWireguard {
 pub struct OutboundTor {
     pub name: String,
     pub interface: Option<String>,
-    pub routing_mark: Option<u32>,
+    pub routing_mark: Option<crate::app::net::SocketMark>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Debug, Default)]

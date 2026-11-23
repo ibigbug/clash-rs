@@ -1,6 +1,6 @@
 use super::dns::ThreadSafeDNSResolver;
 use crate::{
-    app::net::DEFAULT_OUTBOUND_INTERFACE,
+    app::net::{DEFAULT_OUTBOUND_INTERFACE, SocketMark},
     common::{
         errors::{IntoIoResultExt as _, new_io_error},
         timed_future::TimedFuture,
@@ -122,7 +122,7 @@ pub struct ProxyManager {
     proxy_state: Arc<RwLock<HashMap<String, ProxyState>>>,
     dns_resolver: ThreadSafeDNSResolver,
     /// Firewall Mark for url test
-    fw_mark: Option<u32>,
+    fw_mark: Option<SocketMark>,
     /// Monotonically increasing round counter for healthcheck backoff.
     /// Incremented each time `check()` is called.
     check_round: Arc<AtomicU64>,
@@ -147,7 +147,10 @@ pub struct SiteTuning {
 }
 
 impl ProxyManager {
-    pub fn new(dns_resolver: ThreadSafeDNSResolver, fw_mark: Option<u32>) -> Self {
+    pub fn new(
+        dns_resolver: ThreadSafeDNSResolver,
+        fw_mark: Option<SocketMark>,
+    ) -> Self {
         let backoff_rounds = std::env::var("CLASH_RS_BACKOFF_ROUNDS")
             .ok()
             .and_then(|s| s.parse().ok())

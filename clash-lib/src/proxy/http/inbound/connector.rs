@@ -1,5 +1,6 @@
 use crate::{
     Dispatcher,
+    app::net::SocketMark,
     proxy::{AnyStream, ProxyError},
     session::{Network, Session, Type},
 };
@@ -21,14 +22,14 @@ use super::proxy::maybe_socks_addr;
 pub struct Connector {
     src: SocketAddr,
     dispatcher: Arc<Dispatcher>,
-    fw_mark: Option<u32>,
+    fw_mark: Option<SocketMark>,
 }
 
 impl Connector {
     pub fn new(
         src: SocketAddr,
         dispatcher: Arc<Dispatcher>,
-        fw_mark: Option<u32>,
+        fw_mark: Option<SocketMark>,
     ) -> Self {
         Self {
             src,

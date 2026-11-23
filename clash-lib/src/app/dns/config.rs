@@ -1,7 +1,9 @@
 pub use super::dns_client::DNSNetMode;
 use crate::{
     Error,
-    app::net::{OutboundInterface, get_interface_by_name, get_outbound_interface},
+    app::net::{
+        OutboundInterface, SocketMark, get_interface_by_name, get_outbound_interface,
+    },
     common::trie,
     config::def::{DNSListen, DNSMode, EdnsClientSubnet as DefEdnsClientSubnet},
 };
@@ -66,7 +68,7 @@ pub struct Config {
     pub hosts: Option<trie::StringTrie<IpAddr>>,
     pub nameserver_policy: HashMap<String, NameServer>,
     pub edns_client_subnet: Option<EdnsClientSubnet>,
-    pub fw_mark: Option<u32>,
+    pub fw_mark: Option<SocketMark>,
     pub respect_rules: bool,
 }
 

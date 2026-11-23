@@ -129,7 +129,6 @@ impl Handler {
         let udp_socket = new_udp_socket(
             None,
             sess.iface.as_ref(),
-            #[cfg(socket_mark)]
             sess.so_mark,
             Some((bind_ip, bind_port).into()),
         )
@@ -223,7 +222,6 @@ impl OutboundHandler for Handler {
                 self.opts.server.as_str(),
                 self.opts.port,
                 sess.iface.as_ref(),
-                #[cfg(socket_mark)]
                 sess.so_mark,
             )
             .await?;
@@ -247,7 +245,6 @@ impl OutboundHandler for Handler {
                 self.opts.server.as_str(),
                 self.opts.port,
                 sess.iface.as_ref(),
-                #[cfg(socket_mark)]
                 sess.so_mark,
             )
             .await?;

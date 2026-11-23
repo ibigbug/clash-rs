@@ -9,6 +9,7 @@ use super::{
 };
 use crate::{
     Dispatcher,
+    app::net::SocketMark,
     proxy::{
         AnyStream,
         anytls::{duplex_buffer_size, relay_buffer_size},
@@ -221,7 +222,7 @@ pub(super) async fn handle_connection(
     acceptor: TlsAcceptor,
     dispatcher: Arc<Dispatcher>,
     user_map: Arc<HashMap<[u8; 32], String>>,
-    fw_mark: Option<u32>,
+    fw_mark: Option<SocketMark>,
     fallback: Option<String>,
 ) {
     use std::time::Duration;
@@ -291,7 +292,7 @@ async fn handle_udp_session(
     stream_id: u32,
     dispatcher: Arc<Dispatcher>,
     inbound_user: Option<String>,
-    fw_mark: Option<u32>,
+    fw_mark: Option<SocketMark>,
 ) {
     let (mut remote_read, mut remote_write) = tokio::io::split(tls_stream);
     let (mut app_stream, relay_stream) = tokio::io::duplex(duplex_buffer_size());
@@ -423,7 +424,7 @@ async fn handle_tcp_relay(
     stream_id: u32,
     dispatcher: Arc<Dispatcher>,
     inbound_user: Option<String>,
-    fw_mark: Option<u32>,
+    fw_mark: Option<SocketMark>,
 ) {
     let (mut remote_read, mut remote_write) = tokio::io::split(tls_stream);
     let (app_stream, relay_stream) = tokio::io::duplex(duplex_buffer_size());

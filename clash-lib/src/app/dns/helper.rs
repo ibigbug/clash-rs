@@ -1,5 +1,5 @@
 use crate::{
-    app::net::DEFAULT_OUTBOUND_INTERFACE,
+    app::net::{DEFAULT_OUTBOUND_INTERFACE, SocketMark},
     config::internal::proxy::PROXY_DIRECT,
     dns::{
         ClashResolver, EdnsClientSubnet, RuleDispatch, ThreadSafeDNSClient,
@@ -21,7 +21,7 @@ pub async fn make_clients(
     resolver: Option<Arc<dyn ClashResolver>>,
     outbounds: OutboundHandlerRegistry,
     edns_client_subnet: Option<EdnsClientSubnet>,
-    fw_mark: Option<u32>,
+    fw_mark: Option<SocketMark>,
     rule_dispatch: Option<Arc<RuleDispatch>>,
 ) -> Vec<ThreadSafeDNSClient> {
     let mut rv = Vec::new();

@@ -2,7 +2,7 @@ use crate::{
     app::{
         dispatcher::Dispatcher,
         dns::{ThreadSafeDNSResolver, exchange_with_resolver},
-        net::DEFAULT_OUTBOUND_INTERFACE,
+        net::{DEFAULT_OUTBOUND_INTERFACE, SocketMark},
     },
     proxy::{channel_datagram::ChannelDatagram, datagram::UdpPacket},
     session::{Network, Session, Type},
@@ -14,7 +14,7 @@ pub(crate) async fn handle_inbound_datagram(
     socket: watfaq_netstack::UdpSocket,
     dispatcher: Arc<Dispatcher>,
     resolver: ThreadSafeDNSResolver,
-    so_mark: Option<u32>,
+    so_mark: Option<SocketMark>,
     dns_hijack: bool,
 ) {
     // tun i/o

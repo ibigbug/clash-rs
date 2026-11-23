@@ -1,5 +1,6 @@
 //! AnyTLS inbound listener — thin orchestrator.
 
+use crate::app::net::SocketMark;
 mod datagram;
 mod framing;
 mod handler;
@@ -36,7 +37,7 @@ pub struct InboundOptions {
     pub private_key: Option<String>,
     pub allow_lan: bool,
     pub dispatcher: Arc<Dispatcher>,
-    pub fw_mark: Option<u32>,
+    pub fw_mark: Option<SocketMark>,
     /// Optional fallback address (`host:port`) for unauthenticated connections.
     pub fallback: Option<String>,
     /// Watch receiver for the live user list.
@@ -47,7 +48,7 @@ pub struct AnytlsInbound {
     addr: SocketAddr,
     allow_lan: bool,
     dispatcher: Arc<Dispatcher>,
-    fw_mark: Option<u32>,
+    fw_mark: Option<SocketMark>,
     tls_acceptor: TlsAcceptor,
     password: String,
     fallback: Option<String>,

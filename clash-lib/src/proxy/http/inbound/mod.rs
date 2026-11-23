@@ -1,3 +1,4 @@
+use crate::app::net::SocketMark;
 mod auth;
 mod connector;
 mod proxy;
@@ -22,7 +23,7 @@ pub struct HttpInbound {
     allow_lan: bool,
     dispatcher: Arc<Dispatcher>,
     authenticator: ThreadSafeAuthenticator,
-    fw_mark: Option<u32>,
+    fw_mark: Option<SocketMark>,
 }
 
 impl Drop for HttpInbound {
@@ -37,7 +38,7 @@ impl HttpInbound {
         allow_lan: bool,
         dispatcher: Arc<Dispatcher>,
         authenticator: ThreadSafeAuthenticator,
-        fw_mark: Option<u32>,
+        fw_mark: Option<SocketMark>,
     ) -> Self {
         Self {
             addr,

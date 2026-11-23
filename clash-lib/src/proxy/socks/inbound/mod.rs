@@ -1,3 +1,4 @@
+use crate::app::net::SocketMark;
 mod datagram;
 mod stream;
 
@@ -24,7 +25,7 @@ pub struct SocksInbound {
     allow_lan: bool,
     dispatcher: Arc<Dispatcher>,
     authenticator: ThreadSafeAuthenticator,
-    fw_mark: Option<u32>,
+    fw_mark: Option<SocketMark>,
 }
 
 impl Drop for SocksInbound {
@@ -39,7 +40,7 @@ impl SocksInbound {
         allow_lan: bool,
         dispatcher: Arc<Dispatcher>,
         authenticator: ThreadSafeAuthenticator,
-        fw_mark: Option<u32>,
+        fw_mark: Option<SocketMark>,
     ) -> Self {
         Self {
             addr,
