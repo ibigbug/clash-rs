@@ -62,24 +62,40 @@ impl UdpPacket {
 /// stream (UDP-over-TCP style outbounds).
 ///
 /// ```text
-/// Idle ──start(frame)──▶ Writing(frame) ──drained──▶ Flushing ──▶ Idle
-///                              │                         │
-///                              └───── io error ──────────┴──▶ Idle (dropped)
+/// Idle ──start(frame)──▶ Writing ──drained──▶ Flushing ──▶ Idle
+///                          │  │                   └─ flush err ─▶ Idle
+///                          │  └─ err, no bytes written ─▶ Idle (dropped)
+///                          └─── err after partial write ─▶ Broken (terminal)
 /// ```
 ///
 /// A frame is encoded once in `start_send` and drained across as many polls
-/// as the inner writer needs. On an I/O error the frame is dropped and the
-/// state returns to `Idle`, so the sink never wedges on a packet it cannot
-/// send; the error is still reported to the caller.
+/// as the inner writer needs. If a write fails before any byte of the frame
+/// was accepted, the frame is dropped and the sink stays usable. If it fails
+/// after part of the frame is on the wire, the byte stream is no longer
+/// frame-aligned, so the sink becomes `Broken` and refuses every later frame
+/// rather than let the peer misparse them.
 #[derive(Debug, Default)]
 pub(crate) enum StreamSendState {
     #[default]
     Idle,
-    Writing(bytes::BytesMut),
+    Writing {
+        buf: bytes::BytesMut,
+        /// At least one byte of this frame has been written.
+        started: bool,
+    },
     Flushing,
+    Broken,
+}
+
+fn desynced() -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::BrokenPipe,
+        "udp stream desynchronized by a partially written frame",
+    )
 }
 
 impl StreamSendState {
+    #[cfg(test)]
     pub(crate) fn is_idle(&self) -> bool {
         matches!(self, Self::Idle)
     }
@@ -87,14 +103,20 @@ impl StreamSendState {
     /// Queue an encoded frame. Callers must only do this from `start_send`,
     /// i.e. after `poll_ready` (and therefore `poll_send`) returned `Ready`.
     pub(crate) fn start(&mut self, frame: bytes::BytesMut) -> std::io::Result<()> {
-        if !self.is_idle() {
-            return Err(std::io::Error::new(
+        match self {
+            Self::Idle => {
+                *self = Self::Writing {
+                    buf: frame,
+                    started: false,
+                };
+                Ok(())
+            }
+            Self::Broken => Err(desynced()),
+            Self::Writing { .. } | Self::Flushing => Err(std::io::Error::new(
                 std::io::ErrorKind::WouldBlock,
                 "previous packet not yet sent",
-            ));
+            )),
         }
-        *self = Self::Writing(frame);
-        Ok(())
     }
 
     /// Drive the queued frame to completion: write it fully, then flush.
@@ -113,29 +135,34 @@ impl StreamSendState {
         loop {
             match self {
                 Self::Idle => return Poll::Ready(Ok(())),
-                Self::Writing(buf) => {
+                Self::Broken => return Poll::Ready(Err(desynced())),
+                Self::Writing { buf, started } => {
                     if buf.is_empty() {
                         *self = Self::Flushing;
                         continue;
                     }
-                    let n = match ready!(w.as_mut().poll_write(cx, buf)) {
-                        Ok(n) => n,
-                        Err(e) => {
-                            *self = Self::Idle;
-                            return Poll::Ready(Err(e));
-                        }
-                    };
-                    if n == 0 {
+                    let res = match ready!(w.as_mut().poll_write(cx, buf)) {
                         // Ok(0) from poll_write means the stream is closed.
-                        *self = Self::Idle;
-                        return Poll::Ready(Err(std::io::Error::new(
+                        Ok(0) => Err(std::io::Error::new(
                             std::io::ErrorKind::WriteZero,
                             "failed to write udp packet: stream closed",
-                        )));
+                        )),
+                        res => res,
+                    };
+                    match res {
+                        Ok(n) => {
+                            buf.advance(n);
+                            *started = true;
+                        }
+                        Err(e) => {
+                            *self = if *started { Self::Broken } else { Self::Idle };
+                            return Poll::Ready(Err(e));
+                        }
                     }
-                    buf.advance(n);
                 }
                 Self::Flushing => {
+                    // The whole frame is written, so the stream stays
+                    // frame-aligned even if the flush fails.
                     let res = ready!(w.as_mut().poll_flush(cx));
                     *self = Self::Idle;
                     return Poll::Ready(res);
@@ -164,6 +191,8 @@ mod tests {
         toggle: bool,
         closed: bool,
         flushes: usize,
+        /// Return an error once this many bytes have been accepted.
+        fail_after: Option<usize>,
     }
 
     impl AsyncWrite for Trickle {
@@ -174,6 +203,9 @@ mod tests {
         ) -> Poll<io::Result<usize>> {
             if self.closed {
                 return Poll::Ready(Ok(0));
+            }
+            if self.fail_after.is_some_and(|n| self.out.len() >= n) {
+                return Poll::Ready(Err(io::ErrorKind::Interrupted.into()));
             }
             self.toggle = !self.toggle;
             if self.toggle {
@@ -208,6 +240,7 @@ mod tests {
             toggle: false,
             closed,
             flushes: 0,
+            fail_after: None,
         }
     }
 
@@ -238,5 +271,51 @@ mod tests {
         // Not wedged: idle again and accepts the next frame.
         assert!(st.is_idle());
         st.start(BytesMut::from(&b"y"[..])).unwrap();
+    }
+
+    #[tokio::test]
+    async fn error_after_partial_write_breaks_sink() {
+        let mut w = trickle(false);
+        w.fail_after = Some(3);
+        let mut st = StreamSendState::default();
+        st.start(BytesMut::from(&b"frame-one"[..])).unwrap();
+        // Writes 3 bytes, then the writer errors mid-frame.
+        assert!(
+            std::future::poll_fn(|cx| st.poll_send(Pin::new(&mut w), cx))
+                .await
+                .is_err()
+        );
+        assert_eq!(w.out, b"fra");
+
+        // Even if the writer recovers, no later frame may follow the fragment.
+        w.fail_after = None;
+        let err = st.start(BytesMut::from(&b"frame-two"[..])).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::BrokenPipe);
+        let err = std::future::poll_fn(|cx| st.poll_send(Pin::new(&mut w), cx))
+            .await
+            .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::BrokenPipe);
+        assert_eq!(w.out, b"fra", "nothing written after the fragment");
+    }
+
+    #[tokio::test]
+    async fn error_before_any_byte_drops_frame_only() {
+        let mut w = trickle(false);
+        w.fail_after = Some(0);
+        let mut st = StreamSendState::default();
+        st.start(BytesMut::from(&b"lost"[..])).unwrap();
+        assert!(
+            std::future::poll_fn(|cx| st.poll_send(Pin::new(&mut w), cx))
+                .await
+                .is_err()
+        );
+        assert!(st.is_idle(), "stream still frame-aligned, sink reusable");
+
+        w.fail_after = None;
+        st.start(BytesMut::from(&b"next"[..])).unwrap();
+        std::future::poll_fn(|cx| st.poll_send(Pin::new(&mut w), cx))
+            .await
+            .unwrap();
+        assert_eq!(w.out, b"next");
     }
 }

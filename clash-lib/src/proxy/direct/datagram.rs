@@ -110,7 +110,11 @@ impl Sink<UdpPacket> for OutboundDatagramImpl {
         let pin = self.get_mut();
         // Sink contract: start_send follows a Ready poll_ready, so we should
         // be Idle. If not, the queued packet is superseded.
-        if let SendState::Resolving { task, .. } = &pin.send {
+        // Take the old state first so a failure below cannot leave an
+        // aborted task behind in `Resolving`.
+        if let SendState::Resolving { task, .. } =
+            std::mem::replace(&mut pin.send, SendState::Idle)
+        {
             task.abort();
         }
         pin.send = match &item.dst_addr {
@@ -161,8 +165,15 @@ impl Sink<UdpPacket> for OutboundDatagramImpl {
                     // IPv4-mapped IPv6 addresses (::ffff:x.x.x.x). Tokio's
                     // poll_send_to does not do this automatically and will
                     // return EINVAL otherwise.
-                    let send_dst = match (this.inner.local_addr(), dst) {
-                        (Ok(local), SocketAddr::V4(v4)) if local.is_ipv6() => {
+                    let local = match this.inner.local_addr() {
+                        Ok(local) => local,
+                        Err(e) => {
+                            this.send = SendState::Idle;
+                            return Poll::Ready(Err(e));
+                        }
+                    };
+                    let send_dst = match (local, dst) {
+                        (local, SocketAddr::V4(v4)) if local.is_ipv6() => {
                             SocketAddr::V6(std::net::SocketAddrV6::new(
                                 v4.ip().to_ipv6_mapped(),
                                 v4.port(),
