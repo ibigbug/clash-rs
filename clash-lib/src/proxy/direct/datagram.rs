@@ -15,27 +15,44 @@ use tokio::{io::ReadBuf, net::UdpSocket, task::JoinHandle};
 
 const UDP_DOMAIN_MAP_TTL: Duration = Duration::from_secs(60);
 
+/// Send-side state of [`OutboundDatagramImpl`].
+///
+/// ```text
+/// Idle ──start_send(ip)─────────────────────────────▶ Sending
+///   └───start_send(domain)──▶ Resolving ──resolved──▶ Sending ──sent──▶ Idle
+///                                 └──── dns error ───▶ Idle (dropped)
+/// ```
+///
+/// Any error drops the queued packet and returns to `Idle`, so one
+/// unresolvable or unsendable packet cannot block the packets behind it.
+enum SendState {
+    Idle,
+    /// DNS lookup for a domain destination is in flight. Uses a spawned task
+    /// (`JoinHandle` is `Send + Sync`) rather than a boxed future so the
+    /// datagram satisfies the `Sync` bound required by
+    /// `InstrumentedDatagram`; it is spawned once and awaited across polls.
+    Resolving {
+        pkt: UdpPacket,
+        task: JoinHandle<io::Result<SocketAddr>>,
+    },
+    /// Destination resolved; waiting for the socket to accept the datagram.
+    Sending {
+        pkt: UdpPacket,
+        dst: SocketAddr,
+    },
+}
+
 #[must_use = "sinks do nothing unless polled"]
 // TODO: maybe we should use abstract datagram IO interface instead of the
 // Stream + Sink trait
 pub struct OutboundDatagramImpl {
     inner: UdpSocket,
     resolver: ThreadSafeDNSResolver,
-    flushed: bool,
-    pkt: Option<UdpPacket>,
+    send: SendState,
     recv_buf: Vec<u8>,
     // real upstream IP → dst_addr of the most recent outgoing packet to that
     // IP; used in poll_next to translate src_addr back to dst_addr.
     ip_to_logical: HashMap<SocketAddr, (SocksAddr, Instant)>,
-    /// In-flight DNS resolution task for the current queued packet.
-    /// Using a JoinHandle (Send + Sync) rather than a raw BoxFuture so that
-    /// OutboundDatagramImpl satisfies the Sync bound required by
-    /// InstrumentedDatagram. The task is spawned once and awaited across polls
-    /// — no query restarts.
-    pending_dns: Option<JoinHandle<io::Result<SocketAddr>>>,
-    /// Resolved IP for the current queued packet; reused across poll_send_to
-    /// retries so we never re-poll an already-completed DNS task.
-    resolved_dst: Option<SocketAddr>,
 }
 
 impl OutboundDatagramImpl {
@@ -43,13 +60,39 @@ impl OutboundDatagramImpl {
         Self {
             inner: udp,
             resolver,
-            flushed: true,
-            pkt: None,
+            send: SendState::Idle,
             recv_buf: vec![0u8; 65535],
             ip_to_logical: HashMap::new(),
-            pending_dns: None,
-            resolved_dst: None,
         }
+    }
+
+    fn spawn_resolve(
+        &self,
+        domain: String,
+        port: u16,
+    ) -> io::Result<JoinHandle<io::Result<SocketAddr>>> {
+        let is_ipv6 = self.inner.local_addr()?.is_ipv6();
+        let resolver = self.resolver.clone();
+        Ok(tokio::spawn(async move {
+            let ip = if is_ipv6 {
+                resolver
+                    .resolve(&domain, false)
+                    .await
+                    .map_err(|_| io::Error::other("resolve domain failed"))?
+            } else {
+                resolver
+                    .resolve_v4(&domain, false)
+                    .await
+                    .map_err(|_| io::Error::other("resolve domain failed"))?
+                    .map(IpAddr::V4)
+            };
+            match ip {
+                Some(ip) => Ok(SocketAddr::from((ip, port))),
+                None => {
+                    Err(io::Error::other(format!("resolve domain failed: {domain}")))
+                }
+            }
+        }))
     }
 }
 
@@ -60,146 +103,103 @@ impl Sink<UdpPacket> for OutboundDatagramImpl {
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Result<(), Self::Error>> {
-        if !self.flushed {
-            match self.poll_flush(cx)? {
-                Poll::Ready(()) => {}
-                Poll::Pending => return Poll::Pending,
-            }
-        }
-
-        Poll::Ready(Ok(()))
+        self.poll_flush(cx)
     }
 
     fn start_send(self: Pin<&mut Self>, item: UdpPacket) -> Result<(), Self::Error> {
         let pin = self.get_mut();
-        if let Some(handle) = pin.pending_dns.take() {
-            handle.abort();
+        // Sink contract: start_send follows a Ready poll_ready, so we should
+        // be Idle. If not, the queued packet is superseded.
+        if let SendState::Resolving { task, .. } = &pin.send {
+            task.abort();
         }
-        pin.pkt = Some(item);
-        pin.flushed = false;
-        pin.resolved_dst = None;
+        pin.send = match &item.dst_addr {
+            SocksAddr::Ip(addr) => SendState::Sending {
+                dst: *addr,
+                pkt: item,
+            },
+            SocksAddr::Domain(domain, port) => SendState::Resolving {
+                task: pin.spawn_resolve(domain.clone(), *port)?,
+                pkt: item,
+            },
+        };
         Ok(())
     }
 
     fn poll_flush(
-        mut self: Pin<&mut Self>,
+        self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Result<(), Self::Error>> {
-        if self.flushed {
-            return Poll::Ready(Ok(()));
-        }
-
-        let Self {
-            ref mut inner,
-            ref mut pkt,
-            ref resolver,
-            ref mut ip_to_logical,
-            ref mut pending_dns,
-            ref mut resolved_dst,
-            ..
-        } = *self;
-
-        let p = pkt
-            .as_ref()
-            .ok_or_else(|| io::Error::other("no packet to send"))?;
-
-        let dst = match &p.dst_addr {
-            SocksAddr::Ip(addr) => {
-                // Explicit IP path: clear any stale DNS state from a prior
-                // packet.
-                *pending_dns = None;
-                *resolved_dst = None;
-                *addr
-            }
-            SocksAddr::Domain(domain, port) => {
-                if let Some(addr) = *resolved_dst {
-                    // Already resolved on a prior poll; skip DNS entirely.
-                    addr
-                } else {
-                    let is_ipv6 = inner.local_addr()?.is_ipv6();
-                    let handle = pending_dns.get_or_insert_with(|| {
-                        let resolver = resolver.clone();
-                        let domain = domain.clone();
-                        let port = *port;
-                        tokio::spawn(async move {
-                            let ip = if is_ipv6 {
-                                resolver.resolve(&domain, false).await.map_err(
-                                    |_| io::Error::other("resolve domain failed"),
-                                )?
-                            } else {
-                                resolver
-                                    .resolve_v4(&domain, false)
-                                    .await
-                                    .map_err(|_| {
-                                        io::Error::other("resolve domain failed")
-                                    })?
-                                    .map(IpAddr::V4)
-                            };
-                            match ip {
-                                Some(ip) => Ok(SocketAddr::from((ip, port))),
-                                None => Err(io::Error::other(format!(
-                                    "resolve domain failed: {domain}"
-                                ))),
-                            }
-                        })
-                    });
-                    let join_result = ready!(Pin::new(handle).poll(cx));
-                    // Always clear the handle once it has completed (regardless
-                    // of success or failure). If we skip
-                    // this on the error path the
-                    // handle stays in `pending_dns` and the next call to
-                    // `poll_flush` will try to poll an already-completed
-                    // `JoinHandle`, which panics with "JoinHandle polled after
-                    // completion".
-                    *pending_dns = None;
-                    let addr = match join_result {
-                        Ok(result) => result?,
+        let this = self.get_mut();
+        loop {
+            match &mut this.send {
+                SendState::Idle => return Poll::Ready(Ok(())),
+                SendState::Resolving { task, .. } => {
+                    let join_result = ready!(Pin::new(task).poll(cx));
+                    // The task has completed: leave Resolving now so the
+                    // JoinHandle is never polled again.
+                    let SendState::Resolving { pkt, .. } =
+                        std::mem::replace(&mut this.send, SendState::Idle)
+                    else {
+                        unreachable!("matched Resolving above");
+                    };
+                    let dst = match join_result {
+                        Ok(Ok(dst)) => dst,
+                        Ok(Err(e)) => return Poll::Ready(Err(e)),
                         Err(e) => {
                             return Poll::Ready(Err(io::Error::other(format!(
                                 "DNS task panicked: {e}"
                             ))));
                         }
                     };
-                    *resolved_dst = Some(addr);
-                    addr
+                    this.send = SendState::Sending { pkt, dst };
+                }
+                SendState::Sending { pkt, dst } => {
+                    let dst = *dst;
+                    // When sending from a dual-stack AF_INET6 socket, the OS
+                    // requires IPv4 destinations to be expressed as
+                    // IPv4-mapped IPv6 addresses (::ffff:x.x.x.x). Tokio's
+                    // poll_send_to does not do this automatically and will
+                    // return EINVAL otherwise.
+                    let send_dst = match (this.inner.local_addr(), dst) {
+                        (Ok(local), SocketAddr::V4(v4)) if local.is_ipv6() => {
+                            SocketAddr::V6(std::net::SocketAddrV6::new(
+                                v4.ip().to_ipv6_mapped(),
+                                v4.port(),
+                                0,
+                                0,
+                            ))
+                        }
+                        _ => dst,
+                    };
+
+                    let res = ready!(this.inner.poll_send_to(
+                        cx,
+                        pkt.data.as_slice(),
+                        send_dst
+                    ));
+                    let SendState::Sending { pkt, .. } =
+                        std::mem::replace(&mut this.send, SendState::Idle)
+                    else {
+                        unreachable!("matched Sending above");
+                    };
+                    let n = res?;
+
+                    let now = Instant::now();
+                    this.ip_to_logical.retain(|_, (_, ts)| {
+                        now.duration_since(*ts) < UDP_DOMAIN_MAP_TTL
+                    });
+                    this.ip_to_logical.insert(dst, (pkt.dst_addr, now));
+
+                    return if n == pkt.data.len() {
+                        Poll::Ready(Ok(()))
+                    } else {
+                        Poll::Ready(Err(new_io_error(format!(
+                            "failed to send all data, only sent {n} bytes"
+                        ))))
+                    };
                 }
             }
-        };
-
-        // When sending from a dual-stack AF_INET6 socket, the OS requires IPv4
-        // destinations to be expressed as IPv4-mapped IPv6 addresses
-        // (::ffff:x.x.x.x). Tokio's poll_send_to does not do this automatically
-        // and will return EINVAL otherwise.
-        let send_dst = match (inner.local_addr()?.is_ipv6(), dst) {
-            (true, SocketAddr::V4(v4)) => {
-                SocketAddr::V6(std::net::SocketAddrV6::new(
-                    v4.ip().to_ipv6_mapped(),
-                    v4.port(),
-                    0,
-                    0,
-                ))
-            }
-            _ => dst,
-        };
-
-        let n = ready!(inner.poll_send_to(cx, p.data.as_slice(), send_dst))?;
-
-        let now = Instant::now();
-        ip_to_logical
-            .retain(|_, (_, ts)| now.duration_since(*ts) < UDP_DOMAIN_MAP_TTL);
-        ip_to_logical.insert(dst, (p.dst_addr.clone(), now));
-        // Save length before clearing pkt (NLL ends p's borrow after this).
-        let data_len = p.data.len();
-
-        *pkt = None;
-        self.flushed = true;
-
-        if n == data_len {
-            Poll::Ready(Ok(()))
-        } else {
-            Poll::Ready(Err(new_io_error(format!(
-                "failed to send all data, only sent {n} bytes"
-            ))))
         }
     }
 
@@ -365,8 +365,50 @@ mod tests {
         assert!(got.contains(&dst_b), "missing echo2.test src_addr");
     }
 
-    /// When DNS resolution fails, `poll_flush` must return an error and clear
-    /// `pending_dns` so that a subsequent `send` can start a fresh DNS query
+    /// A packet whose domain never resolves must be dropped, not retried on
+    /// every subsequent `poll_ready`, so later packets still go out.
+    #[tokio::test]
+    async fn test_unresolvable_domain_does_not_block_sink() {
+        let mut resolver = MockClashResolver::new();
+        resolver
+            .expect_resolve_v4()
+            .returning(|_, _| Err(anyhow::anyhow!("NXDOMAIN")));
+        let udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let mut datagram = OutboundDatagramImpl::new(udp, Arc::new(resolver));
+        let echo_port = spawn_echo_server().await;
+
+        let bad = SocksAddr::Domain("nx.test".to_owned(), echo_port);
+        assert!(
+            datagram
+                .send(UdpPacket {
+                    data: b"lost".to_vec(),
+                    dst_addr: bad,
+                    ..Default::default()
+                })
+                .await
+                .is_err()
+        );
+
+        let good = SocksAddr::Ip((Ipv4Addr::LOCALHOST, echo_port).into());
+        datagram
+            .send(UdpPacket {
+                data: b"ok".to_vec(),
+                dst_addr: good.clone(),
+                ..Default::default()
+            })
+            .await
+            .expect("send to an IP must not be blocked by the failed domain");
+
+        let pkt = tokio::time::timeout(Duration::from_secs(2), datagram.next())
+            .await
+            .expect("echo timed out")
+            .expect("stream ended");
+        assert_eq!(pkt.data, b"ok");
+        assert_eq!(pkt.src_addr, good);
+    }
+
+    /// When DNS resolution fails, `poll_flush` must return an error and leave
+    /// `Resolving` so that a subsequent `send` can start a fresh DNS query
     /// without panicking with "JoinHandle polled after completion".
     #[tokio::test]
     async fn test_dns_failure_does_not_panic_on_retry() {
