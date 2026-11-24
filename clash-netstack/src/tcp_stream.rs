@@ -83,10 +83,17 @@ impl tokio::io::AsyncRead for TcpStream {
             // wake() is a no-op (no waker stored). The re-check below detects
             // the buffer is now non-empty and falls through to read it.
             self.handle.recv_waker.register(cx.waker());
+            // Load the close flag BEFORE re-checking the buffer. poll_sockets
+            // enqueues data and only then sets READ_CLOSED / SOCKET_GONE, so
+            // if we observe the flag (Acquire) every byte enqueued before it
+            // is visible to the emptiness check below. Checking in the other
+            // order lets data + FIN land between the two loads and we would
+            // report EOF with the final bytes still in recv_buffer.
+            let closed = self.handle.close.read_eof();
             if read_buf.is_empty() {
                 // Return EOF when smoltcp is done (socket removed) OR when the
                 // read half was explicitly closed (peer FIN / local drop).
-                if self.handle.close.read_eof() {
+                if closed {
                     trace!("TcpStream::poll_read: socket closed, returning EOF");
                     return std::task::Poll::Ready(Ok(()));
                 }
@@ -211,6 +218,57 @@ mod tests {
 
         assert!(matches!(result, Poll::Ready(Ok(()))));
         assert_eq!(buf.filled().len(), 0);
+    }
+
+    #[test]
+    fn poll_read_drains_data_before_eof() {
+        let (mut stream, _rx) = build_stream();
+        // poll_sockets order: enqueue the final bytes, then mark peer FIN.
+        stream.handle.recv_buffer.enqueue_slice(b"tail");
+        stream.handle.close.peer_fin();
+        let mut cx = noop_cx();
+        let mut bytes = [0u8; 16];
+
+        let mut buf = tokio::io::ReadBuf::new(&mut bytes);
+        let result = Pin::new(&mut stream).poll_read(&mut cx, &mut buf);
+        assert!(matches!(result, Poll::Ready(Ok(()))));
+        assert_eq!(buf.filled(), b"tail");
+
+        let mut buf = tokio::io::ReadBuf::new(&mut bytes);
+        let result = Pin::new(&mut stream).poll_read(&mut cx, &mut buf);
+        assert!(matches!(result, Poll::Ready(Ok(()))));
+        assert!(buf.filled().is_empty(), "EOF only after the buffer drains");
+    }
+
+    /// Stress the data-then-FIN handoff across threads: the reader must see
+    /// every byte before EOF, however the two stores interleave with its
+    /// loads.
+    #[test]
+    fn poll_read_never_loses_tail_bytes_racing_fin() {
+        for _ in 0..10_000 {
+            let (stream, _rx) = build_stream();
+            let handle = stream.handle.clone();
+            let producer = std::thread::spawn(move || {
+                handle.recv_buffer.enqueue_slice(b"x");
+                handle.close.peer_fin();
+                handle.recv_waker.wake();
+            });
+            let mut stream = stream;
+            let mut cx = noop_cx();
+            let mut got = 0usize;
+            loop {
+                let mut bytes = [0u8; 4];
+                let mut buf = tokio::io::ReadBuf::new(&mut bytes);
+                match Pin::new(&mut stream).poll_read(&mut cx, &mut buf) {
+                    Poll::Ready(Ok(())) if buf.filled().is_empty() => break,
+                    Poll::Ready(Ok(())) => got += buf.filled().len(),
+                    Poll::Ready(Err(e)) => panic!("{e}"),
+                    Poll::Pending => std::hint::spin_loop(),
+                }
+            }
+            producer.join().unwrap();
+            assert_eq!(got, 1, "tail byte lost before EOF");
+        }
     }
 
     #[test]
