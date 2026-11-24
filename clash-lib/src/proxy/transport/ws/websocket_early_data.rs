@@ -36,12 +36,9 @@ type HandshakeFuture =
 /// upgrade request header, so nothing can be read or flushed until the
 /// handshake completes.
 enum State {
-    /// Waiting for the first write to supply early data.
-    Idle {
-        stream: AnyStream,
-        req: Request<()>,
-        ws_config: Option<WebSocketConfig>,
-    },
+    /// Waiting for the first write to supply early data. Boxed: the request
+    /// and config dwarf the other variants.
+    Idle(Box<IdleParts>),
     /// Upgrade request sent; `sent` is how many bytes of the caller's first
     /// buffer it carries and is reported once the handshake succeeds.
     Connecting { fut: HandshakeFuture, sent: usize },
@@ -51,10 +48,16 @@ enum State {
     Failed,
 }
 
+struct IdleParts {
+    stream: AnyStream,
+    req: Request<()>,
+    ws_config: Option<WebSocketConfig>,
+}
+
 impl State {
     fn name(&self) -> &'static str {
         match self {
-            State::Idle { .. } => "idle",
+            State::Idle(_) => "idle",
             State::Connecting { .. } => "connecting",
             State::Open(_) => "open",
             State::Failed => "failed",
@@ -98,11 +101,11 @@ impl WebsocketEarlyDataConn {
         early_data_len: usize,
     ) -> Self {
         Self {
-            state: State::Idle {
+            state: State::Idle(Box::new(IdleParts {
                 stream,
                 req,
                 ws_config,
-            },
+            })),
             read_waker: None,
             flush_waker: None,
             early_data_header_name,
@@ -138,14 +141,15 @@ impl WebsocketEarlyDataConn {
     /// `Idle` → `Connecting`: put the first `early_data_len` bytes of `buf`
     /// into the upgrade request header and start the handshake.
     fn start_handshake(&mut self, buf: &[u8]) -> io::Result<()> {
-        let State::Idle {
-            stream,
-            mut req,
-            ws_config,
-        } = std::mem::replace(&mut self.state, State::Failed)
+        let State::Idle(idle) = std::mem::replace(&mut self.state, State::Failed)
         else {
             unreachable!("start_handshake called outside Idle");
         };
+        let IdleParts {
+            stream,
+            mut req,
+            ws_config,
+        } = *idle;
 
         let sent = cmp::min(self.early_data_len, buf.len());
         let name = HeaderName::from_bytes(self.early_data_header_name.as_bytes())
@@ -183,7 +187,7 @@ impl AsyncRead for WebsocketEarlyDataConn {
         match &mut this.state {
             State::Open(s) => Pin::new(s).poll_read(cx, buf),
             State::Failed => Poll::Ready(Err(handshake_failed())),
-            State::Idle { .. } | State::Connecting { .. } => {
+            State::Idle(_) | State::Connecting { .. } => {
                 this.read_waker = Some(cx.waker().clone());
                 Poll::Pending
             }
@@ -200,7 +204,7 @@ impl AsyncWrite for WebsocketEarlyDataConn {
         let this = self.get_mut();
         loop {
             match &mut this.state {
-                State::Idle { .. } => {
+                State::Idle(_) => {
                     if let Err(e) = this.start_handshake(buf) {
                         this.wake_parked();
                         return Poll::Ready(Err(e));
@@ -231,7 +235,7 @@ impl AsyncWrite for WebsocketEarlyDataConn {
         match &mut this.state {
             State::Open(s) => Pin::new(s).poll_flush(cx),
             State::Failed => Poll::Ready(Err(handshake_failed())),
-            State::Idle { .. } | State::Connecting { .. } => {
+            State::Idle(_) | State::Connecting { .. } => {
                 this.flush_waker = Some(cx.waker().clone());
                 Poll::Pending
             }
@@ -246,7 +250,7 @@ impl AsyncWrite for WebsocketEarlyDataConn {
         match &mut this.state {
             State::Open(s) => Pin::new(s).poll_shutdown(cx),
             State::Failed => Poll::Ready(Err(handshake_failed())),
-            State::Idle { .. } | State::Connecting { .. } => {
+            State::Idle(_) | State::Connecting { .. } => {
                 this.flush_waker = Some(cx.waker().clone());
                 Poll::Pending
             }
@@ -303,6 +307,8 @@ mod tests {
 
     /// Accept the upgrade, echoing the early-data header back so the client's
     /// subprotocol check passes, and return the decoded early data.
+    // The callback's error type is fixed by tungstenite's `Callback` trait.
+    #[allow(clippy::result_large_err)]
     async fn accept(
         server: DuplexStream,
     ) -> (WebSocketStream<DuplexStream>, Vec<u8>) {
