@@ -1,7 +1,7 @@
 use std::{
     io,
     pin::Pin,
-    task::{Context, Poll, Waker, ready},
+    task::{Context, Poll, ready},
 };
 
 use bytes::{BufMut, BytesMut};
@@ -35,8 +35,10 @@ enum WriteState {
 /// Read side of the VLESS handshake.
 ///
 /// The response header is `version (1) | addon_len (1) | addon (addon_len)`.
-/// It can only arrive after the request was sent, so reads wait for the write
-/// side to leave `WriteState::Idle` before touching `inner`.
+/// It can only arrive after the request was sent. While the write side is
+/// still `Idle`, reads pass through to `inner` so EOF/reset is still observed
+/// (e.g. the client closes without sending anything); any actual data at that
+/// point is a protocol violation.
 enum ReadState {
     /// Reading the 2-byte fixed response header.
     Header { hdr: [u8; 2], filled: usize },
@@ -50,8 +52,6 @@ pub struct VlessStream {
     inner: AnyStream,
     write_state: WriteState,
     read_state: ReadState,
-    /// Reader parked while the request has not been sent yet.
-    read_waker: Option<Waker>,
     uuid: uuid::Uuid,
     destination: SocksAddr,
     is_udp: bool,
@@ -79,7 +79,6 @@ impl VlessStream {
                 hdr: [0; 2],
                 filled: 0,
             },
-            read_waker: None,
             uuid,
             destination: destination.clone(),
             is_udp,
@@ -113,6 +112,37 @@ impl VlessStream {
 
         self.destination.write_to_buf_vmess(&mut buf);
         buf
+    }
+
+    /// `Sending` → `Open`: drain the encoded request header + first payload
+    /// into `inner`. Returns the caller-visible length of that first payload.
+    fn poll_drain_header(
+        &mut self,
+        cx: &mut Context<'_>,
+    ) -> Poll<io::Result<usize>> {
+        let WriteState::Sending {
+            buf: header,
+            pos,
+            data_len,
+        } = &mut self.write_state
+        else {
+            unreachable!("poll_drain_header called outside Sending");
+        };
+        while *pos < header.len() {
+            let n =
+                ready!(Pin::new(&mut self.inner).poll_write(cx, &header[*pos..]))
+                    .inspect_err(|e| {
+                        error!("Failed to send VLESS handshake: {}", e)
+                    })?;
+            if n == 0 {
+                return Poll::Ready(Err(io::ErrorKind::WriteZero.into()));
+            }
+            *pos += n;
+        }
+        let n = *data_len;
+        debug!("VLESS handshake sent with {} bytes of data", n);
+        self.write_state = WriteState::Open;
+        Poll::Ready(Ok(n))
     }
 
     /// Drive the response header to completion. Returns `Ready(Ok(()))` once
@@ -194,11 +224,21 @@ impl AsyncRead for VlessStream {
     ) -> Poll<io::Result<()>> {
         let this = &mut *self;
         if !matches!(this.read_state, ReadState::Open) {
-            // The server only responds after it has seen our request, so
-            // there is nothing to read until the first write starts.
             if matches!(this.write_state, WriteState::Idle) {
-                this.read_waker = Some(cx.waker().clone());
-                return Poll::Pending;
+                // No request sent yet. Poll `inner` anyway so EOF/errors are
+                // surfaced and our waker is registered there: once the
+                // request goes out, the response wakes us and the next poll
+                // takes the branch below.
+                let before = buf.filled().len();
+                ready!(Pin::new(&mut this.inner).poll_read(cx, buf))?;
+                if buf.filled().len() != before {
+                    buf.set_filled(before);
+                    return Poll::Ready(Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "VLESS server sent data before the request",
+                    )));
+                }
+                return Poll::Ready(Ok(()));
             }
             ready!(this.poll_response(cx))?;
         }
@@ -228,39 +268,20 @@ impl AsyncWrite for VlessStream {
                         pos: 0,
                         data_len: buf.len(),
                     };
-                    // The request is now committed; a parked reader can
-                    // start waiting on the response.
-                    if let Some(w) = this.read_waker.take() {
-                        w.wake();
-                    }
                 }
-                WriteState::Sending {
-                    buf: header,
-                    pos,
-                    data_len,
-                } => {
-                    // Per the AsyncWrite contract the caller retries with the
-                    // same buffer after Pending, so we keep draining the
-                    // already-encoded bytes and report `data_len` when done.
-                    while *pos < header.len() {
-                        let n = ready!(
-                            Pin::new(&mut this.inner)
-                                .poll_write(cx, &header[*pos..])
-                        )
-                        .inspect_err(|e| {
-                            error!("Failed to send VLESS handshake: {}", e)
-                        })?;
-                        if n == 0 {
-                            return Poll::Ready(
-                                Err(io::ErrorKind::WriteZero.into()),
-                            );
-                        }
-                        *pos += n;
-                    }
-                    let n = *data_len;
-                    debug!("VLESS handshake sent with {} bytes of data", n);
-                    this.write_state = WriteState::Open;
-                    return Poll::Ready(Ok(n));
+                WriteState::Sending { .. } => {
+                    // The first payload was copied into the header buffer on
+                    // the first poll. AsyncWrite does not guarantee the
+                    // caller retries with the same buffer, but every caller
+                    // here (copy loops, VisionStream, the UDP datagram) does;
+                    // cap the count so a shorter retry buffer can never be
+                    // told more bytes were written than it holds.
+                    let data_len = ready!(this.poll_drain_header(cx))?;
+                    debug_assert!(
+                        buf.len() >= data_len,
+                        "VLESS first write retried with a shorter buffer"
+                    );
+                    return Poll::Ready(Ok(data_len.min(buf.len())));
                 }
                 WriteState::Open => {
                     return Pin::new(&mut this.inner).poll_write(cx, buf);
@@ -280,6 +301,12 @@ impl AsyncWrite for VlessStream {
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Result<(), io::Error>> {
+        // If a first write was abandoned mid-header, finish sending it so the
+        // server never sees a truncated request. (Not done in poll_flush: a
+        // caller may still retry that write, which would then send twice.)
+        if matches!(self.write_state, WriteState::Sending { .. }) {
+            ready!(self.poll_drain_header(cx))?;
+        }
         Pin::new(&mut self.inner).poll_shutdown(cx)
     }
 }
@@ -444,7 +471,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_read_before_write_waits_for_request() {
+    async fn test_read_before_write_parses_response() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let (client, mut server) = tokio::io::duplex(1024);
         let s =
@@ -463,5 +490,71 @@ mod tests {
         wr.write_all(b"x").await.unwrap();
         server.write_all(&[0, 0, b'h', b'i']).await.unwrap();
         assert_eq!(&read.await.unwrap(), b"hi");
+    }
+
+    #[tokio::test]
+    async fn test_shutdown_before_any_write_lets_reader_see_eof() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let (client, mut server) = tokio::io::duplex(1024);
+        let s =
+            VlessStream::new(Box::new(client), TEST_UUID, &tcp_dest(), false, None)
+                .unwrap();
+        let (mut rd, mut wr) = tokio::io::split(s);
+        let read = tokio::spawn(async move { rd.read(&mut [0u8; 8]).await });
+        tokio::task::yield_now().await;
+
+        // Client half-closes without sending anything; the server sees EOF
+        // and closes too. The parked reader must observe that EOF.
+        wr.shutdown().await.unwrap();
+        let mut sink = Vec::new();
+        server.read_to_end(&mut sink).await.unwrap();
+        assert!(sink.is_empty(), "no request may be sent");
+        drop(server);
+
+        let n = tokio::time::timeout(std::time::Duration::from_secs(1), read)
+            .await
+            .expect("reader hung after shutdown")
+            .unwrap()
+            .unwrap();
+        assert_eq!(n, 0);
+    }
+
+    #[tokio::test]
+    async fn test_server_data_before_request_is_error() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let (client, mut server) = tokio::io::duplex(1024);
+        let mut s =
+            VlessStream::new(Box::new(client), TEST_UUID, &tcp_dest(), false, None)
+                .unwrap();
+        server.write_all(&[0, 0, b'x']).await.unwrap();
+        let err = s.read(&mut [0u8; 8]).await.unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[tokio::test]
+    async fn test_shutdown_finishes_abandoned_header() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let (client, mut server) = tokio::io::duplex(8);
+        let mut s =
+            VlessStream::new(Box::new(client), TEST_UUID, &tcp_dest(), false, None)
+                .unwrap();
+        let mut expected = s.build_handshake_header();
+        expected.extend_from_slice(b"hello");
+
+        // Start the first write, let it stall on the 8-byte pipe, abandon it.
+        {
+            let fut = s.write(b"hello");
+            tokio::pin!(fut);
+            assert!(futures::poll!(fut.as_mut()).is_pending());
+        }
+
+        let reader = tokio::spawn(async move {
+            let mut got = Vec::new();
+            server.read_to_end(&mut got).await.unwrap();
+            got
+        });
+        s.shutdown().await.unwrap();
+        drop(s);
+        assert_eq!(reader.await.unwrap(), expected.to_vec());
     }
 }
