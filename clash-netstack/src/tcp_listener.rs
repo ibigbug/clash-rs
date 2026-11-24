@@ -1,6 +1,7 @@
 use crate::{
     Packet, device::NetstackDevice, packet::IpPacket,
-    ring_buffer::LockFreeRingBuffer, stack::IfaceEvent, tcp_stream::TcpStream,
+    ring_buffer::LockFreeRingBuffer, stack::IfaceEvent,
+    tcp_close_state::TcpCloseState, tcp_stream::TcpStream,
 };
 use futures::task::AtomicWaker;
 use log::{error, trace, warn};
@@ -9,15 +10,7 @@ use smoltcp::{
     socket::tcp,
     wire::{IpProtocol, TcpPacket},
 };
-use std::{
-    collections::HashMap,
-    net::SocketAddr,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
-    time::Duration,
-};
+use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
 use tokio::sync::mpsc;
 
 const DEFAULT_TCP_SEND_BUFFER_SIZE: u32 = 256 * 1024; // 256 KiB
@@ -36,27 +29,8 @@ pub(crate) struct TcpStreamHandle {
     pub(crate) send_buffer: LockFreeRingBuffer,
     pub(crate) send_waker: AtomicWaker,
 
-    /// Set by the relay task (via TcpStream::drop) when the app-side stream is
-    /// dropped. Triggers drain-before-close in poll_sockets: remaining
-    /// send_buffer data is flushed into smoltcp's TX ring, then
-    /// socket.close() initiates the FIN handshake.
-    pub(crate) socket_dropped: AtomicBool,
-    /// Set by poll_sockets when the smoltcp socket becomes inactive (FIN
-    /// handshake complete, RST received, or timeout). Causes poll_read to
-    /// return EOF once recv_buffer is drained, even if read_closed was
-    /// never set by the data path.
-    pub(crate) socket_closed: AtomicBool,
-    /// Set by the data path when smoltcp reports !may_recv() (peer FIN
-    /// received). Also set defensively in TcpStream::drop(). Causes
-    /// poll_read to return EOF.
-    pub(crate) read_closed: AtomicBool,
-    /// Set by the data path when smoltcp reports !may_send() (send path
-    /// closed), and in TcpStream::drop(). Causes poll_write to return
-    /// BrokenPipe.
-    pub(crate) write_closed: AtomicBool,
-    /// Set by poll_shutdown(). The data path watches this flag and calls
-    /// socket.close() once send_buffer is drained, initiating a graceful FIN.
-    pub(crate) write_shutdown: AtomicBool,
+    /// Read/write half-close and teardown flags shared with `TcpStream`.
+    pub(crate) close: TcpCloseState,
 }
 
 impl TcpStreamHandle {
@@ -70,11 +44,7 @@ impl TcpStreamHandle {
                 DEFAULT_TCP_SEND_BUFFER_SIZE as usize,
             ),
             send_waker: AtomicWaker::new(),
-            socket_dropped: AtomicBool::new(false),
-            socket_closed: AtomicBool::new(false),
-            read_closed: AtomicBool::new(false),
-            write_closed: AtomicBool::new(false),
-            write_shutdown: AtomicBool::new(false),
+            close: TcpCloseState::new(),
         }
     }
 }
@@ -462,12 +432,12 @@ impl TcpListener {
                     if past_handshake
                         && !socket.may_recv()
                         && !socket.can_recv()
-                        && !socket_control.read_closed.swap(true, Ordering::AcqRel)
+                        && socket_control.close.peer_fin()
                     {
                         socket_control.recv_waker.wake();
                     }
 
-                    if socket_control.write_shutdown.load(Ordering::Acquire)
+                    if socket_control.close.is_shutdown_requested()
                         && buf.is_empty()
                         && socket.may_send()
                     {
@@ -477,7 +447,7 @@ impl TcpListener {
 
                     if past_handshake
                         && !socket.may_send()
-                        && !socket_control.write_closed.swap(true, Ordering::AcqRel)
+                        && socket_control.close.send_closed()
                     {
                         socket_control.send_waker.wake();
                     }
@@ -486,10 +456,7 @@ impl TcpListener {
                 socket_maps.retain(|handle, socket_control| {
                     let socket = sockets.get_mut::<tcp::Socket>(*handle);
 
-                    if socket_control
-                        .socket_dropped
-                        .load(std::sync::atomic::Ordering::Acquire)
-                    {
+                    if socket_control.close.is_app_dropped() {
                         // The app-side TcpStream was dropped.  Flush any
                         // remaining data from send_buffer into smoltcp's TX
                         // buffer, then initiate a graceful FIN.  We must NOT
@@ -524,15 +491,10 @@ impl TcpListener {
                         trace!("Removing inactive TCP socket");
                         sockets.remove(*handle);
                         // Unblock any in-flight poll_read / poll_write on this
-                        // stream. socket_closed covers
-                        // RST/timeout where read_closed may not have
-                        // been set yet by the data path; write_closed prevents
-                        // silent phantom writes to a dead
+                        // stream: covers RST/timeout where the data path never
+                        // saw FIN, and prevents phantom writes to a dead
                         // socket.
-                        socket_control
-                            .socket_closed
-                            .store(true, std::sync::atomic::Ordering::Release);
-                        socket_control.write_closed.store(true, Ordering::Release);
+                        socket_control.close.socket_gone();
                         socket_control.recv_waker.wake();
                         socket_control.send_waker.wake();
                         false
