@@ -17,17 +17,19 @@ const VLESS_COMMAND_UDP: u8 = 2;
 /// Write side of the VLESS handshake.
 ///
 /// `Idle` → `Sending` on the first `poll_write`; `Sending` → `Open` once the
-/// header plus the caller's first payload has been fully written to `inner`.
+/// request header has been fully written to `inner`.
+///
+/// Only the header is retained across polls. The caller's payload is taken
+/// from whichever buffer the current `poll_write` passes (coalesced with the
+/// remaining header into a single inner write), and only bytes of *that*
+/// buffer are acknowledged. AsyncWrite does not require a retry after
+/// `Pending` to use the same buffer, so a cancelled first write must never
+/// cause its payload to be sent or counted later.
 enum WriteState {
     /// No request header has been sent yet.
     Idle,
-    /// Request header + first payload are being drained into `inner`.
-    /// `data_len` is how many bytes of the caller's buffer this represents.
-    Sending {
-        buf: BytesMut,
-        pos: usize,
-        data_len: usize,
-    },
+    /// Request header is being written; `pos` bytes of it are on the wire.
+    Sending { header: BytesMut, pos: usize },
     /// Header sent; writes pass straight through.
     Open,
 }
@@ -114,18 +116,11 @@ impl VlessStream {
         buf
     }
 
-    /// `Sending` → `Open`: drain the encoded request header + first payload
-    /// into `inner`. Returns the caller-visible length of that first payload.
-    fn poll_drain_header(
-        &mut self,
-        cx: &mut Context<'_>,
-    ) -> Poll<io::Result<usize>> {
-        let WriteState::Sending {
-            buf: header,
-            pos,
-            data_len,
-        } = &mut self.write_state
-        else {
+    /// `Sending` → `Open` without any payload: drain the rest of the request
+    /// header into `inner`. Used by shutdown so a cancelled first write never
+    /// leaves the server with a truncated request.
+    fn poll_drain_header(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let WriteState::Sending { header, pos } = &mut self.write_state else {
             unreachable!("poll_drain_header called outside Sending");
         };
         while *pos < header.len() {
@@ -139,10 +134,9 @@ impl VlessStream {
             }
             *pos += n;
         }
-        let n = *data_len;
-        debug!("VLESS handshake sent with {} bytes of data", n);
+        debug!("VLESS handshake sent without payload");
         self.write_state = WriteState::Open;
-        Poll::Ready(Ok(n))
+        Poll::Ready(Ok(()))
     }
 
     /// Drive the response header to completion. Returns `Ready(Ok(()))` once
@@ -261,27 +255,42 @@ impl AsyncWrite for VlessStream {
                         "VLESS handshake starting for destination: {}",
                         this.destination
                     );
-                    let mut header = this.build_handshake_header();
-                    header.put_slice(buf);
                     this.write_state = WriteState::Sending {
-                        buf: header,
+                        header: this.build_handshake_header(),
                         pos: 0,
-                        data_len: buf.len(),
                     };
                 }
-                WriteState::Sending { .. } => {
-                    // The first payload was copied into the header buffer on
-                    // the first poll. AsyncWrite does not guarantee the
-                    // caller retries with the same buffer, but every caller
-                    // here (copy loops, VisionStream, the UDP datagram) does;
-                    // cap the count so a shorter retry buffer can never be
-                    // told more bytes were written than it holds.
-                    let data_len = ready!(this.poll_drain_header(cx))?;
-                    debug_assert!(
-                        buf.len() >= data_len,
-                        "VLESS first write retried with a shorter buffer"
+                WriteState::Sending { header, pos } => {
+                    // Coalesce the unsent header with *this call's* payload
+                    // so the request and first data usually leave together.
+                    let remaining = header.len() - *pos;
+                    let mut chunk = BytesMut::with_capacity(remaining + buf.len());
+                    chunk.put_slice(&header[*pos..]);
+                    chunk.put_slice(buf);
+
+                    let n = ready!(Pin::new(&mut this.inner).poll_write(cx, &chunk))
+                        .inspect_err(|e| {
+                            error!("Failed to send VLESS handshake: {}", e)
+                        })?;
+                    if n == 0 {
+                        return Poll::Ready(Err(io::ErrorKind::WriteZero.into()));
+                    }
+                    if n < remaining {
+                        *pos += n;
+                        continue;
+                    }
+                    let payload_written = n - remaining;
+                    debug!(
+                        "VLESS handshake sent with {} bytes of data",
+                        payload_written
                     );
-                    return Poll::Ready(Ok(data_len.min(buf.len())));
+                    this.write_state = WriteState::Open;
+                    if payload_written == 0 && !buf.is_empty() {
+                        // Header done but no payload accepted yet; write the
+                        // payload directly rather than report Ok(0).
+                        continue;
+                    }
+                    return Poll::Ready(Ok(payload_written));
                 }
                 WriteState::Open => {
                     return Pin::new(&mut this.inner).poll_write(cx, buf);
@@ -427,8 +436,7 @@ mod tests {
             assert_eq!(got, expected);
             server
         });
-        let n = s.write(b"hello").await.unwrap();
-        assert_eq!(n, 5);
+        s.write_all(b"hello").await.unwrap();
         reader.await.unwrap();
     }
 
@@ -538,8 +546,8 @@ mod tests {
         let mut s =
             VlessStream::new(Box::new(client), TEST_UUID, &tcp_dest(), false, None)
                 .unwrap();
-        let mut expected = s.build_handshake_header();
-        expected.extend_from_slice(b"hello");
+        // Only the header: the abandoned payload must not be sent.
+        let expected = s.build_handshake_header();
 
         // Start the first write, let it stall on the 8-byte pipe, abandon it.
         {
@@ -555,6 +563,35 @@ mod tests {
         });
         s.shutdown().await.unwrap();
         drop(s);
+        assert_eq!(reader.await.unwrap(), expected.to_vec());
+    }
+
+    #[tokio::test]
+    async fn test_cancelled_first_write_payload_is_not_sent() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        // A pipe too small for even the header: the first write makes partial
+        // header progress and returns Pending, then the caller abandons it and
+        // writes something else.
+        let (client, mut server) = tokio::io::duplex(8);
+        let mut s =
+            VlessStream::new(Box::new(client), TEST_UUID, &tcp_dest(), false, None)
+                .unwrap();
+        let mut expected = s.build_handshake_header();
+        expected.extend_from_slice(b"x");
+        let total = expected.len();
+
+        {
+            let fut = s.write(b"hello");
+            tokio::pin!(fut);
+            assert!(futures::poll!(fut.as_mut()).is_pending());
+        }
+
+        let reader = tokio::spawn(async move {
+            let mut got = vec![0u8; total];
+            server.read_exact(&mut got).await.unwrap();
+            got
+        });
+        s.write_all(b"x").await.unwrap();
         assert_eq!(reader.await.unwrap(), expected.to_vec());
     }
 }
