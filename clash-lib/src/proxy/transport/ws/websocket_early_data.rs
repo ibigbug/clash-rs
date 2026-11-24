@@ -346,17 +346,35 @@ mod tests {
         srv.await.unwrap();
     }
 
+    /// Waker that records whether it was woken.
+    struct Flag(std::sync::atomic::AtomicBool);
+    impl futures::task::ArcWake for Flag {
+        fn wake_by_ref(arc_self: &std::sync::Arc<Self>) {
+            arc_self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    /// Poll `c` for a read once with a recording waker; assert it parks and
+    /// return the flag that flips when that waker is woken.
+    fn park_reader(c: &mut WebsocketEarlyDataConn) -> std::sync::Arc<Flag> {
+        let flag = std::sync::Arc::new(Flag(false.into()));
+        let waker = futures::task::waker(flag.clone());
+        let mut cx = Context::from_waker(&waker);
+        let mut bytes = [0u8; 4];
+        let mut rb = ReadBuf::new(&mut bytes);
+        assert!(Pin::new(c).poll_read(&mut cx, &mut rb).is_pending());
+        flag
+    }
+
+    fn woken(flag: &Flag) -> bool {
+        flag.0.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
     #[tokio::test]
     async fn test_reader_parked_until_handshake() {
-        let (c, server) = conn(16);
-        let (mut rd, mut wr) = tokio::io::split(c);
-        let read = tokio::spawn(async move {
-            let mut out = [0u8; 2];
-            rd.read_exact(&mut out).await.unwrap();
-            out
-        });
-        tokio::task::yield_now().await;
-        assert!(!read.is_finished());
+        let (mut c, server) = conn(16);
+        let flag = park_reader(&mut c);
+        assert!(!woken(&flag));
 
         let srv = tokio::spawn(async move {
             let (mut ws, early) = accept(server).await;
@@ -364,26 +382,30 @@ mod tests {
             ws.send(Message::binary(b"ok".to_vec())).await.unwrap();
             ws
         });
-        wr.write_all(b"req").await.unwrap();
-        assert_eq!(&read.await.unwrap(), b"ok");
+        c.write_all(b"req").await.unwrap();
+        assert!(woken(&flag), "parked reader must be woken on handshake");
+
+        let mut out = [0u8; 2];
+        c.read_exact(&mut out).await.unwrap();
+        assert_eq!(&out, b"ok");
         srv.await.unwrap();
     }
 
     #[tokio::test]
     async fn test_handshake_failure_is_terminal() {
-        let (c, server) = conn(16);
-        let (mut rd, mut wr) = tokio::io::split(c);
-        let read = tokio::spawn(async move { rd.read(&mut [0u8; 4]).await });
-        tokio::task::yield_now().await;
+        let (mut c, server) = conn(16);
+        let flag = park_reader(&mut c);
 
         // Server hangs up without completing the upgrade.
         drop(server);
-        assert!(wr.write(b"data").await.is_err());
+        assert!(c.write(b"data").await.is_err());
+        assert!(woken(&flag), "parked reader must be woken on failure");
+
         // Subsequent calls must error, not panic by re-polling the
-        // finished handshake future, and the parked reader must wake.
-        let err = wr.write(b"data").await.unwrap_err();
+        // finished handshake future.
+        let err = c.write(b"data").await.unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::NotConnected);
-        let err = read.await.unwrap().unwrap_err();
+        let err = c.read(&mut [0u8; 4]).await.unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::NotConnected);
     }
 }
