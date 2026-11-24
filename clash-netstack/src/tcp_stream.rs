@@ -4,7 +4,7 @@ use std::{
     io::{Error, ErrorKind},
     net::SocketAddr,
     pin::Pin,
-    sync::{Arc, atomic::Ordering},
+    sync::Arc,
     task::{Context, Poll, ready},
 };
 
@@ -24,12 +24,9 @@ impl Drop for TcpStream {
             self.local_addr, self.remote_addr
         );
 
-        // socket_dropped tells poll_sockets to drain send_buffer and issue FIN.
-        // read_closed / write_closed unblock any concurrent poll_read /
-        // poll_write.
-        self.handle.socket_dropped.store(true, Ordering::Release);
-        self.handle.read_closed.store(true, Ordering::Release);
-        self.handle.write_closed.store(true, Ordering::Release);
+        // Tells poll_sockets to drain send_buffer and issue FIN, and closes
+        // both halves so any concurrent poll_read / poll_write unblocks.
+        self.handle.close.app_dropped();
         self.handle.recv_waker.wake();
         self.handle.send_waker.wake();
         if let Err(e) = self.stack_notifier.send(IfaceEvent::TcpSocketClosed) {
@@ -89,12 +86,7 @@ impl tokio::io::AsyncRead for TcpStream {
             if read_buf.is_empty() {
                 // Return EOF when smoltcp is done (socket removed) OR when the
                 // read half was explicitly closed (peer FIN / local drop).
-                if self
-                    .handle
-                    .socket_closed
-                    .load(std::sync::atomic::Ordering::Acquire)
-                    || self.handle.read_closed.load(Ordering::Acquire)
-                {
+                if self.handle.close.read_eof() {
                     trace!("TcpStream::poll_read: socket closed, returning EOF");
                     return std::task::Poll::Ready(Ok(()));
                 }
@@ -127,9 +119,7 @@ impl tokio::io::AsyncWrite for TcpStream {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<std::io::Result<usize>> {
-        if self.handle.write_closed.load(Ordering::Acquire)
-            || self.handle.write_shutdown.load(Ordering::Acquire)
-        {
+        if self.handle.close.write_refused() {
             return Poll::Ready(Err(Error::new(
                 ErrorKind::BrokenPipe,
                 "TCP stream write half closed",
@@ -176,7 +166,7 @@ impl tokio::io::AsyncWrite for TcpStream {
     ) -> Poll<std::io::Result<()>> {
         ready!(self.as_mut().poll_flush(cx))?;
         trace!("TcpStream::poll_shutdown called, client side closing");
-        self.handle.write_shutdown.store(true, Ordering::Release);
+        self.handle.close.shutdown_requested();
         self.handle.send_waker.wake();
         Poll::Ready(Ok(()))
     }
@@ -212,7 +202,7 @@ mod tests {
     #[test]
     fn poll_read_returns_eof_after_peer_close() {
         let (mut stream, _rx) = build_stream();
-        stream.handle.read_closed.store(true, Ordering::Release);
+        stream.handle.close.peer_fin();
         let mut cx = noop_cx();
         let mut bytes = [0u8; 16];
         let mut buf = tokio::io::ReadBuf::new(&mut bytes);
@@ -231,7 +221,7 @@ mod tests {
         let result = Pin::new(&mut stream).poll_shutdown(&mut cx);
 
         assert!(matches!(result, Poll::Ready(Ok(()))));
-        assert!(stream.handle.write_shutdown.load(Ordering::Acquire));
+        assert!(stream.handle.close.is_shutdown_requested());
         assert!(matches!(rx.try_recv(), Ok(IfaceEvent::TcpSocketReady)));
         assert!(rx.try_recv().is_err());
     }
@@ -239,7 +229,7 @@ mod tests {
     #[test]
     fn poll_write_fails_after_write_close() {
         let (mut stream, _rx) = build_stream();
-        stream.handle.write_closed.store(true, Ordering::Release);
+        stream.handle.close.send_closed();
         let mut cx = noop_cx();
 
         let result = Pin::new(&mut stream).poll_write(&mut cx, b"hello");
