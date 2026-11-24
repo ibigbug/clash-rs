@@ -1,14 +1,15 @@
 use std::{
     cmp,
     fmt::Debug,
+    io,
     pin::Pin,
-    task::{Poll, Waker},
+    task::{Context, Poll, Waker},
 };
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use futures::{Future, ready};
-use http::{HeaderValue, Request, StatusCode};
-use tokio::io::{AsyncRead, AsyncWrite};
+use http::{HeaderName, HeaderValue, Request, StatusCode};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio_tungstenite::{
     client_async_with_config, tungstenite::protocol::WebSocketConfig,
 };
@@ -20,38 +21,72 @@ use crate::{
 
 use super::websocket::WebsocketConn;
 
+type HandshakeFuture =
+    Pin<Box<dyn Future<Output = io::Result<AnyStream>> + Send + Sync>>;
+
+/// Lifecycle of an early-data WebSocket connection.
+///
+/// ```text
+/// Idle ──first poll_write──▶ Connecting ──handshake ok──▶ Open
+///                                 │
+///                                 └──handshake err──▶ Failed
+/// ```
+///
+/// The first write's payload (up to `early_data_len` bytes) is carried in the
+/// upgrade request header, so nothing can be read or flushed until the
+/// handshake completes.
+enum State {
+    /// Waiting for the first write to supply early data.
+    Idle {
+        stream: AnyStream,
+        req: Request<()>,
+        ws_config: Option<WebSocketConfig>,
+    },
+    /// Upgrade request sent; `sent` is how many bytes of the caller's first
+    /// buffer it carries and is reported once the handshake succeeds.
+    Connecting { fut: HandshakeFuture, sent: usize },
+    /// Handshake complete; all I/O goes to the WebSocket stream.
+    Open(AnyStream),
+    /// Handshake failed; every subsequent operation errors.
+    Failed,
+}
+
+impl State {
+    fn name(&self) -> &'static str {
+        match self {
+            State::Idle { .. } => "idle",
+            State::Connecting { .. } => "connecting",
+            State::Open(_) => "open",
+            State::Failed => "failed",
+        }
+    }
+}
+
 pub struct WebsocketEarlyDataConn {
-    stream: Option<AnyStream>,
-    req: Option<Request<()>>,
-    stream_future: Option<
-        Pin<
-            Box<
-                dyn std::future::Future<Output = std::io::Result<AnyStream>>
-                    + Send
-                    + Sync,
-            >,
-        >,
-    >,
-    early_waker: Option<Waker>,
+    state: State,
+    /// Reader parked until the handshake finishes.
+    read_waker: Option<Waker>,
+    /// Flusher/shutdown parked until the handshake finishes.
     flush_waker: Option<Waker>,
-    ws_config: Option<WebSocketConfig>,
     early_data_header_name: String,
     early_data_len: usize,
-    early_data_flushed: bool,
 }
 
 impl Debug for WebsocketEarlyDataConn {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("WebsocketEarlyDataConn")
-            .field("req", &self.req)
-            .field("early_waker", &self.early_waker)
-            .field("flush_waker", &self.flush_waker)
-            .field("ws_config", &self.ws_config)
+            .field("state", &self.state.name())
             .field("early_data_header_name", &self.early_data_header_name)
             .field("early_data_len", &self.early_data_len)
-            .field("early_data_flushed", &self.early_data_flushed)
             .finish()
     }
+}
+
+fn handshake_failed() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::NotConnected,
+        "websocket early data handshake failed",
+    )
 }
 
 impl WebsocketEarlyDataConn {
@@ -63,15 +98,15 @@ impl WebsocketEarlyDataConn {
         early_data_len: usize,
     ) -> Self {
         Self {
-            stream: Some(stream),
-            req: Some(req),
-            stream_future: None,
-            early_waker: None,
+            state: State::Idle {
+                stream,
+                req,
+                ws_config,
+            },
+            read_waker: None,
             flush_waker: None,
-            ws_config,
             early_data_header_name,
             early_data_len,
-            early_data_flushed: false,
         }
     }
 
@@ -79,18 +114,12 @@ impl WebsocketEarlyDataConn {
         stream: AnyStream,
         req: Request<()>,
         config: Option<WebSocketConfig>,
-    ) -> Pin<
-        Box<
-            dyn std::future::Future<Output = std::io::Result<AnyStream>>
-                + Send
-                + Sync,
-        >,
-    > {
+    ) -> HandshakeFuture {
         async fn run(
             stream: AnyStream,
             req: Request<()>,
             config: Option<WebSocketConfig>,
-        ) -> std::io::Result<AnyStream> {
+        ) -> io::Result<AnyStream> {
             let (stream, resp) = client_async_with_config(req, stream, config)
                 .await
                 .map_err(map_io_error)?;
@@ -105,111 +134,250 @@ impl WebsocketEarlyDataConn {
 
         Box::pin(run(stream, req, config))
     }
+
+    /// `Idle` → `Connecting`: put the first `early_data_len` bytes of `buf`
+    /// into the upgrade request header and start the handshake.
+    fn start_handshake(&mut self, buf: &[u8]) -> io::Result<()> {
+        let State::Idle {
+            stream,
+            mut req,
+            ws_config,
+        } = std::mem::replace(&mut self.state, State::Failed)
+        else {
+            unreachable!("start_handshake called outside Idle");
+        };
+
+        let sent = cmp::min(self.early_data_len, buf.len());
+        let name = HeaderName::from_bytes(self.early_data_header_name.as_bytes())
+            .map_err(|e| {
+                io::Error::new(io::ErrorKind::InvalidInput, e.to_string())
+            })?;
+        let value = HeaderValue::from_str(&URL_SAFE_NO_PAD.encode(&buf[..sent]))
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        req.headers_mut().insert(name, value);
+
+        self.state = State::Connecting {
+            fut: Self::proxy_stream(stream, req, ws_config),
+            sent,
+        };
+        Ok(())
+    }
+
+    fn wake_parked(&mut self) {
+        if let Some(w) = self.read_waker.take() {
+            w.wake();
+        }
+        if let Some(w) = self.flush_waker.take() {
+            w.wake();
+        }
+    }
 }
 
 impl AsyncRead for WebsocketEarlyDataConn {
     fn poll_read(
-        mut self: Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-        buf: &mut tokio::io::ReadBuf<'_>,
-    ) -> std::task::Poll<std::io::Result<()>> {
-        if !self.early_data_flushed {
-            if self.early_waker.is_none() {
-                self.as_mut().early_waker = Some(cx.waker().clone());
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        match &mut this.state {
+            State::Open(s) => Pin::new(s).poll_read(cx, buf),
+            State::Failed => Poll::Ready(Err(handshake_failed())),
+            State::Idle { .. } | State::Connecting { .. } => {
+                this.read_waker = Some(cx.waker().clone());
+                Poll::Pending
             }
-            return Poll::Pending;
-        }
-        let pin = self.get_mut();
-        match &mut pin.stream {
-            None => unreachable!("bad state"),
-            Some(s) => Pin::new(s).poll_read(cx, buf),
         }
     }
 }
 
 impl AsyncWrite for WebsocketEarlyDataConn {
     fn poll_write(
-        mut self: Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
         buf: &[u8],
-    ) -> Poll<Result<usize, std::io::Error>> {
-        if !self.early_data_flushed {
-            loop {
-                match &mut self.as_mut().stream_future {
-                    Some(fut) => {
-                        let stream = ready!(Pin::new(fut).poll(cx))?;
-
-                        self.as_mut().stream = Some(stream);
-                        self.as_mut().early_data_flushed = true;
-
-                        if let Some(w) = self.as_mut().early_waker.take() {
-                            w.wake();
-                        }
-                        if let Some(w) = self.as_mut().flush_waker.take() {
-                            w.wake();
-                        }
-                        return Poll::Ready(Ok(self.as_mut().early_data_len));
-                    }
-                    _ => {
-                        let mut req =
-                            self.as_mut().req.take().expect("req must be present");
-                        if let Some(v) = req
-                            .headers_mut()
-                            .get_mut(&self.as_mut().early_data_header_name)
-                        {
-                            self.as_mut().early_data_len =
-                                cmp::min(self.as_mut().early_data_len, buf.len());
-                            let header_value = URL_SAFE_NO_PAD
-                                .encode(&buf[..self.as_mut().early_data_len]);
-                            *v = HeaderValue::from_str(&header_value)
-                                .expect("bad header value");
-                        }
-
-                        let stream =
-                            self.as_mut().stream.take().expect("msg: bad state");
-                        let config = self.as_mut().ws_config.take();
-                        self.as_mut().stream_future =
-                            Some(Self::proxy_stream(stream, req, config));
+    ) -> Poll<io::Result<usize>> {
+        let this = self.get_mut();
+        loop {
+            match &mut this.state {
+                State::Idle { .. } => {
+                    if let Err(e) = this.start_handshake(buf) {
+                        this.wake_parked();
+                        return Poll::Ready(Err(e));
                     }
                 }
+                State::Connecting { fut, sent } => {
+                    let sent = *sent;
+                    let res = ready!(fut.as_mut().poll(cx));
+                    let (next, out) = match res {
+                        Ok(stream) => (State::Open(stream), Ok(sent)),
+                        Err(e) => (State::Failed, Err(e)),
+                    };
+                    this.state = next;
+                    this.wake_parked();
+                    return Poll::Ready(out);
+                }
+                State::Open(s) => return Pin::new(s).poll_write(cx, buf),
+                State::Failed => return Poll::Ready(Err(handshake_failed())),
             }
-        }
-
-        match &mut self.as_mut().stream {
-            None => unreachable!("bad state"),
-            Some(s) => Pin::new(s).poll_write(cx, buf),
         }
     }
 
     fn poll_flush(
-        mut self: Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> Poll<Result<(), std::io::Error>> {
-        if !self.early_data_flushed {
-            if self.as_mut().flush_waker.is_none() {
-                self.as_mut().flush_waker = Some(cx.waker().clone());
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        match &mut this.state {
+            State::Open(s) => Pin::new(s).poll_flush(cx),
+            State::Failed => Poll::Ready(Err(handshake_failed())),
+            State::Idle { .. } | State::Connecting { .. } => {
+                this.flush_waker = Some(cx.waker().clone());
+                Poll::Pending
             }
-            return Poll::Pending;
-        }
-        match &mut self.stream {
-            None => unreachable!("bad state"),
-            Some(s) => Pin::new(s).poll_flush(cx),
         }
     }
 
     fn poll_shutdown(
-        mut self: Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> Poll<Result<(), std::io::Error>> {
-        if !self.early_data_flushed {
-            ready!(self.as_mut().poll_flush(cx))?;
-        }
-        let pin = self.get_mut();
-        match &mut pin.stream {
-            None => unreachable!("bad state"),
-            Some(s) => Pin::new(s).poll_shutdown(cx),
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        match &mut this.state {
+            State::Open(s) => Pin::new(s).poll_shutdown(cx),
+            State::Failed => Poll::Ready(Err(handshake_failed())),
+            State::Idle { .. } | State::Connecting { .. } => {
+                this.flush_waker = Some(cx.waker().clone());
+                Poll::Pending
+            }
         }
     }
 }
 
 impl crate::proxy::ProxyStream for WebsocketEarlyDataConn {}
+
+#[cfg(test)]
+mod tests {
+    use futures::{SinkExt, StreamExt};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
+    use tokio_tungstenite::{
+        WebSocketStream, accept_hdr_async,
+        tungstenite::{
+            Message,
+            handshake::server::{Request as SrvReq, Response as SrvResp},
+        },
+    };
+
+    use super::*;
+
+    const HDR: &str = "Sec-WebSocket-Protocol";
+
+    fn client_req() -> Request<()> {
+        Request::builder()
+            .method("GET")
+            .uri("ws://example.com/")
+            .header("Host", "example.com")
+            .header("Connection", "Upgrade")
+            .header("Upgrade", "websocket")
+            .header("Sec-WebSocket-Version", "13")
+            .header(
+                "Sec-WebSocket-Key",
+                tokio_tungstenite::tungstenite::handshake::client::generate_key(),
+            )
+            .header(HDR, "placeholder")
+            .body(())
+            .unwrap()
+    }
+
+    fn conn(early_len: usize) -> (WebsocketEarlyDataConn, DuplexStream) {
+        let (client, server) = tokio::io::duplex(64 * 1024);
+        let c = WebsocketEarlyDataConn::new(
+            Box::new(client),
+            client_req(),
+            None,
+            HDR.to_owned(),
+            early_len,
+        );
+        (c, server)
+    }
+
+    /// Accept the upgrade, echoing the early-data header back so the client's
+    /// subprotocol check passes, and return the decoded early data.
+    async fn accept(
+        server: DuplexStream,
+    ) -> (WebSocketStream<DuplexStream>, Vec<u8>) {
+        let mut early = None;
+        let ws = accept_hdr_async(server, |req: &SrvReq, mut resp: SrvResp| {
+            let v = req.headers().get(HDR).unwrap().clone();
+            early = Some(URL_SAFE_NO_PAD.decode(v.as_bytes()).unwrap());
+            resp.headers_mut().insert(HDR, v);
+            Ok(resp)
+        })
+        .await
+        .unwrap();
+        (ws, early.unwrap())
+    }
+
+    #[tokio::test]
+    async fn test_first_write_carries_early_data() {
+        let (mut c, server) = conn(4);
+        let srv = tokio::spawn(async move {
+            let (mut ws, early) = accept(server).await;
+            assert_eq!(early, b"hell");
+            let msg = ws.next().await.unwrap().unwrap();
+            assert_eq!(msg.into_data().as_ref(), b"o");
+            ws.send(Message::binary(b"pong".to_vec())).await.unwrap();
+            ws
+        });
+
+        // Only the first 4 bytes fit in the header; the caller sees a short
+        // write and sends the rest over the open stream.
+        c.write_all(b"hello").await.unwrap();
+        c.flush().await.unwrap();
+        let mut out = [0u8; 4];
+        c.read_exact(&mut out).await.unwrap();
+        assert_eq!(&out, b"pong");
+        srv.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_reader_parked_until_handshake() {
+        let (c, server) = conn(16);
+        let (mut rd, mut wr) = tokio::io::split(c);
+        let read = tokio::spawn(async move {
+            let mut out = [0u8; 2];
+            rd.read_exact(&mut out).await.unwrap();
+            out
+        });
+        tokio::task::yield_now().await;
+        assert!(!read.is_finished());
+
+        let srv = tokio::spawn(async move {
+            let (mut ws, early) = accept(server).await;
+            assert_eq!(early, b"req");
+            ws.send(Message::binary(b"ok".to_vec())).await.unwrap();
+            ws
+        });
+        wr.write_all(b"req").await.unwrap();
+        assert_eq!(&read.await.unwrap(), b"ok");
+        srv.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_handshake_failure_is_terminal() {
+        let (c, server) = conn(16);
+        let (mut rd, mut wr) = tokio::io::split(c);
+        let read = tokio::spawn(async move { rd.read(&mut [0u8; 4]).await });
+        tokio::task::yield_now().await;
+
+        // Server hangs up without completing the upgrade.
+        drop(server);
+        assert!(wr.write(b"data").await.is_err());
+        // Subsequent calls must error, not panic by re-polling the
+        // finished handshake future, and the parked reader must wake.
+        let err = wr.write(b"data").await.unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::NotConnected);
+        let err = read.await.unwrap().unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::NotConnected);
+    }
+}
