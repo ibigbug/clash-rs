@@ -63,8 +63,8 @@ impl UdpPacket {
 ///
 /// ```text
 /// Idle ──start(frame)──▶ Writing ──drained──▶ Flushing ──▶ Idle
-///                          │                      └─ flush err ─▶ Idle
-///                          └── write err / Ok(0) ─▶ Broken (terminal)
+///                          │                      │
+///                          └── write err / Ok(0) ─┴─ flush err ─▶ Broken
 /// ```
 ///
 /// A frame is encoded once in `start_send` and drained across as many polls
@@ -73,8 +73,9 @@ impl UdpPacket {
 /// AEAD, WebSocket) may already have pushed part of an encrypted record or
 /// kept internal write state, so the byte stream can no longer be trusted
 /// to be frame-aligned. The sink becomes `Broken` and refuses every later
-/// frame rather than let the peer misparse them. A failed flush happens
-/// after the whole frame was accepted, so framing is intact.
+/// frame rather than let the peer misparse them. A failed flush is terminal
+/// as well: the stream is dead, and keeping the error sticky means a close
+/// that retries across a pending shutdown still reports it.
 #[derive(Debug, Default)]
 pub(crate) enum StreamSendState {
     #[default]
@@ -152,10 +153,12 @@ impl StreamSendState {
                     }
                 }
                 Self::Flushing => {
-                    // The whole frame is written, so the stream stays
-                    // frame-aligned even if the flush fails.
                     let res = ready!(w.as_mut().poll_flush(cx));
-                    *self = Self::Idle;
+                    *self = if res.is_ok() {
+                        Self::Idle
+                    } else {
+                        Self::Broken
+                    };
                     return Poll::Ready(res);
                 }
             }
@@ -202,6 +205,9 @@ mod tests {
         closed: bool,
         flushes: usize,
         shutdowns: usize,
+        fail_flush: bool,
+        /// Return Pending from the next poll_shutdown.
+        shutdown_pending: bool,
         /// Return an error once this many bytes have been accepted.
         fail_after: Option<usize>,
     }
@@ -233,13 +239,20 @@ mod tests {
             _: &mut Context<'_>,
         ) -> Poll<io::Result<()>> {
             self.flushes += 1;
+            if self.fail_flush {
+                return Poll::Ready(Err(io::ErrorKind::ConnectionReset.into()));
+            }
             Poll::Ready(Ok(()))
         }
 
         fn poll_shutdown(
             mut self: Pin<&mut Self>,
-            _: &mut Context<'_>,
+            cx: &mut Context<'_>,
         ) -> Poll<io::Result<()>> {
+            if std::mem::take(&mut self.shutdown_pending) {
+                cx.waker().wake_by_ref();
+                return Poll::Pending;
+            }
             self.shutdowns += 1;
             Poll::Ready(Ok(()))
         }
@@ -253,6 +266,8 @@ mod tests {
             closed,
             flushes: 0,
             shutdowns: 0,
+            fail_flush: false,
+            shutdown_pending: false,
             fail_after: None,
         }
     }
@@ -367,6 +382,26 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(w.shutdowns, 2);
+    }
+
+    #[tokio::test]
+    async fn close_reports_flush_error_across_pending_shutdown() {
+        let mut w = trickle(false);
+        w.fail_flush = true;
+        w.shutdown_pending = true;
+        let mut st = StreamSendState::default();
+        st.start(BytesMut::from(&b"bye"[..])).unwrap();
+        // First poll: flush fails, shutdown is Pending. The retry must not
+        // forget the flush error just because shutdown then succeeds.
+        let err = std::future::poll_fn(|cx| st.poll_close(Pin::new(&mut w), cx))
+            .await
+            .unwrap_err();
+        assert_eq!(w.shutdowns, 1);
+        assert_ne!(err.kind(), io::ErrorKind::Other);
+        assert!(
+            st.start(BytesMut::from(&b"x"[..])).is_err(),
+            "sink is broken"
+        );
     }
 
     #[tokio::test]
