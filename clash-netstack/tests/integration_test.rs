@@ -6,9 +6,10 @@ mod mock_tun;
 
 use common::{
     build_icmpv4_echo_request, build_icmpv6_echo_request, build_tcp_ack,
-    build_tcp_segment, build_tcp_syn_packet, build_tcp_syn_packet_with_port,
-    build_udp_packet, init, is_icmpv4_echo_reply, is_icmpv6_echo_reply, is_rst,
-    is_syn_ack, parse_server_isn, parse_tcp_data, parse_tcp_header, tcp_dst_port,
+    build_tcp_segment, build_tcp_segment_ports, build_tcp_syn_packet,
+    build_tcp_syn_packet_with_port, build_udp_packet, init, is_icmpv4_echo_reply,
+    is_icmpv6_echo_reply, is_rst, is_syn_ack, parse_server_isn, parse_tcp_data,
+    parse_tcp_header, tcp_dst_port,
 };
 use mock_tun::MockTun;
 
@@ -772,4 +773,111 @@ async fn test_rejected_syn_socket_is_reaped() {
         .expect("listener for a rejected SYN was kept alive")
         .expect("expected EOF, not an error");
     assert_eq!(n, 0);
+}
+
+/// smoltcp binds a listener to the local endpoint only and hands a SYN to
+/// the first Listen socket (lowest slot) for that destination. Under TX
+/// backpressure a SYN can stay queued across polls; if a lower slot is freed
+/// and reused by a later connection to the same destination meanwhile, that
+/// newer socket takes the older SYN. The streams must still be wired to the
+/// right clients.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_queued_syns_to_same_destination_are_not_cross_wired() {
+    use std::{collections::HashMap, time::Duration};
+    use tokio::io::AsyncReadExt;
+    const SYN: u8 = 0x02;
+    const ACK: u8 = 0x10;
+    const PSH_ACK: u8 = 0x18;
+    init();
+
+    let (mut mock_tun, tun_in, _) = MockTun::new();
+    let (stack, mut tcp_listener, _udp) = NetStack::with_tcp_tx_capacity(1);
+    let (mut stack_sink, mut stack_stream) = stack.split();
+    tokio::spawn(async move {
+        while let Some(pkt) = mock_tun.next().await {
+            if stack_sink.send(Packet::new(pkt)).await.is_err() {
+                break;
+            }
+        }
+    });
+    let syn = |sport, dport| {
+        build_tcp_segment_ports(sport, dport, 0, 0, SYN, u16::MAX, &[])
+    };
+
+    // Slot 0: its SYN-ACK fills the 1-slot channel (nobody drains yet).
+    tun_in.send(syn(3000, 80)).unwrap();
+    let _l = tcp_listener.next().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    // Slot 1 (to be freed), then A in slot 2; both SYNs stay queued.
+    tun_in.send(syn(3001, 81)).unwrap();
+    let p = tcp_listener.next().await.unwrap();
+    tun_in.send(syn(1024, 80)).unwrap();
+    let mut a = tcp_listener.next().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    // Free slot 1 (app drops a stream still in Listen), then B reuses it.
+    drop(p);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    tun_in.send(syn(2000, 80)).unwrap();
+    let mut b = tcp_listener.next().await.unwrap();
+    assert_eq!(a.local_addr().port(), 1024);
+    assert_eq!(b.local_addr().port(), 2000);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Drain; collect the SYN-ACK sequence numbers for A's and B's ports.
+    let mut isn = HashMap::new();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while isn.len() < 2 {
+            let pkt = stack_stream.next().await.unwrap().unwrap();
+            if is_syn_ack(pkt.data())
+                && let Some(port @ (1024 | 2000)) = tcp_dst_port(pkt.data())
+            {
+                isn.insert(port, parse_server_isn(pkt.data()));
+            }
+        }
+    })
+    .await
+    .expect("SYN-ACKs for A and B");
+    tokio::spawn(async move { while stack_stream.next().await.is_some() {} });
+
+    for (port, payload) in [(1024u16, &b"from-A"[..]), (2000, &b"from-B"[..])] {
+        let ack = isn[&port].wrapping_add(1);
+        tun_in
+            .send(build_tcp_segment_ports(
+                port,
+                80,
+                1,
+                ack,
+                ACK,
+                u16::MAX,
+                &[],
+            ))
+            .unwrap();
+        tun_in
+            .send(build_tcp_segment_ports(
+                port,
+                80,
+                1,
+                ack,
+                PSH_ACK,
+                u16::MAX,
+                payload,
+            ))
+            .unwrap();
+    }
+
+    for (stream, want) in [(&mut a, &b"from-A"[..]), (&mut b, &b"from-B"[..])] {
+        let mut got = vec![0u8; want.len()];
+        tokio::time::timeout(Duration::from_secs(2), stream.read_exact(&mut got))
+            .await
+            .unwrap_or_else(|_| {
+                panic!("no data on stream for {:?}", stream.local_addr())
+            })
+            .unwrap();
+        assert_eq!(
+            got,
+            want,
+            "stream {:?} got another client's data",
+            stream.local_addr()
+        );
+    }
 }

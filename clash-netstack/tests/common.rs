@@ -406,6 +406,20 @@ pub fn build_tcp_segment(
     window: u16,
     payload: &[u8],
 ) -> Bytes {
+    build_tcp_segment_ports(1024, 80, seq, ack, flags, window, payload)
+}
+
+/// Like [`build_tcp_segment`] with explicit ports.
+/// src = [1,1,1,1]:src_port, dst = [2,2,2,2]:dst_port.
+pub fn build_tcp_segment_ports(
+    src_port: u16,
+    dst_port: u16,
+    seq: u32,
+    ack: u32,
+    flags: u8,
+    window: u16,
+    payload: &[u8],
+) -> Bytes {
     let src_ip = [1u8, 1, 1, 1];
     let dst_ip = [2u8, 2, 2, 2];
     let total = 40 + payload.len();
@@ -421,8 +435,8 @@ pub fn build_tcp_segment(
     buf.put_slice(&src_ip);
     buf.put_slice(&dst_ip);
     let tcp_start = buf.len();
-    buf.put_u16(1024);
-    buf.put_u16(80);
+    buf.put_u16(src_port);
+    buf.put_u16(dst_port);
     buf.put_u32(seq);
     buf.put_u32(ack);
     buf.put_u8(0x50);

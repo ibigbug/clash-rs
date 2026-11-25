@@ -33,11 +33,15 @@ pub(crate) struct TcpStreamHandle {
 
     /// Read/write half-close and teardown flags shared with `TcpStream`.
     pub(crate) close: TcpCloseState,
+
+    /// The client whose SYN created this stream.
+    pub(crate) peer: SocketAddr,
 }
 
 impl TcpStreamHandle {
-    pub fn new() -> Self {
+    pub fn new(peer: SocketAddr) -> Self {
         Self {
+            peer,
             recv_buffer: LockFreeRingBuffer::new(
                 DEFAULT_TCP_RECV_BUFFER_SIZE as usize,
             ),
@@ -263,7 +267,7 @@ impl TcpListener {
 
                     trace!("created TCP connection for {src_addr} <-> {dst_addr}");
 
-                    let handle = Arc::new(TcpStreamHandle::new());
+                    let handle = Arc::new(TcpStreamHandle::new(src_addr));
 
                     tcp_stream_emitter
                         .send(TcpStream {
@@ -397,6 +401,41 @@ impl TcpListener {
                 }
 
                 iface.poll(now, device, &mut sockets);
+
+                // smoltcp binds a listener to the local endpoint only and
+                // gives a SYN to the first Listen socket (lowest slot) for
+                // that destination. If SYNs stayed queued across polls (TX
+                // backpressure) while a lower slot was reused by a newer
+                // connection to the same destination, that socket took an
+                // older client's SYN. Re-pair every socket that just left
+                // Listen with the stream that expects its actual peer.
+                let fresh: Vec<_> = added_at.keys().copied().collect();
+                for h in &fresh {
+                    let socket = sockets.get::<tcp::Socket>(*h);
+                    if socket.state() == tcp::State::Listen {
+                        continue;
+                    }
+                    let Some(ep) = socket.remote_endpoint() else {
+                        continue;
+                    };
+                    let actual = SocketAddr::new(ep.addr.into(), ep.port);
+                    if socket_maps.get(h).is_none_or(|c| c.peer == actual) {
+                        continue;
+                    }
+                    let owner = fresh.iter().copied().find(|o| {
+                        o != h
+                            && socket_maps.get(o).is_some_and(|c| c.peer == actual)
+                    });
+                    if let Some(owner) = owner {
+                        trace!(
+                            "Re-pairing TCP socket {h:?} with stream for {actual}"
+                        );
+                        let mine = socket_maps.remove(h).expect("present");
+                        let theirs =
+                            socket_maps.insert(owner, mine).expect("present");
+                        socket_maps.insert(*h, theirs);
+                    }
+                }
 
                 // Poll the sockets for new connections or data
                 for (socket_handle, socket_control) in socket_maps.iter() {
