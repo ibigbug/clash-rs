@@ -491,6 +491,17 @@ async fn test_stack_icmpv6_echo_reply() {
 /// the app read exactly one ring's worth and then got EOF.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_no_tail_loss_when_peer_fin_lands_in_time_wait() {
+    tail_loss_after_peer_fin(std::time::Duration::from_millis(200)).await;
+}
+
+/// Same, but the app does not read until smoltcp's TimeWait timer (10 s)
+/// has expired, which resets the socket and clears its RX buffer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_no_tail_loss_when_reader_outlives_time_wait() {
+    tail_loss_after_peer_fin(std::time::Duration::from_secs(11)).await;
+}
+
+async fn tail_loss_after_peer_fin(read_delay: std::time::Duration) {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     init();
 
@@ -611,8 +622,8 @@ async fn test_no_tail_loss_when_peer_fin_lands_in_time_wait() {
             break;
         }
     }
-    // Let the stack run its socket cleanup pass.
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    // Let the stack run its socket cleanup (and possibly TimeWait expiry).
+    tokio::time::sleep(read_delay).await;
 
     let mut got = Vec::with_capacity(TOTAL);
     tokio::time::timeout(
