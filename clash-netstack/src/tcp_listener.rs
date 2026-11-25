@@ -417,66 +417,81 @@ impl TcpListener {
                 // older client's SYN. Re-pair every socket that just left
                 // Listen with the stream that expects its actual peer.
                 let fresh: Vec<_> = added_at.keys().copied().collect();
-                for h in &fresh {
-                    let socket = sockets.get::<tcp::Socket>(*h);
-                    if socket.state() == tcp::State::Listen {
-                        continue;
-                    }
-                    let Some(ep) = socket.remote_endpoint() else {
-                        continue;
-                    };
-                    let actual = SocketAddr::new(ep.addr.into(), ep.port);
-                    let Some(dst) = socket_maps
-                        .get(h)
-                        .filter(|c| c.peer != actual)
-                        .map(|c| c.dst)
-                    else {
-                        continue;
-                    };
-                    // The same client port may be connecting to several
-                    // destinations at once: match the full tuple.
-                    let owner = fresh.iter().copied().find(|o| {
-                        o != h
-                            && socket_maps
-                                .get(o)
-                                .is_some_and(|c| c.peer == actual && c.dst == dst)
-                    });
-                    if let Some(owner) = owner {
-                        trace!(
-                            "Re-pairing TCP socket {h:?} with stream for {actual}"
-                        );
-                        let mine = socket_maps.remove(h).expect("present");
-                        let theirs =
-                            socket_maps.insert(owner, mine).expect("present");
-                        socket_maps.insert(*h, theirs);
-                    } else {
-                        // No stream expects this client any more (its app
-                        // stream was dropped while the SYN was queued). Reset
-                        // it rather than deliver its data to another client,
-                        // and give this socket's own stream a new listener so
-                        // its SYN, still queued, is served. Otherwise that
-                        // SYN would land on the next Listen socket for the
-                        // destination and orphan it in turn.
-                        trace!("Aborting TCP socket {h:?}: no stream for {actual}");
-                        sockets.get_mut::<tcp::Socket>(*h).abort();
-                        aborted.insert(*h, std::time::Instant::now());
-                        added_at.remove(h);
-                        let stream = socket_maps.remove(h).expect("present");
-                        let mut relisten = new_tcp_socket();
-                        match relisten.listen(stream.dst) {
-                            Ok(()) => {
-                                let nh = sockets.add(relisten);
-                                socket_maps.insert(nh, stream);
-                                added_at.insert(nh, std::time::Instant::now());
-                            }
-                            Err(err) => {
-                                error!("re-listen error: {err:?}");
-                                stream.close.socket_gone();
-                                stream.recv_waker.wake();
-                                stream.send_waker.wake();
-                            }
+                // Two passes: first resolve every swap, then treat what is
+                // still unmatched as orphaned. Deciding orphans in the same
+                // pass would depend on HashMap order: a socket judged
+                // orphaned early could move a stream that a later socket's
+                // swap needed, spreading the reset.
+                for orphans_pass in [false, true] {
+                    for h in &fresh {
+                        if aborted.contains_key(h) {
+                            continue;
                         }
-                        force_poll = true;
+                        let socket = sockets.get::<tcp::Socket>(*h);
+                        if socket.state() == tcp::State::Listen {
+                            continue;
+                        }
+                        let Some(ep) = socket.remote_endpoint() else {
+                            continue;
+                        };
+                        let actual = SocketAddr::new(ep.addr.into(), ep.port);
+                        let Some(dst) = socket_maps
+                            .get(h)
+                            .filter(|c| c.peer != actual)
+                            .map(|c| c.dst)
+                        else {
+                            continue;
+                        };
+                        // The same client port may be connecting to several
+                        // destinations at once: match the full tuple.
+                        let owner = fresh.iter().copied().find(|o| {
+                            o != h
+                                && socket_maps.get(o).is_some_and(|c| {
+                                    c.peer == actual && c.dst == dst
+                                })
+                        });
+                        if let Some(owner) = owner {
+                            trace!(
+                                "Re-pairing TCP socket {h:?} with stream for \
+                                 {actual}"
+                            );
+                            let mine = socket_maps.remove(h).expect("present");
+                            let theirs =
+                                socket_maps.insert(owner, mine).expect("present");
+                            socket_maps.insert(*h, theirs);
+                        } else if orphans_pass {
+                            // No stream expects this client any more (its app
+                            // stream was dropped while the SYN was queued).
+                            // Reset it rather than
+                            // deliver its data to another client,
+                            // and give this socket's own stream a new listener
+                            // so its SYN, still
+                            // queued, is served. Otherwise that
+                            // SYN would land on the next Listen socket for the
+                            // destination and orphan it in turn.
+                            trace!(
+                                "Aborting TCP socket {h:?}: no stream for {actual}"
+                            );
+                            sockets.get_mut::<tcp::Socket>(*h).abort();
+                            aborted.insert(*h, std::time::Instant::now());
+                            added_at.remove(h);
+                            let stream = socket_maps.remove(h).expect("present");
+                            let mut relisten = new_tcp_socket();
+                            match relisten.listen(stream.dst) {
+                                Ok(()) => {
+                                    let nh = sockets.add(relisten);
+                                    socket_maps.insert(nh, stream);
+                                    added_at.insert(nh, std::time::Instant::now());
+                                }
+                                Err(err) => {
+                                    error!("re-listen error: {err:?}");
+                                    stream.close.socket_gone();
+                                    stream.recv_waker.wake();
+                                    stream.send_waker.wake();
+                                }
+                            }
+                            force_poll = true;
+                        }
                     }
                 }
 
