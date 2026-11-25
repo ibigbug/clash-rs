@@ -775,24 +775,28 @@ async fn test_rejected_syn_socket_is_reaped() {
     assert_eq!(n, 0);
 }
 
-/// smoltcp binds a listener to the local endpoint only and hands a SYN to
-/// the first Listen socket (lowest slot) for that destination. Under TX
-/// backpressure a SYN can stay queued across polls; if a lower slot is freed
-/// and reused by a later connection to the same destination meanwhile, that
-/// newer socket takes the older SYN. The streams must still be wired to the
-/// right clients.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn test_queued_syns_to_same_destination_are_not_cross_wired() {
-    use std::{collections::HashMap, time::Duration};
-    use tokio::io::AsyncReadExt;
+/// Sets up queued SYNs from A (1.1.1.1:1024) and B (1.1.1.1:2000) to the
+/// same destination 2.2.2.2:80, with B's listener in a LOWER slot than A's
+/// even though A's SYN is queued first. smoltcp hands a SYN to the first
+/// Listen socket (lowest slot) for its destination, so A's SYN reaches B's
+/// socket: exactly the situation the re-pairing in `poll_sockets` fixes.
+///
+/// The lower slot is freed by letting an unrelated Listen socket (P, whose
+/// SYN is stuck behind TX backpressure) outlive its 10 s grace period after
+/// A was added. Returns once B's SYN is queued; nothing has drained yet.
+async fn queued_syns_with_reversed_slots() -> (
+    tokio::sync::mpsc::UnboundedSender<bytes::Bytes>,
+    watfaq_netstack::StackSplitStream,
+    watfaq_netstack::TcpListener,
+    [watfaq_netstack::TcpStream; 3],
+) {
+    use std::time::Duration;
     const SYN: u8 = 0x02;
-    const ACK: u8 = 0x10;
-    const PSH_ACK: u8 = 0x18;
     init();
 
     let (mut mock_tun, tun_in, _) = MockTun::new();
     let (stack, mut tcp_listener, _udp) = NetStack::with_tcp_tx_capacity(1);
-    let (mut stack_sink, mut stack_stream) = stack.split();
+    let (mut stack_sink, stack_stream) = stack.split();
     tokio::spawn(async move {
         while let Some(pkt) = mock_tun.next().await {
             if stack_sink.send(Packet::new(pkt)).await.is_err() {
@@ -804,143 +808,61 @@ async fn test_queued_syns_to_same_destination_are_not_cross_wired() {
         build_tcp_segment_ports(sport, dport, 0, 0, SYN, u16::MAX, &[])
     };
 
-    // Slot 0: its SYN-ACK fills the 1-slot channel (nobody drains yet).
+    // Slot 0: its SYN-ACK fills the 1-slot channel; nobody drains it.
     tun_in.send(syn(3000, 80)).unwrap();
-    let _l = tcp_listener.next().await.unwrap();
+    let l = tcp_listener.next().await.unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
-    // Slot 1 (to be freed), then A in slot 2; both SYNs stay queued.
+    // Slot 1: P, to an unrelated destination; its SYN stays queued.
     tun_in.send(syn(3001, 81)).unwrap();
-    let p = tcp_listener.next().await.unwrap();
+    let _p = tcp_listener.next().await.unwrap();
+    tokio::time::sleep(Duration::from_secs(4)).await;
+    // Slot 2: A. Its grace period ends ~4 s after P's.
     tun_in.send(syn(1024, 80)).unwrap();
-    let mut a = tcp_listener.next().await.unwrap();
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    // Free slot 1 (app drops a stream still in Listen), then B reuses it.
-    drop(p);
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    let a = tcp_listener.next().await.unwrap();
+    // P's grace period ends; its slot is freed and B takes it.
+    tokio::time::sleep(Duration::from_millis(6300)).await;
     tun_in.send(syn(2000, 80)).unwrap();
-    let mut b = tcp_listener.next().await.unwrap();
+    let b = tcp_listener.next().await.unwrap();
     assert_eq!(a.local_addr().port(), 1024);
     assert_eq!(b.local_addr().port(), 2000);
     tokio::time::sleep(Duration::from_millis(50)).await;
+    (tun_in, stack_stream, tcp_listener, [l, a, b])
+}
 
-    // Drain; collect the SYN-ACK sequence numbers for A's and B's ports.
-    let mut isn = HashMap::new();
-    tokio::time::timeout(Duration::from_secs(3), async {
-        while isn.len() < 2 {
+/// Drain the stack until SYN-ACKs for both given client ports were seen;
+/// returns their ISNs (keyed by port).
+async fn collect_syn_acks(
+    stack_stream: &mut watfaq_netstack::StackSplitStream,
+    ports: &[u16],
+) -> std::collections::HashMap<u16, u32> {
+    let mut isn = std::collections::HashMap::new();
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        while isn.len() < ports.len() {
             let pkt = stack_stream.next().await.unwrap().unwrap();
-            if is_syn_ack(pkt.data())
-                && let Some(port @ (1024 | 2000)) = tcp_dst_port(pkt.data())
+            if let Some(port) = tcp_dst_port(pkt.data())
+                && ports.contains(&port)
             {
+                assert!(is_syn_ack(pkt.data()), "client {port} was not served");
                 isn.insert(port, parse_server_isn(pkt.data()));
             }
         }
     })
     .await
-    .expect("SYN-ACKs for A and B");
-    tokio::spawn(async move { while stack_stream.next().await.is_some() {} });
-
-    for (port, payload) in [(1024u16, &b"from-A"[..]), (2000, &b"from-B"[..])] {
-        let ack = isn[&port].wrapping_add(1);
-        tun_in
-            .send(build_tcp_segment_ports(
-                port,
-                80,
-                1,
-                ack,
-                ACK,
-                u16::MAX,
-                &[],
-            ))
-            .unwrap();
-        tun_in
-            .send(build_tcp_segment_ports(
-                port,
-                80,
-                1,
-                ack,
-                PSH_ACK,
-                u16::MAX,
-                payload,
-            ))
-            .unwrap();
-    }
-
-    for (stream, want) in [(&mut a, &b"from-A"[..]), (&mut b, &b"from-B"[..])] {
-        let mut got = vec![0u8; want.len()];
-        tokio::time::timeout(Duration::from_secs(2), stream.read_exact(&mut got))
-            .await
-            .unwrap_or_else(|_| {
-                panic!("no data on stream for {:?}", stream.local_addr())
-            })
-            .unwrap();
-        assert_eq!(
-            got,
-            want,
-            "stream {:?} got another client's data",
-            stream.local_addr()
-        );
-    }
+    .expect("SYN-ACKs for every client");
+    isn
 }
 
-/// As above, but A's app stream is dropped while its SYN is still queued.
-/// A's SYN must not take B's (lower-slot) listener and leave B without a
-/// connection: B's SYN is still served and its data reaches B's stream.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn test_dropped_stream_with_queued_syn_does_not_steal_connection() {
-    use std::time::Duration;
-    use tokio::io::AsyncReadExt;
-    const SYN: u8 = 0x02;
-    init();
-
-    let (mut mock_tun, tun_in, _) = MockTun::new();
-    let (stack, mut tcp_listener, _udp) = NetStack::with_tcp_tx_capacity(1);
-    let (mut stack_sink, mut stack_stream) = stack.split();
-    tokio::spawn(async move {
-        while let Some(pkt) = mock_tun.next().await {
-            if stack_sink.send(Packet::new(pkt)).await.is_err() {
-                break;
-            }
-        }
-    });
-    let syn = |sport, dport| {
-        build_tcp_segment_ports(sport, dport, 0, 0, SYN, u16::MAX, &[])
-    };
-
-    tun_in.send(syn(3000, 80)).unwrap();
-    let _l = tcp_listener.next().await.unwrap();
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    tun_in.send(syn(3001, 81)).unwrap();
-    let p = tcp_listener.next().await.unwrap();
-    tun_in.send(syn(1024, 80)).unwrap();
-    let a = tcp_listener.next().await.unwrap();
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    drop(p);
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    tun_in.send(syn(2000, 80)).unwrap();
-    let mut b = tcp_listener.next().await.unwrap();
-    // A's stream goes away while its SYN is still queued.
-    drop(a);
-    tokio::time::sleep(Duration::from_millis(100)).await;
-
-    // B still gets its own connection: its queued SYN is answered...
-    let isn_b = tokio::time::timeout(Duration::from_secs(3), async {
-        loop {
-            let pkt = stack_stream.next().await.unwrap().unwrap();
-            if tcp_dst_port(pkt.data()) == Some(2000) {
-                assert!(is_syn_ack(pkt.data()), "B's SYN was not served");
-                break parse_server_isn(pkt.data());
-            }
-        }
-    })
-    .await
-    .expect("no reply to client B");
-    tokio::spawn(async move { while stack_stream.next().await.is_some() {} });
-
-    // ...and its data reaches B's stream.
-    let ack = isn_b.wrapping_add(1);
+/// Complete the handshake for `port` and send `payload`.
+fn client_sends(
+    tun_in: &tokio::sync::mpsc::UnboundedSender<bytes::Bytes>,
+    port: u16,
+    isn: u32,
+    payload: &[u8],
+) {
+    let ack = isn.wrapping_add(1);
     tun_in
         .send(build_tcp_segment_ports(
-            2000,
+            port,
             80,
             1,
             ack,
@@ -951,19 +873,60 @@ async fn test_dropped_stream_with_queued_syn_does_not_steal_connection() {
         .unwrap();
     tun_in
         .send(build_tcp_segment_ports(
-            2000,
+            port,
             80,
             1,
             ack,
             0x18,
             u16::MAX,
-            b"from-B",
+            payload,
         ))
         .unwrap();
-    let mut got = [0u8; 6];
-    tokio::time::timeout(Duration::from_secs(2), b.read_exact(&mut got))
-        .await
-        .expect("no data on B's stream")
-        .unwrap();
-    assert_eq!(&got, b"from-B");
+}
+
+async fn expect_data(stream: &mut watfaq_netstack::TcpStream, want: &[u8]) {
+    use tokio::io::AsyncReadExt;
+    let mut got = vec![0u8; want.len()];
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        stream.read_exact(&mut got),
+    )
+    .await
+    .unwrap_or_else(|_| panic!("no data on stream for {:?}", stream.local_addr()))
+    .unwrap();
+    assert_eq!(
+        got,
+        want,
+        "stream {:?} got another client's data",
+        stream.local_addr()
+    );
+}
+
+/// A's SYN reaches B's (lower-slot) listener; the streams must still be
+/// wired to the right clients.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_queued_syns_to_same_destination_are_not_cross_wired() {
+    let (tun_in, mut stack_stream, _listener, [_l, mut a, mut b]) =
+        queued_syns_with_reversed_slots().await;
+    let isn = collect_syn_acks(&mut stack_stream, &[1024, 2000]).await;
+    tokio::spawn(async move { while stack_stream.next().await.is_some() {} });
+    client_sends(&tun_in, 1024, isn[&1024], b"from-A");
+    client_sends(&tun_in, 2000, isn[&2000], b"from-B");
+    expect_data(&mut a, b"from-A").await;
+    expect_data(&mut b, b"from-B").await;
+}
+
+/// As above, but A's app stream is dropped while its SYN is still queued.
+/// A's SYN must not leave B without a connection: B's SYN is still served
+/// and its data reaches B's stream.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_dropped_stream_with_queued_syn_does_not_steal_connection() {
+    let (tun_in, mut stack_stream, _listener, [_l, a, mut b]) =
+        queued_syns_with_reversed_slots().await;
+    drop(a);
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let isn = collect_syn_acks(&mut stack_stream, &[2000]).await;
+    tokio::spawn(async move { while stack_stream.next().await.is_some() {} });
+    client_sends(&tun_in, 2000, isn[&2000], b"from-B");
+    expect_data(&mut b, b"from-B").await;
 }
