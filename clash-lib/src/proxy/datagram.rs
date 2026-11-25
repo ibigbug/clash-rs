@@ -82,14 +82,20 @@ pub(crate) enum StreamSendState {
     Idle,
     Writing(bytes::BytesMut),
     Flushing,
-    Broken,
+    /// Terminal. Keeps the kind and text of the error that broke the
+    /// stream, so every later call (e.g. a retried close) reports the same
+    /// failure rather than a generic one.
+    Broken(std::io::ErrorKind, String),
 }
 
-fn desynced() -> std::io::Error {
-    std::io::Error::new(
-        std::io::ErrorKind::BrokenPipe,
-        "udp stream unusable after a failed frame write",
-    )
+impl StreamSendState {
+    fn broken(e: &std::io::Error) -> Self {
+        Self::Broken(e.kind(), e.to_string())
+    }
+}
+
+fn broken_err(kind: std::io::ErrorKind, msg: &str) -> std::io::Error {
+    std::io::Error::new(kind, format!("udp stream unusable after: {msg}"))
 }
 
 impl StreamSendState {
@@ -106,7 +112,7 @@ impl StreamSendState {
                 *self = Self::Writing(frame);
                 Ok(())
             }
-            Self::Broken => Err(desynced()),
+            Self::Broken(kind, msg) => Err(broken_err(*kind, msg)),
             Self::Writing(_) | Self::Flushing => Err(std::io::Error::new(
                 std::io::ErrorKind::WouldBlock,
                 "previous packet not yet sent",
@@ -130,7 +136,9 @@ impl StreamSendState {
         loop {
             match self {
                 Self::Idle => return Poll::Ready(Ok(())),
-                Self::Broken => return Poll::Ready(Err(desynced())),
+                Self::Broken(kind, msg) => {
+                    return Poll::Ready(Err(broken_err(*kind, msg)));
+                }
                 Self::Writing(buf) => {
                     if buf.is_empty() {
                         *self = Self::Flushing;
@@ -147,17 +155,16 @@ impl StreamSendState {
                     match res {
                         Ok(n) => buf.advance(n),
                         Err(e) => {
-                            *self = Self::Broken;
+                            *self = Self::broken(&e);
                             return Poll::Ready(Err(e));
                         }
                     }
                 }
                 Self::Flushing => {
                     let res = ready!(w.as_mut().poll_flush(cx));
-                    *self = if res.is_ok() {
-                        Self::Idle
-                    } else {
-                        Self::Broken
+                    *self = match &res {
+                        Ok(()) => Self::Idle,
+                        Err(e) => Self::broken(e),
                     };
                     return Poll::Ready(res);
                 }
@@ -298,7 +305,7 @@ mod tests {
         assert_eq!(err.kind(), io::ErrorKind::WriteZero);
         // The stream is closed: later frames are refused, not queued.
         let err = st.start(BytesMut::from(&b"y"[..])).unwrap_err();
-        assert_eq!(err.kind(), io::ErrorKind::BrokenPipe);
+        assert_eq!(err.kind(), io::ErrorKind::WriteZero);
     }
 
     #[tokio::test]
@@ -317,7 +324,8 @@ mod tests {
         .await
         .unwrap_err();
         assert_eq!(w.out, b"fra");
-        assert!(st.start(BytesMut::from(&b"x"[..])).is_err());
+        let err = st.start(BytesMut::from(&b"x"[..])).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::WriteZero);
     }
 
     #[tokio::test]
@@ -337,11 +345,11 @@ mod tests {
         // Even if the writer recovers, no later frame may follow the fragment.
         w.fail_after = None;
         let err = st.start(BytesMut::from(&b"frame-two"[..])).unwrap_err();
-        assert_eq!(err.kind(), io::ErrorKind::BrokenPipe);
+        assert_eq!(err.kind(), io::ErrorKind::ConnectionReset);
         let err = std::future::poll_fn(|cx| st.poll_send(Pin::new(&mut w), cx))
             .await
             .unwrap_err();
-        assert_eq!(err.kind(), io::ErrorKind::BrokenPipe);
+        assert_eq!(err.kind(), io::ErrorKind::ConnectionReset);
         assert_eq!(w.out, b"fra", "nothing written after the fragment");
     }
 
@@ -361,7 +369,7 @@ mod tests {
         );
         w.fail_after = None;
         let err = st.start(BytesMut::from(&b"next"[..])).unwrap_err();
-        assert_eq!(err.kind(), io::ErrorKind::BrokenPipe);
+        assert_eq!(err.kind(), io::ErrorKind::ConnectionReset);
         assert!(w.out.is_empty());
     }
 
@@ -377,10 +385,12 @@ mod tests {
         assert_eq!(err.kind(), io::ErrorKind::ConnectionReset);
         assert_eq!(w.shutdowns, 1, "stream shut down despite send failure");
 
-        // Retrying close still reaches the stream instead of erroring early.
-        std::future::poll_fn(|cx| st.poll_close(Pin::new(&mut w), cx))
+        // Retrying close still reaches the stream instead of erroring early,
+        // and reports the same failure.
+        let err = std::future::poll_fn(|cx| st.poll_close(Pin::new(&mut w), cx))
             .await
             .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::ConnectionReset);
         assert_eq!(w.shutdowns, 2);
     }
 
@@ -397,7 +407,11 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(w.shutdowns, 1);
-        assert_ne!(err.kind(), io::ErrorKind::Other);
+        assert_eq!(
+            err.kind(),
+            io::ErrorKind::ConnectionReset,
+            "flush error kept"
+        );
         assert!(
             st.start(BytesMut::from(&b"x"[..])).is_err(),
             "sink is broken"
