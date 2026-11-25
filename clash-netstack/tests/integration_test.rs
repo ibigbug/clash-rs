@@ -881,3 +881,69 @@ async fn test_queued_syns_to_same_destination_are_not_cross_wired() {
         );
     }
 }
+
+/// As above, but A's app stream is dropped while its SYN is still queued,
+/// so when B's (lower-slot) socket takes A's SYN no stream expects A. That
+/// socket must be reset instead of wiring client A to B's stream.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_orphaned_queued_syn_is_reset_not_cross_wired() {
+    use std::time::Duration;
+    use tokio::io::AsyncReadExt;
+    const SYN: u8 = 0x02;
+    const RST: u8 = 0x04;
+    init();
+
+    let (mut mock_tun, tun_in, _) = MockTun::new();
+    let (stack, mut tcp_listener, _udp) = NetStack::with_tcp_tx_capacity(1);
+    let (mut stack_sink, mut stack_stream) = stack.split();
+    tokio::spawn(async move {
+        while let Some(pkt) = mock_tun.next().await {
+            if stack_sink.send(Packet::new(pkt)).await.is_err() {
+                break;
+            }
+        }
+    });
+    let syn = |sport, dport| {
+        build_tcp_segment_ports(sport, dport, 0, 0, SYN, u16::MAX, &[])
+    };
+
+    tun_in.send(syn(3000, 80)).unwrap();
+    let _l = tcp_listener.next().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    tun_in.send(syn(3001, 81)).unwrap();
+    let p = tcp_listener.next().await.unwrap();
+    tun_in.send(syn(1024, 80)).unwrap();
+    let a = tcp_listener.next().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    drop(p);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    tun_in.send(syn(2000, 80)).unwrap();
+    let mut b = tcp_listener.next().await.unwrap();
+    // A's stream goes away while its SYN is still queued.
+    drop(a);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Drain; client A must be reset (smoltcp may already have answered with
+    // a SYN-ACK in the same poll, so look for the RST that follows).
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let pkt = stack_stream.next().await.unwrap().unwrap();
+            if tcp_dst_port(pkt.data()) == Some(1024)
+                && parse_tcp_header(pkt.data()).unwrap().2 & RST != 0
+            {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("client A was accepted onto another stream instead of reset");
+    tokio::spawn(async move { while stack_stream.next().await.is_some() {} });
+
+    // B's stream does not carry A's connection: it ends instead of hanging.
+    let mut byte = [0u8; 1];
+    let n = tokio::time::timeout(Duration::from_secs(2), b.read(&mut byte))
+        .await
+        .expect("B's stream left attached to client A's connection")
+        .unwrap_or(0);
+    assert_eq!(n, 0);
+}

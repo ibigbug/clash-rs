@@ -36,12 +36,15 @@ pub(crate) struct TcpStreamHandle {
 
     /// The client whose SYN created this stream.
     pub(crate) peer: SocketAddr,
+    /// The destination that SYN was addressed to.
+    pub(crate) dst: SocketAddr,
 }
 
 impl TcpStreamHandle {
-    pub fn new(peer: SocketAddr) -> Self {
+    pub fn new(peer: SocketAddr, dst: SocketAddr) -> Self {
         Self {
             peer,
+            dst,
             recv_buffer: LockFreeRingBuffer::new(
                 DEFAULT_TCP_RECV_BUFFER_SIZE as usize,
             ),
@@ -267,7 +270,7 @@ impl TcpListener {
 
                     trace!("created TCP connection for {src_addr} <-> {dst_addr}");
 
-                    let handle = Arc::new(TcpStreamHandle::new(src_addr));
+                    let handle = Arc::new(TcpStreamHandle::new(src_addr, dst_addr));
 
                     tcp_stream_emitter
                         .send(TcpStream {
@@ -333,6 +336,12 @@ impl TcpListener {
         // (and the app's TcpStream closed) before the handshake starts.
         let mut added_at: HashMap<smoltcp::iface::SocketHandle, std::time::Instant> =
             HashMap::new();
+        // Sockets aborted in the current iteration: kept through this
+        // iteration's cleanup so the next poll can send their RST (smoltcp
+        // emits it from dispatch, not from abort()), then reaped as usual.
+        let mut reset_pending: std::collections::HashSet<
+            smoltcp::iface::SocketHandle,
+        > = Default::default();
         let tx_waiter = device.tx_waiter();
         let mut next_poll = None;
         // Poll on the next iteration even with no sockets (ICMP, or the TX
@@ -419,12 +428,20 @@ impl TcpListener {
                         continue;
                     };
                     let actual = SocketAddr::new(ep.addr.into(), ep.port);
-                    if socket_maps.get(h).is_none_or(|c| c.peer == actual) {
+                    let Some(dst) = socket_maps
+                        .get(h)
+                        .filter(|c| c.peer != actual)
+                        .map(|c| c.dst)
+                    else {
                         continue;
-                    }
+                    };
+                    // The same client port may be connecting to several
+                    // destinations at once: match the full tuple.
                     let owner = fresh.iter().copied().find(|o| {
                         o != h
-                            && socket_maps.get(o).is_some_and(|c| c.peer == actual)
+                            && socket_maps
+                                .get(o)
+                                .is_some_and(|c| c.peer == actual && c.dst == dst)
                     });
                     if let Some(owner) = owner {
                         trace!(
@@ -434,6 +451,15 @@ impl TcpListener {
                         let theirs =
                             socket_maps.insert(owner, mine).expect("present");
                         socket_maps.insert(*h, theirs);
+                    } else {
+                        // No stream expects this client any more (its app
+                        // stream was dropped while the SYN was queued). Reset
+                        // rather than deliver its data to another client;
+                        // this socket's own stream then closes normally.
+                        trace!("Aborting TCP socket {h:?}: no stream for {actual}");
+                        sockets.get_mut::<tcp::Socket>(*h).abort();
+                        reset_pending.insert(*h);
+                        force_poll = true;
                     }
                 }
 
@@ -615,7 +641,8 @@ impl TcpListener {
                     if socket.state() != tcp::State::Listen {
                         added_at.remove(handle);
                     }
-                    if socket.is_active() || unread || awaiting_syn {
+                    let flushing_rst = reset_pending.contains(handle);
+                    if socket.is_active() || unread || awaiting_syn || flushing_rst {
                         true
                     } else {
                         rx_tails.remove(handle);
@@ -632,6 +659,7 @@ impl TcpListener {
                         false
                     }
                 });
+                reset_pending.clear();
 
                 next_poll = match iface.poll_delay(now, &sockets) {
                     Some(smoltcp::time::Duration::ZERO) => None,
