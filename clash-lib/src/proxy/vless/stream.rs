@@ -442,6 +442,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_header_fills_pipe_exactly_no_zero_write() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        // A pipe with room for exactly the header: the first inner write
+        // takes the header and none of the payload. That must not surface as
+        // Ok(0) (which callers read as "closed"); the write keeps going.
+        let probe = VlessStream::new(
+            Box::new(tokio::io::duplex(1).0),
+            TEST_UUID,
+            &tcp_dest(),
+            false,
+            None,
+        )
+        .unwrap();
+        let header = probe.build_handshake_header().to_vec();
+        let (client, mut server) = tokio::io::duplex(header.len());
+        let mut s =
+            VlessStream::new(Box::new(client), TEST_UUID, &tcp_dest(), false, None)
+                .unwrap();
+
+        {
+            let fut = s.write(b"hello");
+            tokio::pin!(fut);
+            match futures::poll!(fut.as_mut()) {
+                std::task::Poll::Pending => {}
+                std::task::Poll::Ready(r) => {
+                    panic!("expected Pending with a full pipe, got {r:?}")
+                }
+            }
+        }
+        let mut got = vec![0u8; header.len()];
+        server.read_exact(&mut got).await.unwrap();
+        assert_eq!(got, header);
+
+        assert_eq!(s.write(b"hello").await.unwrap(), 5);
+        let mut payload = [0u8; 5];
+        server.read_exact(&mut payload).await.unwrap();
+        assert_eq!(&payload, b"hello");
+    }
+
+    #[tokio::test]
     async fn test_response_split_across_reads() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let (client, mut server) = tokio::io::duplex(1024);
