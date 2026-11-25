@@ -407,6 +407,7 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(w.shutdowns, 1);
+        assert_eq!(w.flushes, 1, "retry reused the stored error, no re-flush");
         assert_eq!(
             err.kind(),
             io::ErrorKind::ConnectionReset,
