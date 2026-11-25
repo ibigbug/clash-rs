@@ -76,7 +76,10 @@ impl Parked {
 
     fn wake_all(&self) {
         for slot in &self.0 {
-            if let Some(w) = slot.lock().unwrap().take() {
+            // Release the lock before waking: a waker that polls inline
+            // would otherwise re-enter `park` on the same slot.
+            let w = slot.lock().unwrap().take();
+            if let Some(w) = w {
                 w.wake();
             }
         }
