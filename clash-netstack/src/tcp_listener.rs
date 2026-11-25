@@ -592,6 +592,13 @@ impl TcpListener {
                     // a stashed RX tail into a ring the app is not draining.
                     None => Some(Duration::MAX),
                 };
+                // A socket still waiting in Listen has no smoltcp timer, so
+                // wake up when its grace period ends to reap it.
+                if let Some(oldest) = added_at.values().min() {
+                    let left = LISTEN_GRACE.saturating_sub(oldest.elapsed())
+                        + Duration::from_millis(1);
+                    next_poll = next_poll.map(|d| d.min(left));
+                }
 
                 // Yield to the tokio scheduler so that other tasks (e.g.
                 // StackSplitStream draining the tx packet channel) get a chance
@@ -639,9 +646,22 @@ impl TcpListener {
                     // The TUN writer drained the outbound channel that made
                     // the last poll stall (inbound packets are left queued
                     // while it is full). Nothing else would signal this.
-                    Ok(_permit) = tx_waiter.reserve(), if device.tx_blocked() => {
+                    Ok(permit) = tx_waiter.reserve(), if device.tx_blocked() => {
                         trace!("Outbound channel has room again, will poll sockets");
+                        // Release the slot for the device before polling.
+                        drop(permit);
                         next_poll = None;
+                        // With no sockets the loop would not poll on its own
+                        // (and `tx_blocked` would stay set, so this branch
+                        // would fire again at once): poll here, like the
+                        // ICMP path does, to process what was queued.
+                        if socket_maps.is_empty() {
+                            iface.poll(
+                                smoltcp::time::Instant::now(),
+                                device,
+                                &mut sockets,
+                            );
+                        }
                     }
                     _ = tokio::time::sleep(next_poll.unwrap_or(Duration::MAX)) => {
                         trace!("Woke up to poll sockets after delay");

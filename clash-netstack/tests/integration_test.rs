@@ -693,3 +693,83 @@ async fn test_syn_survives_full_tx_channel() {
     .expect("SYN for B not processed after the TX channel drained");
     assert!(is_syn_ack(syn_ack_b.data()), "B got RST instead of SYN-ACK");
 }
+
+/// With no TCP sockets and a full outbound channel, a queued ICMP request
+/// must be answered once the channel drains (and the stack must not spin
+/// while it waits).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_icmp_reply_after_full_tx_channel_drains() {
+    use std::time::Duration;
+    init();
+
+    let (mut mock_tun, tun_in, _) = MockTun::new();
+    let (stack, _tcp_listener, _udp) = NetStack::with_tcp_tx_capacity(1);
+    let (mut stack_sink, mut stack_stream) = stack.split();
+    tokio::spawn(async move {
+        while let Some(pkt) = mock_tun.next().await {
+            if stack_sink.send(Packet::new(pkt)).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    for seq in [1u16, 2] {
+        tun_in
+            .send(build_icmpv4_echo_request(
+                [192, 168, 1, 100],
+                [1, 1, 1, 1],
+                0x1234,
+                seq,
+                b"ping",
+            ))
+            .unwrap();
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    for seq in [1u16, 2] {
+        let reply =
+            tokio::time::timeout(Duration::from_millis(500), stack_stream.next())
+                .await
+                .unwrap_or_else(|_| {
+                    panic!("no echo reply {seq} after channel drained")
+                })
+                .unwrap()
+                .unwrap();
+        assert!(is_icmpv4_echo_reply(reply.data(), 0x1234, seq));
+    }
+}
+
+/// A socket whose SYN smoltcp never accepts (here: bad checksum) must not
+/// linger in Listen past the grace period on an otherwise idle stack: the
+/// app's stream has to see EOF.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_unmatched_syn_socket_is_reaped_after_grace() {
+    use std::time::Duration;
+    use tokio::io::AsyncReadExt;
+    init();
+
+    let (mut mock_tun, tun_in, _) = MockTun::new();
+    let (stack, mut tcp_listener, _udp) = NetStack::new();
+    let (mut stack_sink, mut stack_stream) = stack.split();
+    tokio::spawn(async move {
+        while let Some(pkt) = mock_tun.next().await {
+            if stack_sink.send(Packet::new(pkt)).await.is_err() {
+                break;
+            }
+        }
+    });
+    tokio::spawn(async move { while stack_stream.next().await.is_some() {} });
+
+    let mut syn = build_tcp_syn_packet().to_vec();
+    let tcp_checksum = 20 + 16;
+    syn[tcp_checksum] ^= 0xff;
+    tun_in.send(syn.into()).unwrap();
+
+    let mut s = tcp_listener.next().await.unwrap();
+    let mut byte = [0u8; 1];
+    let n = tokio::time::timeout(Duration::from_secs(13), s.read(&mut byte))
+        .await
+        .expect("stream for a never-accepted SYN hung past the grace period")
+        .unwrap_or(0);
+    assert_eq!(n, 0);
+}
