@@ -37,8 +37,8 @@ enum WriteState {
 /// Read side of the VLESS handshake.
 ///
 /// The response header is `version (1) | addon_len (1) | addon (addon_len)`.
-/// It can only arrive after the request was sent. While the write side is
-/// still `Idle`, reads pass through to `inner` so EOF/reset is still observed
+/// It can only arrive after the request header was fully sent. Until the write
+/// side is `Open`, reads pass through to `inner` so EOF/reset is still observed
 /// (e.g. the client closes without sending anything); any actual data at that
 /// point is a protocol violation.
 enum ReadState {
@@ -218,11 +218,12 @@ impl AsyncRead for VlessStream {
     ) -> Poll<io::Result<()>> {
         let this = &mut *self;
         if !matches!(this.read_state, ReadState::Open) {
-            if matches!(this.write_state, WriteState::Idle) {
-                // No request sent yet. Poll `inner` anyway so EOF/errors are
-                // surfaced and our waker is registered there: once the
-                // request goes out, the response wakes us and the next poll
-                // takes the branch below.
+            if !matches!(this.write_state, WriteState::Open) {
+                // Request header not fully sent yet (Idle or Sending), so a
+                // valid server cannot have responded. Poll `inner` anyway so
+                // EOF/errors are surfaced and our waker is registered there:
+                // once the header is out, the response wakes us and the next
+                // poll takes the branch below.
                 let before = buf.filled().len();
                 ready!(Pin::new(&mut this.inner).poll_read(cx, buf))?;
                 if buf.filled().len() != before {
@@ -593,5 +594,25 @@ mod tests {
         });
         s.write_all(b"x").await.unwrap();
         assert_eq!(reader.await.unwrap(), expected.to_vec());
+    }
+
+    #[tokio::test]
+    async fn test_server_data_while_header_partially_sent_is_error() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let (client, mut server) = tokio::io::duplex(8);
+        let mut s =
+            VlessStream::new(Box::new(client), TEST_UUID, &tcp_dest(), false, None)
+                .unwrap();
+        // First write stalls with only part of the header on the wire.
+        {
+            let fut = s.write(b"hello");
+            tokio::pin!(fut);
+            assert!(futures::poll!(fut.as_mut()).is_pending());
+        }
+        // A server cannot answer an incomplete request; this must not be
+        // parsed as the response header and handed out as data.
+        server.write_all(&[0, 0, b'x']).await.unwrap();
+        let err = s.read(&mut [0u8; 8]).await.unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
     }
 }
