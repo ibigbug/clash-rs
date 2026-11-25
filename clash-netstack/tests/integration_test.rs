@@ -695,8 +695,7 @@ async fn test_syn_survives_full_tx_channel() {
 }
 
 /// With no TCP sockets and a full outbound channel, a queued ICMP request
-/// must be answered once the channel drains (and the stack must not spin
-/// while it waits).
+/// must be answered once the channel drains.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_icmp_reply_after_full_tx_channel_drains() {
     use std::time::Duration;
@@ -767,9 +766,17 @@ async fn test_unmatched_syn_socket_is_reaped_after_grace() {
 
     let mut s = tcp_listener.next().await.unwrap();
     let mut byte = [0u8; 1];
-    let n = tokio::time::timeout(Duration::from_secs(13), s.read(&mut byte))
+    // Still open well inside the grace period...
+    assert!(
+        tokio::time::timeout(Duration::from_secs(5), s.read(&mut byte))
+            .await
+            .is_err(),
+        "Listen socket reaped before its grace period"
+    );
+    // ...and closed (clean EOF) shortly after it ends.
+    let n = tokio::time::timeout(Duration::from_secs(8), s.read(&mut byte))
         .await
         .expect("stream for a never-accepted SYN hung past the grace period")
-        .unwrap_or(0);
+        .expect("expected EOF, not an error");
     assert_eq!(n, 0);
 }

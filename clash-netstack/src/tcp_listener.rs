@@ -331,6 +331,11 @@ impl TcpListener {
             HashMap::new();
         let tx_waiter = device.tx_waiter();
         let mut next_poll = None;
+        // Poll on the next iteration even with no sockets (ICMP, or the TX
+        // channel regaining room). Going through the normal path drains
+        // pending TcpStream events first, so a SYN injected right after its
+        // socket was queued is never seen by smoltcp without a listener.
+        let mut force_poll = false;
 
         loop {
             trace!(
@@ -340,6 +345,7 @@ impl TcpListener {
             );
 
             let should_poll_now = match (next_poll, socket_maps.len()) {
+                _ if std::mem::take(&mut force_poll) => true,
                 (None, 0) => {
                     trace!("No sockets to poll, waiting indefinitely");
                     false
@@ -633,13 +639,7 @@ impl TcpListener {
                             }
                             IfaceEvent::Icmp => {
                                 trace!("ICMP packet received, will poll sockets");
-                                if socket_maps.is_empty() {
-                                    iface.poll(
-                                        smoltcp::time::Instant::now(),
-                                        device,
-                                        &mut sockets,
-                                    );
-                                }
+                                force_poll = true;
                             }
                         }
                     }
@@ -653,15 +653,8 @@ impl TcpListener {
                         next_poll = None;
                         // With no sockets the loop would not poll on its own
                         // (and `tx_blocked` would stay set, so this branch
-                        // would fire again at once): poll here, like the
-                        // ICMP path does, to process what was queued.
-                        if socket_maps.is_empty() {
-                            iface.poll(
-                                smoltcp::time::Instant::now(),
-                                device,
-                                &mut sockets,
-                            );
-                        }
+                        // would fire again at once).
+                        force_poll = true;
                     }
                     _ = tokio::time::sleep(next_poll.unwrap_or(Duration::MAX)) => {
                         trace!("Woke up to poll sockets after delay");
