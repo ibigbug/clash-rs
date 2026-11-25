@@ -565,7 +565,12 @@ impl TcpListener {
                         trace!("device poll delay: {delay:?}");
                         Some(delay.into())
                     }
-                    None => None,
+                    // No socket has a deadline: nothing to do until a packet
+                    // arrives or the app reads/writes, both of which send a
+                    // notifier event. Polling again right away would spin,
+                    // e.g. on a TimeWait-expired socket kept only to deliver
+                    // a stashed RX tail into a ring the app is not draining.
+                    None => Some(Duration::MAX),
                 };
 
                 // Yield to the tokio scheduler so that other tasks (e.g.
