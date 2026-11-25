@@ -520,6 +520,14 @@ impl TcpListener {
                     }
                 }
 
+                // Inbound packets still queued in the device (held back by
+                // TX backpressure) may include the SYN a Listen socket waits
+                // for. If nothing is queued, a socket still in Listen had its
+                // SYN rejected by smoltcp and must not linger: smoltcp only
+                // binds the local endpoint, so a stale listener could accept
+                // another client's SYN to the same destination and cross-wire
+                // the two streams.
+                let rx_pending = device.rx_pending();
                 socket_maps.retain(|handle, socket_control| {
                     let socket = sockets.get_mut::<tcp::Socket>(*handle);
 
@@ -560,6 +568,7 @@ impl TcpListener {
                     let unread = rx_tails.contains_key(handle)
                         && !socket_control.close.is_app_dropped();
                     let awaiting_syn = socket.state() == tcp::State::Listen
+                        && rx_pending
                         && !socket_control.close.is_app_dropped()
                         && added_at
                             .get(handle)

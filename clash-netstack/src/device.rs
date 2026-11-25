@@ -10,9 +10,11 @@ pub struct NetstackDevice {
     rx_queue: mpsc::UnboundedReceiver<Packet>,
 
     tx_sender: mpsc::Sender<Packet>,
-    /// The last receive/transmit found the outbound channel full. The stack
-    /// task then waits for capacity, since nothing else signals when the TUN
-    /// writer drains it.
+    /// An inbound packet is queued but the last `receive()` could not take
+    /// it because the outbound channel was full. The stack task then waits
+    /// for capacity, since nothing else signals when the TUN writer drains
+    /// it. Only `receive()` updates this: a later successful `transmit()` in
+    /// the same poll does not mean the queued packet was handled.
     tx_blocked: bool,
     capabilities: DeviceCapabilities,
 
@@ -48,6 +50,11 @@ impl NetstackDevice {
         self.tx_blocked
     }
 
+    /// Inbound packets are waiting to be handed to smoltcp.
+    pub fn rx_pending(&self) -> bool {
+        !self.rx_queue.is_empty()
+    }
+
     /// A handle for awaiting outbound capacity while `tx_blocked()`.
     pub fn tx_waiter(&self) -> mpsc::Sender<Packet> {
         self.tx_sender.clone()
@@ -67,6 +74,10 @@ impl Device for NetstackDevice {
         // the inbound packet even when try_reserve() subsequently fails,
         // silently dropping ACKs and preventing smoltcp from advancing
         // its send window.
+        if self.rx_queue.is_empty() {
+            self.tx_blocked = false;
+            return None;
+        }
         let permit = self.tx_sender.try_reserve().ok();
         self.tx_blocked = permit.is_none();
         let permit = permit?;
@@ -81,9 +92,10 @@ impl Device for NetstackDevice {
     }
 
     fn transmit(&mut self, _timestamp: Instant) -> Option<Self::TxToken<'_>> {
-        let permit = self.tx_sender.try_reserve().ok();
-        self.tx_blocked = permit.is_none();
-        permit.map(|permit| TxTokenImpl { tx_sender: permit })
+        self.tx_sender
+            .try_reserve()
+            .map(|permit| TxTokenImpl { tx_sender: permit })
+            .ok()
     }
 
     fn capabilities(&self) -> DeviceCapabilities {
