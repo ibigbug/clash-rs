@@ -485,7 +485,14 @@ impl TcpListener {
                         // handshake and reports is_active() == false.
                     }
 
-                    if socket.is_active() {
+                    // TimeWait also counts as inactive, but the peer's last
+                    // bytes may still sit in smoltcp's RX buffer because the
+                    // app-side ring was full. Keep the socket until the data
+                    // path above has moved them out (and then set the read
+                    // EOF), unless the app is gone and nobody will read.
+                    let unread =
+                        socket.can_recv() && !socket_control.close.is_app_dropped();
+                    if socket.is_active() || unread {
                         true
                     } else {
                         trace!("Removing inactive TCP socket");
