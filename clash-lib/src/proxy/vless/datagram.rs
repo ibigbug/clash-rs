@@ -6,7 +6,7 @@ use std::{
 
 use bytes::{BufMut, BytesMut};
 use futures::{Sink, Stream, ready};
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::io::{AsyncRead, ReadBuf};
 use tracing::{debug, trace};
 
 use crate::{
@@ -117,11 +117,11 @@ impl Sink<UdpPacket> for OutboundDatagramVless {
     }
 
     fn poll_close(
-        mut self: Pin<&mut Self>,
+        self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Result<(), Self::Error>> {
-        ready!(self.as_mut().poll_flush(cx))?;
-        Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
+        let this = self.get_mut();
+        this.send.poll_close(Pin::new(&mut this.inner), cx)
     }
 }
 

@@ -63,26 +63,23 @@ impl UdpPacket {
 ///
 /// ```text
 /// Idle ──start(frame)──▶ Writing ──drained──▶ Flushing ──▶ Idle
-///                          │  │                   └─ flush err ─▶ Idle
-///                          │  └─ err, no bytes written ─▶ Idle (dropped)
-///                          └─── err after partial write ─▶ Broken (terminal)
+///                          │                      └─ flush err ─▶ Idle
+///                          └── write err / Ok(0) ─▶ Broken (terminal)
 /// ```
 ///
 /// A frame is encoded once in `start_send` and drained across as many polls
-/// as the inner writer needs. If a write fails before any byte of the frame
-/// was accepted, the frame is dropped and the sink stays usable. If it fails
-/// after part of the frame is on the wire, the byte stream is no longer
-/// frame-aligned, so the sink becomes `Broken` and refuses every later frame
-/// rather than let the peer misparse them.
+/// as the inner writer needs. Any write failure is terminal: even when the
+/// outer `poll_write` reported no progress, a layered stream (TLS, VMess
+/// AEAD, WebSocket) may already have pushed part of an encrypted record or
+/// kept internal write state, so the byte stream can no longer be trusted
+/// to be frame-aligned. The sink becomes `Broken` and refuses every later
+/// frame rather than let the peer misparse them. A failed flush happens
+/// after the whole frame was accepted, so framing is intact.
 #[derive(Debug, Default)]
 pub(crate) enum StreamSendState {
     #[default]
     Idle,
-    Writing {
-        buf: bytes::BytesMut,
-        /// At least one byte of this frame has been written.
-        started: bool,
-    },
+    Writing(bytes::BytesMut),
     Flushing,
     Broken,
 }
@@ -90,7 +87,7 @@ pub(crate) enum StreamSendState {
 fn desynced() -> std::io::Error {
     std::io::Error::new(
         std::io::ErrorKind::BrokenPipe,
-        "udp stream desynchronized by a partially written frame",
+        "udp stream unusable after a failed frame write",
     )
 }
 
@@ -105,14 +102,11 @@ impl StreamSendState {
     pub(crate) fn start(&mut self, frame: bytes::BytesMut) -> std::io::Result<()> {
         match self {
             Self::Idle => {
-                *self = Self::Writing {
-                    buf: frame,
-                    started: false,
-                };
+                *self = Self::Writing(frame);
                 Ok(())
             }
             Self::Broken => Err(desynced()),
-            Self::Writing { .. } | Self::Flushing => Err(std::io::Error::new(
+            Self::Writing(_) | Self::Flushing => Err(std::io::Error::new(
                 std::io::ErrorKind::WouldBlock,
                 "previous packet not yet sent",
             )),
@@ -136,7 +130,7 @@ impl StreamSendState {
             match self {
                 Self::Idle => return Poll::Ready(Ok(())),
                 Self::Broken => return Poll::Ready(Err(desynced())),
-                Self::Writing { buf, started } => {
+                Self::Writing(buf) => {
                     if buf.is_empty() {
                         *self = Self::Flushing;
                         continue;
@@ -150,12 +144,9 @@ impl StreamSendState {
                         res => res,
                     };
                     match res {
-                        Ok(n) => {
-                            buf.advance(n);
-                            *started = true;
-                        }
+                        Ok(n) => buf.advance(n),
                         Err(e) => {
-                            *self = if *started { Self::Broken } else { Self::Idle };
+                            *self = Self::Broken;
                             return Poll::Ready(Err(e));
                         }
                     }
@@ -169,6 +160,25 @@ impl StreamSendState {
                 }
             }
         }
+    }
+
+    /// `Sink::poll_close` for sinks that own the stream: finish any queued
+    /// frame, then shut the stream down. The shutdown runs even when the
+    /// frame could not be sent (e.g. the sink is `Broken`), so the peer
+    /// still gets a FIN / close_notify; the send error is returned after.
+    pub(crate) fn poll_close<W>(
+        &mut self,
+        mut w: std::pin::Pin<&mut W>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>>
+    where
+        W: tokio::io::AsyncWrite + ?Sized,
+    {
+        use std::task::ready;
+
+        let sent = ready!(self.poll_send(w.as_mut(), cx));
+        let shut = ready!(w.poll_shutdown(cx));
+        std::task::Poll::Ready(sent.and(shut))
     }
 }
 
@@ -191,6 +201,7 @@ mod tests {
         toggle: bool,
         closed: bool,
         flushes: usize,
+        shutdowns: usize,
         /// Return an error once this many bytes have been accepted.
         fail_after: Option<usize>,
     }
@@ -205,7 +216,7 @@ mod tests {
                 return Poll::Ready(Ok(0));
             }
             if self.fail_after.is_some_and(|n| self.out.len() >= n) {
-                return Poll::Ready(Err(io::ErrorKind::Interrupted.into()));
+                return Poll::Ready(Err(io::ErrorKind::ConnectionReset.into()));
             }
             self.toggle = !self.toggle;
             if self.toggle {
@@ -226,9 +237,10 @@ mod tests {
         }
 
         fn poll_shutdown(
-            self: Pin<&mut Self>,
+            mut self: Pin<&mut Self>,
             _: &mut Context<'_>,
         ) -> Poll<io::Result<()>> {
+            self.shutdowns += 1;
             Poll::Ready(Ok(()))
         }
     }
@@ -240,6 +252,7 @@ mod tests {
             toggle: false,
             closed,
             flushes: 0,
+            shutdowns: 0,
             fail_after: None,
         }
     }
@@ -260,7 +273,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn write_zero_drops_frame_and_recovers() {
+    async fn write_zero_breaks_sink() {
         let mut w = trickle(true);
         let mut st = StreamSendState::default();
         st.start(BytesMut::from(&b"x"[..])).unwrap();
@@ -268,9 +281,28 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::WriteZero);
-        // Not wedged: idle again and accepts the next frame.
-        assert!(st.is_idle());
-        st.start(BytesMut::from(&b"y"[..])).unwrap();
+        // The stream is closed: later frames are refused, not queued.
+        let err = st.start(BytesMut::from(&b"y"[..])).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::BrokenPipe);
+    }
+
+    #[tokio::test]
+    async fn write_zero_mid_frame_breaks_sink() {
+        let mut w = trickle(false);
+        let mut st = StreamSendState::default();
+        st.start(BytesMut::from(&b"frame-one"[..])).unwrap();
+        // Accept one chunk, then report the stream closed mid-frame.
+        std::future::poll_fn(|cx| {
+            let r = st.poll_send(Pin::new(&mut w), cx);
+            if !w.out.is_empty() {
+                w.closed = true;
+            }
+            r
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(w.out, b"fra");
+        assert!(st.start(BytesMut::from(&b"x"[..])).is_err());
     }
 
     #[tokio::test]
@@ -299,7 +331,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn error_before_any_byte_drops_frame_only() {
+    async fn error_before_any_byte_still_breaks_sink() {
+        // A layered writer (TLS, VMess) may have emitted part of a record
+        // even when it reports an error with no progress, so this is
+        // terminal too.
         let mut w = trickle(false);
         w.fail_after = Some(0);
         let mut st = StreamSendState::default();
@@ -309,13 +344,40 @@ mod tests {
                 .await
                 .is_err()
         );
-        assert!(st.is_idle(), "stream still frame-aligned, sink reusable");
-
         w.fail_after = None;
-        st.start(BytesMut::from(&b"next"[..])).unwrap();
-        std::future::poll_fn(|cx| st.poll_send(Pin::new(&mut w), cx))
+        let err = st.start(BytesMut::from(&b"next"[..])).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::BrokenPipe);
+        assert!(w.out.is_empty());
+    }
+
+    #[tokio::test]
+    async fn close_shuts_down_even_when_broken() {
+        let mut w = trickle(false);
+        w.fail_after = Some(3);
+        let mut st = StreamSendState::default();
+        st.start(BytesMut::from(&b"frame-one"[..])).unwrap();
+        let err = std::future::poll_fn(|cx| st.poll_close(Pin::new(&mut w), cx))
+            .await
+            .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::ConnectionReset);
+        assert_eq!(w.shutdowns, 1, "stream shut down despite send failure");
+
+        // Retrying close still reaches the stream instead of erroring early.
+        std::future::poll_fn(|cx| st.poll_close(Pin::new(&mut w), cx))
+            .await
+            .unwrap_err();
+        assert_eq!(w.shutdowns, 2);
+    }
+
+    #[tokio::test]
+    async fn close_flushes_queued_frame_then_shuts_down() {
+        let mut w = trickle(false);
+        let mut st = StreamSendState::default();
+        st.start(BytesMut::from(&b"bye"[..])).unwrap();
+        std::future::poll_fn(|cx| st.poll_close(Pin::new(&mut w), cx))
             .await
             .unwrap();
-        assert_eq!(w.out, b"next");
+        assert_eq!(w.out, b"bye");
+        assert_eq!((w.flushes, w.shutdowns), (1, 1));
     }
 }
