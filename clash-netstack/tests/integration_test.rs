@@ -882,15 +882,14 @@ async fn test_queued_syns_to_same_destination_are_not_cross_wired() {
     }
 }
 
-/// As above, but A's app stream is dropped while its SYN is still queued,
-/// so when B's (lower-slot) socket takes A's SYN no stream expects A. That
-/// socket must be reset instead of wiring client A to B's stream.
+/// As above, but A's app stream is dropped while its SYN is still queued.
+/// A's SYN must not take B's (lower-slot) listener and leave B without a
+/// connection: B's SYN is still served and its data reaches B's stream.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn test_orphaned_queued_syn_is_reset_not_cross_wired() {
+async fn test_dropped_stream_with_queued_syn_does_not_steal_connection() {
     use std::time::Duration;
     use tokio::io::AsyncReadExt;
     const SYN: u8 = 0x02;
-    const RST: u8 = 0x04;
     init();
 
     let (mut mock_tun, tun_in, _) = MockTun::new();
@@ -923,27 +922,48 @@ async fn test_orphaned_queued_syn_is_reset_not_cross_wired() {
     drop(a);
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    // Drain; client A must be reset (smoltcp may already have answered with
-    // a SYN-ACK in the same poll, so look for the RST that follows).
-    tokio::time::timeout(Duration::from_secs(3), async {
+    // B still gets its own connection: its queued SYN is answered...
+    let isn_b = tokio::time::timeout(Duration::from_secs(3), async {
         loop {
             let pkt = stack_stream.next().await.unwrap().unwrap();
-            if tcp_dst_port(pkt.data()) == Some(1024)
-                && parse_tcp_header(pkt.data()).unwrap().2 & RST != 0
-            {
-                break;
+            if tcp_dst_port(pkt.data()) == Some(2000) {
+                assert!(is_syn_ack(pkt.data()), "B's SYN was not served");
+                break parse_server_isn(pkt.data());
             }
         }
     })
     .await
-    .expect("client A was accepted onto another stream instead of reset");
+    .expect("no reply to client B");
     tokio::spawn(async move { while stack_stream.next().await.is_some() {} });
 
-    // B's stream does not carry A's connection: it ends instead of hanging.
-    let mut byte = [0u8; 1];
-    let n = tokio::time::timeout(Duration::from_secs(2), b.read(&mut byte))
+    // ...and its data reaches B's stream.
+    let ack = isn_b.wrapping_add(1);
+    tun_in
+        .send(build_tcp_segment_ports(
+            2000,
+            80,
+            1,
+            ack,
+            0x10,
+            u16::MAX,
+            &[],
+        ))
+        .unwrap();
+    tun_in
+        .send(build_tcp_segment_ports(
+            2000,
+            80,
+            1,
+            ack,
+            0x18,
+            u16::MAX,
+            b"from-B",
+        ))
+        .unwrap();
+    let mut got = [0u8; 6];
+    tokio::time::timeout(Duration::from_secs(2), b.read_exact(&mut got))
         .await
-        .expect("B's stream left attached to client A's connection")
-        .unwrap_or(0);
-    assert_eq!(n, 0);
+        .expect("no data on B's stream")
+        .unwrap();
+    assert_eq!(&got, b"from-B");
 }

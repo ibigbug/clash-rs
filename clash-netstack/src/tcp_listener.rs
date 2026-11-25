@@ -25,6 +25,27 @@ const SYN_TRACK_TTL: std::time::Duration = std::time::Duration::from_secs(60);
 /// (~100 bytes/entry → ~1 MiB at 10 000).
 const SYN_TRACK_MAX: usize = 10_000;
 
+/// A smoltcp TCP socket configured for a netstack connection (not yet
+/// listening).
+fn new_tcp_socket() -> tcp::Socket<'static> {
+    let mut socket = tcp::Socket::new(
+        tcp::SocketBuffer::new(vec![0u8; DEFAULT_TCP_RECV_BUFFER_SIZE as usize]),
+        tcp::SocketBuffer::new(vec![0u8; DEFAULT_TCP_SEND_BUFFER_SIZE as usize]),
+    );
+    socket.set_keep_alive(Some(smoltcp::time::Duration::from_secs(28)));
+    socket.set_timeout(Some(smoltcp::time::Duration::from_secs(
+        if cfg!(target_os = "linux") { 7200 } else { 60 },
+    )));
+    socket.set_ack_delay(Some(Duration::from_millis(10).into()));
+    socket.set_nagle_enabled(false);
+    socket.set_congestion_control(tcp::CongestionControl::Cubic);
+    socket
+}
+
+/// How long an aborted socket may wait for its RST to be sent (the TUN
+/// side may be backpressured) before it is dropped anyway.
+const RST_FLUSH_LIMIT: Duration = Duration::from_secs(1);
+
 pub(crate) struct TcpStreamHandle {
     pub(crate) recv_buffer: LockFreeRingBuffer,
     pub(crate) recv_waker: AtomicWaker,
@@ -235,30 +256,7 @@ impl TcpListener {
                         continue;
                     }
 
-                    let mut socket = tcp::Socket::new(
-                        tcp::SocketBuffer::new(vec![
-                            0u8;
-                            DEFAULT_TCP_RECV_BUFFER_SIZE
-                                as usize
-                        ]),
-                        tcp::SocketBuffer::new(vec![
-                            0u8;
-                            DEFAULT_TCP_SEND_BUFFER_SIZE
-                                as usize
-                        ]),
-                    );
-                    socket.set_keep_alive(Some(smoltcp::time::Duration::from_secs(
-                        28,
-                    )));
-
-                    socket.set_timeout(Some(smoltcp::time::Duration::from_secs(
-                        if cfg!(target_os = "linux") { 7200 } else { 60 },
-                    )));
-                    // Default
-                    socket.set_ack_delay(Some(Duration::from_millis(10).into()));
-                    socket.set_nagle_enabled(false);
-                    socket.set_congestion_control(tcp::CongestionControl::Cubic);
-
+                    let mut socket = new_tcp_socket();
                     if let Err(err) = socket.listen(dst_addr) {
                         error!("listen error: {err:?}");
                         continue;
@@ -336,12 +334,12 @@ impl TcpListener {
         // (and the app's TcpStream closed) before the handshake starts.
         let mut added_at: HashMap<smoltcp::iface::SocketHandle, std::time::Instant> =
             HashMap::new();
-        // Sockets aborted in the current iteration: kept through this
-        // iteration's cleanup so the next poll can send their RST (smoltcp
-        // emits it from dispatch, not from abort()), then reaped as usual.
-        let mut reset_pending: std::collections::HashSet<
-            smoltcp::iface::SocketHandle,
-        > = Default::default();
+        // Sockets reset because they accepted a SYN no stream expects. They
+        // are no longer in `socket_maps`; each is removed once smoltcp has
+        // sent its RST (which clears the remote endpoint) or after
+        // `RST_FLUSH_LIMIT`.
+        let mut aborted: HashMap<smoltcp::iface::SocketHandle, std::time::Instant> =
+            HashMap::new();
         let tx_waiter = device.tx_waiter();
         let mut next_poll = None;
         // Poll on the next iteration even with no sockets (ICMP, or the TX
@@ -454,11 +452,30 @@ impl TcpListener {
                     } else {
                         // No stream expects this client any more (its app
                         // stream was dropped while the SYN was queued). Reset
-                        // rather than deliver its data to another client;
-                        // this socket's own stream then closes normally.
+                        // it rather than deliver its data to another client,
+                        // and give this socket's own stream a new listener so
+                        // its SYN, still queued, is served. Otherwise that
+                        // SYN would land on the next Listen socket for the
+                        // destination and orphan it in turn.
                         trace!("Aborting TCP socket {h:?}: no stream for {actual}");
                         sockets.get_mut::<tcp::Socket>(*h).abort();
-                        reset_pending.insert(*h);
+                        aborted.insert(*h, std::time::Instant::now());
+                        added_at.remove(h);
+                        let stream = socket_maps.remove(h).expect("present");
+                        let mut relisten = new_tcp_socket();
+                        match relisten.listen(stream.dst) {
+                            Ok(()) => {
+                                let nh = sockets.add(relisten);
+                                socket_maps.insert(nh, stream);
+                                added_at.insert(nh, std::time::Instant::now());
+                            }
+                            Err(err) => {
+                                error!("re-listen error: {err:?}");
+                                stream.close.socket_gone();
+                                stream.recv_waker.wake();
+                                stream.send_waker.wake();
+                            }
+                        }
                         force_poll = true;
                     }
                 }
@@ -596,6 +613,17 @@ impl TcpListener {
                 socket_maps.retain(|handle, socket_control| {
                     let socket = sockets.get_mut::<tcp::Socket>(*handle);
 
+                    // A Listen socket whose SYN may still be queued is kept,
+                    // even if the app already dropped its stream: reaping it
+                    // would let that SYN land on another stream's listener
+                    // for the same destination (smoltcp matches the local
+                    // endpoint only), stealing that connection.
+                    let awaiting_syn = socket.state() == tcp::State::Listen
+                        && rx_pending
+                        && added_at
+                            .get(handle)
+                            .is_some_and(|t| t.elapsed() < LISTEN_GRACE);
+
                     if socket_control.close.is_app_dropped() {
                         // The app-side TcpStream was dropped.  Flush any
                         // remaining data from send_buffer into smoltcp's TX
@@ -617,7 +645,9 @@ impl TcpListener {
                         // Calling close() on an already-closing socket is a
                         // no-op in smoltcp, so this is safe to repeat each
                         // cycle until send_buffer is fully drained.
-                        if buf.is_empty() {
+                        // (Not while still waiting in Listen for a queued SYN:
+                        // close() there drops the listener at once.)
+                        if buf.is_empty() && !awaiting_syn {
                             socket.close();
                         }
                         // Fall through to is_active() check: keep the socket
@@ -632,17 +662,10 @@ impl TcpListener {
                     // gone and nobody will read them.
                     let unread = rx_tails.contains_key(handle)
                         && !socket_control.close.is_app_dropped();
-                    let awaiting_syn = socket.state() == tcp::State::Listen
-                        && rx_pending
-                        && !socket_control.close.is_app_dropped()
-                        && added_at
-                            .get(handle)
-                            .is_some_and(|t| t.elapsed() < LISTEN_GRACE);
                     if socket.state() != tcp::State::Listen {
                         added_at.remove(handle);
                     }
-                    let flushing_rst = reset_pending.contains(handle);
-                    if socket.is_active() || unread || awaiting_syn || flushing_rst {
+                    if socket.is_active() || unread || awaiting_syn {
                         true
                     } else {
                         rx_tails.remove(handle);
@@ -659,7 +682,16 @@ impl TcpListener {
                         false
                     }
                 });
-                reset_pending.clear();
+                aborted.retain(|h, since| {
+                    let rst_sent =
+                        sockets.get::<tcp::Socket>(*h).remote_endpoint().is_none();
+                    if rst_sent || since.elapsed() >= RST_FLUSH_LIMIT {
+                        sockets.remove(*h);
+                        false
+                    } else {
+                        true
+                    }
+                });
 
                 next_poll = match iface.poll_delay(now, &sockets) {
                     Some(smoltcp::time::Duration::ZERO) => None,
