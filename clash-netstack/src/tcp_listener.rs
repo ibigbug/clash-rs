@@ -15,6 +15,8 @@ use tokio::sync::mpsc;
 
 const DEFAULT_TCP_SEND_BUFFER_SIZE: u32 = 256 * 1024; // 256 KiB
 const DEFAULT_TCP_RECV_BUFFER_SIZE: u32 = 256 * 1024; // 256 KiB
+/// How long a new socket may wait in Listen for its SYN to be processed.
+const LISTEN_GRACE: Duration = Duration::from_secs(10);
 
 /// Time-to-live for SYN tracker entries. Duplicates within this window are
 /// suppressed to prevent the same SYN from creating multiple smoltcp sockets.
@@ -321,6 +323,13 @@ impl TcpListener {
         // otherwise lose the tail of the stream.
         let mut rx_tails: HashMap<smoltcp::iface::SocketHandle, Vec<u8>> =
             HashMap::new();
+        // When each socket was added. A new socket sits in Listen until its
+        // SYN is processed, which can be delayed by TX backpressure; smoltcp
+        // reports Listen as inactive, so without this it would be reaped
+        // (and the app's TcpStream closed) before the handshake starts.
+        let mut added_at: HashMap<smoltcp::iface::SocketHandle, std::time::Instant> =
+            HashMap::new();
+        let tx_waiter = device.tx_waiter();
         let mut next_poll = None;
 
         loop {
@@ -369,6 +378,8 @@ impl TcpListener {
                         Ok(IfaceEvent::TcpStream(stream)) => {
                             let socket_handle = sockets.add(stream.0);
                             socket_maps.insert(socket_handle, stream.1);
+                            added_at
+                                .insert(socket_handle, std::time::Instant::now());
                         }
                         Ok(_) => {
                             // DeviceReady, TcpSocketReady, TcpSocketClosed:
@@ -542,10 +553,19 @@ impl TcpListener {
                     // gone and nobody will read them.
                     let unread = rx_tails.contains_key(handle)
                         && !socket_control.close.is_app_dropped();
-                    if socket.is_active() || unread {
+                    let awaiting_syn = socket.state() == tcp::State::Listen
+                        && !socket_control.close.is_app_dropped()
+                        && added_at
+                            .get(handle)
+                            .is_some_and(|t| t.elapsed() < LISTEN_GRACE);
+                    if socket.state() != tcp::State::Listen {
+                        added_at.remove(handle);
+                    }
+                    if socket.is_active() || unread || awaiting_syn {
                         true
                     } else {
                         rx_tails.remove(handle);
+                        added_at.remove(handle);
                         trace!("Removing inactive TCP socket");
                         sockets.remove(*handle);
                         // Unblock any in-flight poll_read / poll_write on this
@@ -592,6 +612,7 @@ impl TcpListener {
                             IfaceEvent::TcpStream(stream) => {
                                 let socket_handle = sockets.add(stream.0);
                                 socket_maps.insert(socket_handle, stream.1);
+                            added_at.insert(socket_handle, std::time::Instant::now());
                                 trace!("Added new TCP socket: {socket_handle:?}");
                             }
                             IfaceEvent::TcpSocketReady => {
@@ -614,6 +635,13 @@ impl TcpListener {
                                 }
                             }
                         }
+                    }
+                    // The TUN writer drained the outbound channel that made
+                    // the last poll stall (inbound packets are left queued
+                    // while it is full). Nothing else would signal this.
+                    Ok(_permit) = tx_waiter.reserve(), if device.tx_blocked() => {
+                        trace!("Outbound channel has room again, will poll sockets");
+                        next_poll = None;
                     }
                     _ = tokio::time::sleep(next_poll.unwrap_or(Duration::MAX)) => {
                         trace!("Woke up to poll sockets after delay");

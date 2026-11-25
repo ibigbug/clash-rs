@@ -10,6 +10,10 @@ pub struct NetstackDevice {
     rx_queue: mpsc::UnboundedReceiver<Packet>,
 
     tx_sender: mpsc::Sender<Packet>,
+    /// The last receive/transmit found the outbound channel full. The stack
+    /// task then waits for capacity, since nothing else signals when the TUN
+    /// writer drains it.
+    tx_blocked: bool,
     capabilities: DeviceCapabilities,
 
     iface_notifier: mpsc::UnboundedSender<IfaceEvent<'static>>,
@@ -30,6 +34,7 @@ impl NetstackDevice {
             rx_sender,
             rx_queue,
             tx_sender,
+            tx_blocked: false,
             capabilities,
             iface_notifier,
         }
@@ -37,6 +42,15 @@ impl NetstackDevice {
 
     pub fn create_injector(&self) -> mpsc::UnboundedSender<Packet> {
         self.rx_sender.clone()
+    }
+
+    pub fn tx_blocked(&self) -> bool {
+        self.tx_blocked
+    }
+
+    /// A handle for awaiting outbound capacity while `tx_blocked()`.
+    pub fn tx_waiter(&self) -> mpsc::Sender<Packet> {
+        self.tx_sender.clone()
     }
 }
 
@@ -53,7 +67,9 @@ impl Device for NetstackDevice {
         // the inbound packet even when try_reserve() subsequently fails,
         // silently dropping ACKs and preventing smoltcp from advancing
         // its send window.
-        let permit = self.tx_sender.try_reserve().ok()?;
+        let permit = self.tx_sender.try_reserve().ok();
+        self.tx_blocked = permit.is_none();
+        let permit = permit?;
         let packet = self.rx_queue.try_recv().ok()?;
 
         let rx_token = RxTokenImpl { packet };
@@ -65,10 +81,9 @@ impl Device for NetstackDevice {
     }
 
     fn transmit(&mut self, _timestamp: Instant) -> Option<Self::TxToken<'_>> {
-        self.tx_sender
-            .try_reserve()
-            .map(|permit| TxTokenImpl { tx_sender: permit })
-            .ok()
+        let permit = self.tx_sender.try_reserve().ok();
+        self.tx_blocked = permit.is_none();
+        permit.map(|permit| TxTokenImpl { tx_sender: permit })
     }
 
     fn capabilities(&self) -> DeviceCapabilities {

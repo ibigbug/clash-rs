@@ -637,3 +637,59 @@ async fn tail_loss_after_peer_fin(read_delay: std::time::Duration) {
     assert!(got == payload, "data corrupted");
     drop(tcp_listener);
 }
+
+/// With the outbound TCP channel full (the TUN writer is slow), a new SYN
+/// cannot be processed yet. Its socket is still in Listen, which smoltcp
+/// reports as inactive; it must not be reaped (the app already holds its
+/// TcpStream and would see EOF), and once the channel drains the SYN must be
+/// handled promptly rather than waiting for an unrelated socket timer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_syn_survives_full_tx_channel() {
+    use std::time::Duration;
+    use tokio::io::AsyncReadExt;
+    init();
+
+    let (mut mock_tun, tun_in, _) = MockTun::new();
+    let (stack, mut tcp_listener, _udp) = NetStack::with_tcp_tx_capacity(1);
+    let (mut stack_sink, mut stack_stream) = stack.split();
+    tokio::spawn(async move {
+        while let Some(pkt) = mock_tun.next().await {
+            stack_sink.send(Packet::new(pkt)).await.unwrap();
+        }
+    });
+
+    // Connection A: its SYN-ACK fills the 1-slot channel; nobody drains it.
+    tun_in.send(build_tcp_syn_packet()).unwrap();
+    let _a = tcp_listener.next().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Connection B arrives while the channel is full.
+    tun_in.send(build_tcp_syn_packet_with_port(2000)).unwrap();
+    let mut b = tcp_listener.next().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // B's stream must still be alive (no data yet), not at EOF.
+    let mut byte = [0u8; 1];
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), b.read(&mut byte))
+            .await
+            .is_err(),
+        "stream for a SYN queued behind TX backpressure was torn down"
+    );
+
+    // Drain A's SYN-ACK; B's SYN-ACK must follow without waiting ~1 s for
+    // A's retransmit timer to poll the stack.
+    let first = stack_stream.next().await.unwrap().unwrap();
+    assert_eq!(tcp_dst_port(first.data()), Some(1024));
+    let syn_ack_b = tokio::time::timeout(Duration::from_millis(300), async {
+        loop {
+            let pkt = stack_stream.next().await.unwrap().unwrap();
+            if tcp_dst_port(pkt.data()) == Some(2000) {
+                break pkt;
+            }
+        }
+    })
+    .await
+    .expect("SYN for B not processed after the TX channel drained");
+    assert!(is_syn_ack(syn_ack_b.data()), "B got RST instead of SYN-ACK");
+}
