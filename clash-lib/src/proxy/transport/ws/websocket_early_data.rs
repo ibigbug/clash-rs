@@ -3,7 +3,8 @@ use std::{
     fmt::Debug,
     io,
     pin::Pin,
-    task::{Context, Poll, Waker},
+    sync::{Arc, Mutex},
+    task::{Context, Poll, Wake, Waker},
 };
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -55,6 +56,43 @@ enum State {
     Closed,
 }
 
+/// Wakers of the read, write and flush/shutdown sides waiting on the
+/// handshake. Waking it wakes them all.
+#[derive(Default)]
+struct Parked([Mutex<Option<Waker>>; 3]);
+
+const READ: usize = 0;
+const WRITE: usize = 1;
+const FLUSH: usize = 2;
+
+impl Parked {
+    fn park(&self, side: usize, waker: &Waker) {
+        let mut slot = self.0[side].lock().unwrap();
+        match &*slot {
+            Some(w) if w.will_wake(waker) => {}
+            _ => *slot = Some(waker.clone()),
+        }
+    }
+
+    fn wake_all(&self) {
+        for slot in &self.0 {
+            if let Some(w) = slot.lock().unwrap().take() {
+                w.wake();
+            }
+        }
+    }
+}
+
+impl Wake for Parked {
+    fn wake(self: Arc<Self>) {
+        self.wake_all();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.wake_all();
+    }
+}
+
 struct IdleParts {
     stream: AnyStream,
     req: Request<()>,
@@ -79,11 +117,11 @@ pub struct WebsocketEarlyDataConn {
     /// reported to a writer (the handshake may have been completed by a
     /// read/flush after the original write was cancelled).
     unacked_early: Option<Vec<u8>>,
-    /// The handshake future only remembers the last task that polled it, so
-    /// each side records its own waker and all are woken on completion.
-    read_waker: Option<Waker>,
-    write_waker: Option<Waker>,
-    flush_waker: Option<Waker>,
+    /// Every side parked on the handshake. The handshake future is polled
+    /// with a waker that wakes all of them, so progress is never reported
+    /// only to a task that has since stopped polling (e.g. a cancelled write
+    /// on one half of a split stream while the read half waits elsewhere).
+    parked: Arc<Parked>,
     early_data_header_name: String,
     early_data_len: usize,
 }
@@ -127,9 +165,7 @@ impl WebsocketEarlyDataConn {
                 ws_config,
             })),
             unacked_early: None,
-            read_waker: None,
-            write_waker: None,
-            flush_waker: None,
+            parked: Arc::default(),
             early_data_header_name,
             early_data_len,
         }
@@ -190,12 +226,19 @@ impl WebsocketEarlyDataConn {
     }
 
     /// Drive `Connecting` to `Open` or `Failed`, waking every parked side on
-    /// completion. Callers record their own waker before calling this.
-    fn poll_handshake(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+    /// completion. `side`'s waker is recorded first; the future itself is
+    /// polled with a waker that wakes every parked side.
+    fn poll_handshake(
+        &mut self,
+        side: usize,
+        cx: &Context<'_>,
+    ) -> Poll<io::Result<()>> {
         let State::Connecting { fut, early } = &mut self.state else {
             return Poll::Ready(Ok(()));
         };
-        let res = ready!(fut.as_mut().poll(cx));
+        self.parked.park(side, cx.waker());
+        let waker = Waker::from(self.parked.clone());
+        let res = ready!(fut.as_mut().poll(&mut Context::from_waker(&waker)));
         let early = std::mem::take(early);
         let out = match res {
             Ok(stream) => {
@@ -212,17 +255,8 @@ impl WebsocketEarlyDataConn {
         Poll::Ready(out)
     }
 
-    fn wake_parked(&mut self) {
-        for w in [
-            self.read_waker.take(),
-            self.write_waker.take(),
-            self.flush_waker.take(),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            w.wake();
-        }
+    fn wake_parked(&self) {
+        self.parked.wake_all();
     }
 }
 
@@ -242,12 +276,11 @@ impl AsyncRead for WebsocketEarlyDataConn {
                 // Only a write can start the handshake (it supplies the
                 // early data), so wait for one.
                 State::Idle(_) => {
-                    this.read_waker = Some(cx.waker().clone());
+                    this.parked.park(READ, cx.waker());
                     return Poll::Pending;
                 }
                 State::Connecting { .. } => {
-                    this.read_waker = Some(cx.waker().clone());
-                    ready!(this.poll_handshake(cx))?;
+                    ready!(this.poll_handshake(READ, cx))?;
                 }
             }
         }
@@ -270,10 +303,12 @@ impl AsyncWrite for WebsocketEarlyDataConn {
                     }
                 }
                 State::Connecting { .. } => {
-                    this.write_waker = Some(cx.waker().clone());
-                    ready!(this.poll_handshake(cx))?;
+                    ready!(this.poll_handshake(WRITE, cx))?;
                 }
                 State::Open(s) => {
+                    if buf.is_empty() {
+                        return Poll::Ready(Ok(0));
+                    }
                     if let Some(early) = this.unacked_early.take()
                         && !early.is_empty()
                     {
@@ -284,6 +319,13 @@ impl AsyncWrite for WebsocketEarlyDataConn {
                         // was cancelled and this is new data, send it as is.
                         if buf.starts_with(&early) {
                             return Poll::Ready(Ok(early.len()));
+                        }
+                        // A retry with a shorter prefix of it: acknowledge
+                        // that much and keep the rest pending.
+                        if early.starts_with(buf) {
+                            let rest = early[buf.len()..].to_vec();
+                            this.unacked_early = Some(rest);
+                            return Poll::Ready(Ok(buf.len()));
                         }
                         warn!(
                             "websocket early data from a cancelled write was \
@@ -311,8 +353,7 @@ impl AsyncWrite for WebsocketEarlyDataConn {
                 // Nothing has been written, so nothing to flush.
                 State::Idle(_) | State::Closed => return Poll::Ready(Ok(())),
                 State::Connecting { .. } => {
-                    this.flush_waker = Some(cx.waker().clone());
-                    ready!(this.poll_handshake(cx))?;
+                    ready!(this.poll_handshake(FLUSH, cx))?;
                 }
             }
         }
@@ -336,8 +377,7 @@ impl AsyncWrite for WebsocketEarlyDataConn {
                     return Poll::Ready(Ok(()));
                 }
                 State::Connecting { .. } => {
-                    this.flush_waker = Some(cx.waker().clone());
-                    ready!(this.poll_handshake(cx))?;
+                    ready!(this.poll_handshake(FLUSH, cx))?;
                 }
             }
         }
@@ -530,6 +570,53 @@ mod tests {
         c.write_all(b"more").await.unwrap();
         c.flush().await.unwrap();
         assert_eq!(srv.await.unwrap(), b"more");
+    }
+
+    /// Split halves on different tasks: the reader parks before any write,
+    /// the writer starts the handshake and is cancelled. The handshake's
+    /// progress must still reach the reader even though nobody else polls.
+    #[tokio::test]
+    async fn test_reader_woken_when_cancelled_writer_stops_polling() {
+        let (mut c, server) = conn(16);
+        let flag = park_reader(&mut c);
+        start_and_cancel_write(&mut c, b"req").await;
+
+        let srv = tokio::spawn(async move {
+            let (mut ws, _) = accept(server).await;
+            ws.send(Message::binary(b"ok".to_vec())).await.unwrap();
+            ws
+        });
+        // Nobody polls `c` here; only the reader's waker can bring it back.
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !woken(&flag) {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("reader never woken: handshake waker went to cancelled writer");
+
+        let mut out = [0u8; 2];
+        c.read_exact(&mut out).await.unwrap();
+        assert_eq!(&out, b"ok");
+        drop(srv.await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_cancelled_write_retried_with_shorter_prefix() {
+        let (mut c, server) = conn(16);
+        start_and_cancel_write(&mut c, b"hello").await;
+
+        let srv = tokio::spawn(async move {
+            let (mut ws, early) = accept(server).await;
+            assert_eq!(early, b"hello");
+            ws.next().await.unwrap().unwrap().into_data().to_vec()
+        });
+        // "he" then "llo" are both already on the wire; only "!" is new.
+        assert_eq!(c.write(b"he").await.unwrap(), 2);
+        assert_eq!(c.write(b"llo!").await.unwrap(), 3);
+        c.write_all(b"!").await.unwrap();
+        c.flush().await.unwrap();
+        assert_eq!(srv.await.unwrap(), b"!");
     }
 
     #[tokio::test]
