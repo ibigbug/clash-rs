@@ -902,12 +902,16 @@ pub struct InlineRuleProviderDef {
 
 #[cfg(test)]
 mod tests {
-    use crate::config::{
-        def::Port,
-        internal::proxy::{
-            OutboundGroupProtocol, OutboundProxyProtocol, OutboundProxyProviderDef,
-        },
-    };
+    use crate::config::{def::Port, internal::proxy::OutboundProxyProviderDef};
+    // Only the feature-gated tests below match on these.
+    #[cfg(feature = "shadowsocks")]
+    use crate::config::internal::proxy::OutboundGroupProtocol;
+    #[cfg(any(
+        feature = "shadowsocks",
+        feature = "tuic",
+        feature = "wireguard"
+    ))]
+    use crate::config::internal::proxy::OutboundProxyProtocol;
 
     use super::Config;
 
@@ -1165,6 +1169,8 @@ rule-providers:
         }
     }
 
+    /// The example uses `type: ss` proxies.
+    #[cfg(feature = "shadowsocks")]
     #[test]
     fn parse_example() {
         let example_cfg = r###"
