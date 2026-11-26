@@ -47,6 +47,7 @@ pub struct EnhancedResolver {
     policy: Option<trie::StringTrie<Vec<ThreadSafeDNSClient>>>,
 
     proxy_resolver: Option<Vec<ThreadSafeDNSClient>>,
+    /// Upstream proxy names must bypass fake-IP resolution.
     proxy_server_domains: Option<trie::StringTrie<bool>>,
 
     fake_dns: Option<ThreadSafeFakeDns>,
@@ -185,27 +186,23 @@ impl EnhancedResolver {
                 None
             };
 
-        // Build proxy server domains trie for proxy-server-nameserver
-        // resolution. This happens before the OutboundManager is fully
-        // initialized, so we can only extract domains from plain
-        // outbounds.
+        // Only plain outbounds are available before the manager finishes initialization.
         let plain_outbounds = outbounds.read().await;
         let proxy_server_domains = plain_outbounds
             .values()
             .filter_map(|x| x.server_name())
             .collect::<Vec<_>>();
 
-        let proxy_server_domains_trie =
-            if proxy_resolver.is_some() && !proxy_server_domains.is_empty() {
-                let mut domains = trie::StringTrie::new();
-                for server in proxy_server_domains {
-                    domains.insert(server, Arc::new(true));
-                    debug!("added proxy server domain: {}", server);
-                }
-                Some(domains)
-            } else {
-                None
-            };
+        let proxy_server_domains_trie = if !proxy_server_domains.is_empty() {
+            let mut domains = trie::StringTrie::new();
+            for server in proxy_server_domains {
+                domains.insert(server, Arc::new(true));
+                debug!("added proxy server domain: {}", server);
+            }
+            Some(domains)
+        } else {
+            None
+        };
 
         Self {
             ipv6: AtomicBool::new(cfg.ipv6),
@@ -481,6 +478,17 @@ impl EnhancedResolver {
         rv
     }
 
+    fn is_proxy_server_domain(&self, host: &str) -> bool {
+        self.proxy_server_domains
+            .as_ref()
+            .is_some_and(|domains| domains.search(host).is_some())
+    }
+
+    /// Whether a lookup for `host` may allocate a fake IP.
+    fn resolves_with_fake_ip(&self, host: &str) -> bool {
+        self.fake_ip_enabled() && !self.is_proxy_server_domain(host)
+    }
+
     fn match_policy(&self, m: &op::Message) -> Option<&Vec<ThreadSafeDNSClient>> {
         if let Some(policy) = &self.policy
             && let Some(domain) = EnhancedResolver::domain_name_of_message(m)
@@ -659,7 +667,7 @@ impl ClashResolver for EnhancedResolver {
             return Ok(Some(ip));
         }
 
-        if enhanced && self.fake_ip_enabled() {
+        if enhanced && self.resolves_with_fake_ip(host) {
             let mut fake_dns = self.fake_dns.as_ref().unwrap().write().await;
             if !fake_dns.should_skip(host) {
                 let ip = fake_dns.lookup(host).await;
@@ -1365,6 +1373,101 @@ mod tests {
             "unexpected IP: {}",
             ip
         );
+    }
+
+    #[tokio::test]
+    async fn test_proxy_server_domains_tracked_without_proxy_nameserver() {
+        use tempfile::tempdir;
+        let temp_dir = tempdir().unwrap();
+        let cache_store = crate::app::profile::ThreadSafeCacheFile::new(
+            temp_dir.path().join("cache.db").to_str().unwrap(),
+            false,
+        );
+
+        let (mut config, _) = make_proxy_nameserver_config();
+        config.proxy_server_nameserver = None;
+        let outbounds = make_outbound_registry(&[("proxy", "proxy.example.com")]);
+
+        let resolver =
+            EnhancedResolver::new(config, cache_store, None, outbounds, None).await;
+
+        assert!(resolver.is_proxy_server_domain("proxy.example.com"));
+        assert!(!resolver.is_proxy_server_domain("target.example.com"));
+    }
+
+    #[tokio::test]
+    async fn test_proxy_server_domain_never_uses_fake_ip() {
+        use crate::config::def::DNSMode;
+        use tempfile::tempdir;
+        let temp_dir = tempdir().unwrap();
+        let cache_store = crate::app::profile::ThreadSafeCacheFile::new(
+            temp_dir.path().join("cache.db").to_str().unwrap(),
+            false,
+        );
+
+        let (mut config, _) = make_proxy_nameserver_config();
+        config.proxy_server_nameserver = None;
+        config.enhance_mode = DNSMode::FakeIp;
+        config.fake_ip_range = "198.18.0.1/16".parse().unwrap();
+        let outbounds = make_outbound_registry(&[("proxy", "proxy.example.com")]);
+
+        let resolver =
+            EnhancedResolver::new(config, cache_store, None, outbounds, None).await;
+
+        assert!(resolver.fake_ip_enabled());
+        assert!(!resolver.resolves_with_fake_ip("proxy.example.com"));
+        assert!(resolver.resolves_with_fake_ip("target.example.com"));
+    }
+
+    #[tokio::test]
+    async fn test_fake_ip_lookup_skipped_for_proxy_server_domain() {
+        use crate::config::def::DNSMode;
+        use std::time::Duration;
+        use tempfile::tempdir;
+        let temp_dir = tempdir().unwrap();
+        let cache_store = crate::app::profile::ThreadSafeCacheFile::new(
+            temp_dir.path().join("cache.db").to_str().unwrap(),
+            false,
+        );
+
+        // Port 1 on loopback rejects or drops the query, so an unfixed
+        // resolver would return the fake IP immediately instead of reaching
+        // the nameserver at all.
+        let unreachable = NameServer {
+            net: DNSNetMode::Udp,
+            host: url::Host::Ipv4("127.0.0.1".parse().unwrap()),
+            port: 1,
+            interface: None,
+            proxy: None,
+        };
+        let config = Config {
+            enable: true,
+            ipv6: false,
+            enhance_mode: DNSMode::FakeIp,
+            fake_ip_range: "198.18.0.1/16".parse().unwrap(),
+            default_nameserver: vec![unreachable.clone()],
+            nameserver: vec![unreachable],
+            ..Default::default()
+        };
+        let outbounds = make_outbound_registry(&[("proxy", "proxy.example.com")]);
+
+        let resolver =
+            EnhancedResolver::new(config, cache_store, None, outbounds, None).await;
+
+        let result = tokio::time::timeout(
+            Duration::from_millis(500),
+            resolver.resolve_v4("proxy.example.com", true),
+        )
+        .await;
+
+        // A real lookup may fail or still be in flight; what must never
+        // happen is a fabricated address for a proxy server name.
+        if let Ok(Ok(Some(ip))) = result {
+            assert!(
+                !resolver.is_fake_ip(std::net::IpAddr::V4(ip)).await,
+                "proxy server domain must bypass the fake-IP pool"
+            );
+        }
     }
 
     #[tokio::test]
