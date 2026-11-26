@@ -52,13 +52,16 @@ impl CachedEngine {
 
 type EngineCell = Mutex<Option<Arc<CachedEngine>>>;
 
+#[cfg(any(target_os = "linux", target_vendor = "apple", windows))]
 /// Each policy owns a Cronet connection pool.
 const MAX_POLICY_ENGINES: usize = 8;
 
+#[cfg(any(target_os = "linux", target_vendor = "apple", windows))]
 /// Least recently used first. Active sessions keep evicted engines alive.
 #[derive(Default)]
 struct PolicyEngines(tokio::sync::Mutex<Vec<(SocketPolicy, Arc<EngineCell>)>>);
 
+#[cfg(any(target_os = "linux", target_vendor = "apple", windows))]
 impl PolicyEngines {
     /// Return the active cell and any evicted cell for shutdown outside the
     /// lock.
@@ -95,6 +98,7 @@ fn retire_engine<T: Send + 'static>(evicted: Option<T>) {
 pub struct Handler {
     opts: HandlerOptions,
     outbound: EngineCell,
+    #[cfg(any(target_os = "linux", target_vendor = "apple", windows))]
     policy_engines: PolicyEngines,
     cancel: CancellationToken,
     /// Guards the one-shot unpinned-server warning.
@@ -106,6 +110,7 @@ impl Handler {
         Self {
             opts,
             outbound: EngineCell::default(),
+            #[cfg(any(target_os = "linux", target_vendor = "apple", windows))]
             policy_engines: Default::default(),
             cancel: CancellationToken::new(),
             dns_checked: std::sync::Once::new(),
@@ -705,7 +710,7 @@ mod dns_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, any(target_os = "linux", target_vendor = "apple", windows)))]
 mod cache_tests {
     use super::*;
 
