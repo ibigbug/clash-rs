@@ -909,7 +909,8 @@ mod tests {
     #[cfg(any(
         feature = "shadowsocks",
         feature = "tuic",
-        feature = "wireguard"
+        feature = "wireguard",
+        feature = "ssh"
     ))]
     use crate::config::internal::proxy::OutboundProxyProtocol;
 
