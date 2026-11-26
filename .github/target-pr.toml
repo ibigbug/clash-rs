@@ -15,7 +15,7 @@ tool = "cross"
 # but musl and aarch64 still use gcc + GNU ld, so ask rustc for the LLD backend:
 # it drives gcc's -fuse-ld=lld with its bundled ld.lld and crt still comes from gcc.
 rustflags = "-Z unstable-options -C linker-features=+lld --cfg tokio_unstable"
-extra-args = "-F plus,naive-static,naive-download"
+extra-args = "--config=.github/docker-tests.toml -F plus,naive-static,naive-download"
 
 [[target]]
 os = "ubuntu-latest"
@@ -27,7 +27,7 @@ tool = "cross"
 # but musl and aarch64 still use gcc + GNU ld, so ask rustc for the LLD backend:
 # it drives gcc's -fuse-ld=lld with its bundled ld.lld and crt still comes from gcc.
 rustflags = "-Z unstable-options -C linker-features=+lld --cfg tokio_unstable"
-extra-args = "-F perf,naive-static,naive-download"
+extra-args = "--config=.github/docker-tests.toml -F perf,naive-static,naive-download"
 
 [[target]]
 os = "ubuntu-latest"
@@ -39,7 +39,7 @@ tool = "cross"
 # but musl and aarch64 still use gcc + GNU ld, so ask rustc for the LLD backend:
 # it drives gcc's -fuse-ld=lld with its bundled ld.lld and crt still comes from gcc.
 rustflags = "-Z unstable-options -C linker-features=+lld --cfg tokio_unstable"
-extra-args = "-F plus,naive-static,naive-download"
+extra-args = "--config=.github/docker-tests.toml -F plus,naive-static,naive-download"
 
 [[target]]
 os = "windows-latest"

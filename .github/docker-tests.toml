@@ -1,0 +1,3 @@
+# Cargo configuration for Linux CI runners with a Docker socket.
+[env]
+CLASH_DOCKER_TEST = "true"

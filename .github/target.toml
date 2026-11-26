@@ -12,7 +12,7 @@ os = "ubuntu-latest"
 target = "x86_64-unknown-linux-gnu"
 release-name = "x86_64-unknown-linux-gnu"
 tool = "cross"
-extra-args = "-F plus,naive-static,naive-download"
+extra-args = "--config=.github/docker-tests.toml -F plus,naive-static,naive-download"
 rustflags = "-Z unstable-options -C linker-features=+lld --cfg tokio_unstable"
 
 [[target]]
@@ -33,7 +33,7 @@ os = "ubuntu-latest"
 target = "x86_64-unknown-linux-musl"
 release-name = "x86_64-unknown-linux-musl"
 tool = "cross"
-extra-args = "-F perf,naive-static,naive-download"
+extra-args = "--config=.github/docker-tests.toml -F perf,naive-static,naive-download"
 rustflags = "-Z unstable-options -C linker-features=+lld --cfg tokio_unstable"
 
 [[target]]
@@ -41,7 +41,7 @@ os = "ubuntu-latest"
 target = "i686-unknown-linux-musl"
 release-name = "i686-unknown-linux-musl"
 tool = "cross"
-extra-args = "-F plus,naive-static,naive-download"
+extra-args = "--config=.github/docker-tests.toml -F plus,naive-static,naive-download"
 rustflags = "-Z unstable-options -C linker-features=+lld --cfg tokio_unstable"
 
 # Linux x86 gnu static-crt
@@ -49,7 +49,7 @@ rustflags = "-Z unstable-options -C linker-features=+lld --cfg tokio_unstable"
 os = "ubuntu-latest"
 target = "x86_64-unknown-linux-gnu"
 release-name = "x86_64-unknown-linux-gnu-static-crt"
-extra-args = "-F plus,naive-static,naive-download"
+extra-args = "--config=.github/docker-tests.toml -F plus,naive-static,naive-download"
 rustflags = "-Ctarget-feature=+crt-static -Z unstable-options -C linker-features=+lld --cfg tokio_unstable"
 
 # Linux arm gnu
@@ -58,7 +58,7 @@ os = "ubuntu-latest"
 target = "aarch64-unknown-linux-gnu"
 release-name = "aarch64-unknown-linux-gnu"
 tool = "cross"
-extra-args = "-F plus,naive-static,naive-download"
+extra-args = "--config=.github/docker-tests.toml -F plus,naive-static,naive-download"
 rustflags = "-Z unstable-options -C linker-features=+lld --cfg tokio_unstable"
 
 [[target]]
@@ -67,14 +67,14 @@ target = "armv7-unknown-linux-gnueabi"
 release-name = "armv7-unknown-linux-gnueabi"
 tool = "cross"
 # The Cronet ARM archive uses the hard-float ABI.
-extra-args = "-F plus"
+extra-args = "--config=.github/docker-tests.toml -F plus"
 
 [[target]]
 os = "ubuntu-latest"
 target = "armv7-unknown-linux-gnueabihf"
 release-name = "armv7-unknown-linux-gnueabihf"
 tool = "cross"
-extra-args = "-F plus,naive-static,naive-download"
+extra-args = "--config=.github/docker-tests.toml -F plus,naive-static,naive-download"
 rustflags = "-Z unstable-options -C linker-features=+lld --cfg tokio_unstable"
 
 # Linux arm musl
@@ -83,7 +83,7 @@ os = "ubuntu-latest"
 target = "aarch64-unknown-linux-musl"
 release-name = "aarch64-unknown-linux-musl"
 tool = "cross"
-extra-args = "-F perf,naive-static,naive-download"
+extra-args = "--config=.github/docker-tests.toml -F perf,naive-static,naive-download"
 rustflags = "-Z unstable-options -C linker-features=+lld --cfg tokio_unstable"
 
 [[target]]
@@ -91,7 +91,7 @@ os = "ubuntu-latest"
 target = "armv7-unknown-linux-musleabihf"
 release-name = "armv7-unknown-linux-musleabihf"
 tool = "cross"
-extra-args = "-F plus,naive-static,naive-download"
+extra-args = "--config=.github/docker-tests.toml -F plus,naive-static,naive-download"
 rustflags = "-Z unstable-options -C linker-features=+lld --cfg tokio_unstable"
 
 # Linux RISC-V
@@ -100,7 +100,7 @@ os = "ubuntu-latest"
 target = "riscv64gc-unknown-linux-gnu"
 release-name = "riscv64gc-unknown-linux-gnu"
 tool = "cross"
-extra-args = "-F standard,naive-static,naive-download"
+extra-args = "--config=.github/docker-tests.toml -F standard,naive-static,naive-download"
 rustflags = "-Z unstable-options -C linker-features=+lld --cfg tokio_unstable"
 
 # Linux MIPS
