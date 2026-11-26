@@ -331,6 +331,8 @@ impl std::fmt::Debug for Handler {
 
 impl Drop for Handler {
     fn drop(&mut self) {
+        // Dropping a replaced proxy intentionally ends its TCP and UDP
+        // sessions.
         self.cancel.cancel();
     }
 }

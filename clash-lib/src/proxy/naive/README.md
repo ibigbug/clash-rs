@@ -25,3 +25,5 @@ cargo build --locked -p clash-rs --features naive-static,naive-download
 With TUN, Naive supports outbound interface selection on Linux, macOS and Windows. Routing marks are supported on Linux. Android ignores both settings.
 
 If ClashRS cannot resolve the proxy hostname, set `dns.proxy-server-nameserver` or add the hostname to `dns.fake-ip-filter`. After a connection failure, the next connection checks for a new address.
+
+When a configuration reload or provider update replaces a Naive proxy, its active TCP and UDP sessions close once ClashRS releases the old proxy. Interrupted downloads and WebSocket connections must reconnect.
