@@ -396,3 +396,60 @@ pub fn is_icmpv6_echo_reply(
         && ident == expected_ident
         && seq == expected_seq
 }
+
+/// Build a TCP segment with arbitrary flags and payload.
+/// src = [1,1,1,1]:1024, dst = [2,2,2,2]:80 — matches build_tcp_syn_packet.
+pub fn build_tcp_segment(
+    seq: u32,
+    ack: u32,
+    flags: u8,
+    window: u16,
+    payload: &[u8],
+) -> Bytes {
+    let src_ip = [1u8, 1, 1, 1];
+    let dst_ip = [2u8, 2, 2, 2];
+    let total = 40 + payload.len();
+    let mut buf = BytesMut::with_capacity(total);
+    buf.put_u8(0x45);
+    buf.put_u8(0x00);
+    buf.put_u16(total as u16);
+    buf.put_u16(0x0001);
+    buf.put_u16(0x4000);
+    buf.put_u8(0x40);
+    buf.put_u8(0x06);
+    buf.put_u16(0x0000);
+    buf.put_slice(&src_ip);
+    buf.put_slice(&dst_ip);
+    let tcp_start = buf.len();
+    buf.put_u16(1024);
+    buf.put_u16(80);
+    buf.put_u32(seq);
+    buf.put_u32(ack);
+    buf.put_u8(0x50);
+    buf.put_u8(flags);
+    buf.put_u16(window);
+    buf.put_u16(0x0000);
+    buf.put_u16(0x0000);
+    buf.put_slice(payload);
+    let tcp_sum = tcp_udp_checksum(src_ip, dst_ip, 6, &buf[tcp_start..]);
+    let chk_pos = tcp_start + 16;
+    buf[chk_pos..chk_pos + 2].copy_from_slice(&tcp_sum.to_be_bytes());
+    let ip_sum = ipv4_checksum(&buf[..20]);
+    buf[10..12].copy_from_slice(&ip_sum.to_be_bytes());
+    buf.freeze()
+}
+
+/// Extract (seq, ack, flags, window) from a raw IPv4/TCP packet.
+pub fn parse_tcp_header(pkt: &[u8]) -> Option<(u32, u32, u8, u16)> {
+    if pkt.len() < 40 || pkt[9] != 0x06 {
+        return None;
+    }
+    let ihl = (pkt[0] & 0x0f) as usize * 4;
+    let tcp = pkt.get(ihl..ihl + 20)?;
+    Some((
+        u32::from_be_bytes(tcp[4..8].try_into().unwrap()),
+        u32::from_be_bytes(tcp[8..12].try_into().unwrap()),
+        tcp[13],
+        u16::from_be_bytes([tcp[14], tcp[15]]),
+    ))
+}

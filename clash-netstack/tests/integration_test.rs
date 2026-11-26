@@ -6,9 +6,9 @@ mod mock_tun;
 
 use common::{
     build_icmpv4_echo_request, build_icmpv6_echo_request, build_tcp_ack,
-    build_tcp_syn_packet, build_tcp_syn_packet_with_port, build_udp_packet, init,
-    is_icmpv4_echo_reply, is_icmpv6_echo_reply, is_rst, is_syn_ack,
-    parse_server_isn, parse_tcp_data, tcp_dst_port,
+    build_tcp_segment, build_tcp_syn_packet, build_tcp_syn_packet_with_port,
+    build_udp_packet, init, is_icmpv4_echo_reply, is_icmpv6_echo_reply, is_rst,
+    is_syn_ack, parse_server_isn, parse_tcp_data, parse_tcp_header, tcp_dst_port,
 };
 use mock_tun::MockTun;
 
@@ -480,4 +480,160 @@ async fn test_stack_icmpv6_echo_reply() {
         is_icmpv6_echo_reply(reply.data(), 0x5678, 0x0002),
         "Expected ICMPv6 Echo Reply"
     );
+}
+
+/// Data the peer sends after we half-closed must all reach the app, even when
+/// the peer's FIN moves the socket to TimeWait while part of that data is
+/// still in smoltcp's receive buffer (because the app-side ring is full).
+///
+/// Previously the socket was removed as soon as `is_active()` went false
+/// (TimeWait counts as inactive) and the bytes left in smoltcp were dropped:
+/// the app read exactly one ring's worth and then got EOF.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_no_tail_loss_when_peer_fin_lands_in_time_wait() {
+    tail_loss_after_peer_fin(std::time::Duration::from_millis(200)).await;
+}
+
+/// Same, but the app does not read until smoltcp's TimeWait timer (10 s)
+/// has expired, which resets the socket and clears its RX buffer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_no_tail_loss_when_reader_outlives_time_wait() {
+    tail_loss_after_peer_fin(std::time::Duration::from_secs(11)).await;
+}
+
+async fn tail_loss_after_peer_fin(read_delay: std::time::Duration) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    init();
+
+    const RING: usize = 256 * 1024;
+    const TOTAL: usize = RING + 40 * 1024;
+    const MSS: usize = 1400;
+    const ACK: u8 = 0x10;
+    const FIN: u8 = 0x01;
+
+    let (mut mock_tun, tun_in, _) = MockTun::new();
+    let (stack, mut tcp_listener, _udp) = NetStack::new();
+    let (mut stack_sink, mut stack_stream) = stack.split();
+    tokio::spawn(async move {
+        while let Some(pkt) = mock_tun.next().await {
+            stack_sink.send(Packet::new(pkt)).await.unwrap();
+        }
+    });
+
+    tun_in.send(build_tcp_syn_packet()).unwrap();
+    let server_isn = loop {
+        let pkt = stack_stream.next().await.unwrap().unwrap();
+        if is_syn_ack(pkt.data()) {
+            break parse_server_isn(pkt.data());
+        }
+    };
+    let mut seq: u32 = 1;
+    tun_in
+        .send(build_tcp_ack(seq, server_isn.wrapping_add(1), u16::MAX))
+        .unwrap();
+    let mut stream = tcp_listener.next().await.expect("no TcpStream");
+
+    // Half-close our side, then acknowledge the FIN: socket -> FinWait2.
+    stream.shutdown().await.unwrap();
+    let (our_fin_end, fin_window) = loop {
+        let pkt = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            stack_stream.next(),
+        )
+        .await
+        .expect("no FIN from stack")
+        .unwrap()
+        .unwrap();
+        if let Some((s, _, flags, w)) = parse_tcp_header(pkt.data())
+            && flags & FIN != 0
+        {
+            break (s.wrapping_add(1), w as u32);
+        }
+    };
+    tun_in
+        .send(build_tcp_segment(seq, our_fin_end, ACK, u16::MAX, &[]))
+        .unwrap();
+
+    // Send TOTAL bytes without the app reading, honouring the stack's window.
+    let payload: Vec<u8> = (0..TOTAL).map(|i| (i % 251) as u8).collect();
+    let mut acked: u32 = 1;
+    let mut window = fin_window;
+    let mut sent = 0usize;
+    let end = 1u32.wrapping_add(TOTAL as u32);
+    while acked != end {
+        while sent < TOTAL {
+            let room = window.saturating_sub(seq.wrapping_sub(acked)) as usize;
+            let n = MSS.min(TOTAL - sent).min(room);
+            if n == 0 {
+                break;
+            }
+            tun_in
+                .send(build_tcp_segment(
+                    seq,
+                    our_fin_end,
+                    ACK,
+                    u16::MAX,
+                    &payload[sent..sent + n],
+                ))
+                .unwrap();
+            seq = seq.wrapping_add(n as u32);
+            sent += n;
+        }
+        let pkt = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            stack_stream.next(),
+        )
+        .await
+        .expect("stack stopped acknowledging data")
+        .unwrap()
+        .unwrap();
+        if let Some((_, a, flags, w)) = parse_tcp_header(pkt.data())
+            && flags & ACK != 0
+        {
+            let adv = a.wrapping_sub(acked);
+            if adv < (1 << 31) {
+                acked = a;
+                window = w as u32;
+            }
+        }
+    }
+
+    // Peer FIN: FinWait2 -> TimeWait with the tail still inside smoltcp.
+    tun_in
+        .send(build_tcp_segment(
+            seq,
+            our_fin_end,
+            ACK | FIN,
+            u16::MAX,
+            &[],
+        ))
+        .unwrap();
+    let fin_acked = seq.wrapping_add(1);
+    loop {
+        let pkt = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            stack_stream.next(),
+        )
+        .await
+        .expect("peer FIN never acknowledged")
+        .unwrap()
+        .unwrap();
+        if parse_tcp_header(pkt.data()).is_some_and(|(_, a, ..)| a == fin_acked) {
+            break;
+        }
+    }
+    // Let the stack run its socket cleanup (and possibly TimeWait expiry).
+    tokio::time::sleep(read_delay).await;
+
+    let mut got = Vec::with_capacity(TOTAL);
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        stream.read_to_end(&mut got),
+    )
+    .await
+    .expect("read hung")
+    .unwrap();
+    assert_eq!(got.len(), TOTAL, "bytes lost after FIN in TimeWait");
+    assert!(got == payload, "data corrupted");
+    drop(tcp_listener);
 }

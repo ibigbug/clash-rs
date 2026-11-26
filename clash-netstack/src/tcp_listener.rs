@@ -315,6 +315,12 @@ impl TcpListener {
             smoltcp::iface::SocketHandle,
             Arc<TcpStreamHandle>,
         > = HashMap::new();
+        // Received bytes moved out of smoltcp after the peer's FIN because
+        // the app-side ring was full. smoltcp drops its RX buffer when the
+        // TimeWait timer expires (or on reset), so a slow reader would
+        // otherwise lose the tail of the stream.
+        let mut rx_tails: HashMap<smoltcp::iface::SocketHandle, Vec<u8>> =
+            HashMap::new();
         let mut next_poll = None;
 
         loop {
@@ -387,7 +393,21 @@ impl TcpListener {
 
                     let buf = &socket_control.recv_buffer;
                     let mut notify_read = false;
-                    while socket.can_recv() && !buf.is_full() {
+                    // Deliver a stashed tail first, so bytes stay in order.
+                    if let Some(tail) = rx_tails.get_mut(socket_handle) {
+                        let n = buf.enqueue_slice(tail);
+                        if n > 0 {
+                            tail.drain(..n);
+                            notify_read = true;
+                        }
+                        if tail.is_empty() {
+                            rx_tails.remove(socket_handle);
+                        }
+                    }
+                    while !rx_tails.contains_key(socket_handle)
+                        && socket.can_recv()
+                        && !buf.is_full()
+                    {
                         if let Ok(n) = socket.recv(|buffer| {
                             let n = buf.enqueue_slice(buffer);
                             (n, n)
@@ -429,9 +449,39 @@ impl TcpListener {
                             | tcp::State::SynReceived
                     );
 
+                    // The peer has sent FIN, so nothing more will arrive, but
+                    // the ring is full and smoltcp still holds data. Move it
+                    // out before a later iface.poll() can expire TimeWait and
+                    // clear it.
+                    // (`may_recv()` stays true while smoltcp's RX buffer is
+                    // non-empty, so check the state for the received FIN.)
+                    let peer_fin_received = matches!(
+                        socket.state(),
+                        tcp::State::CloseWait
+                            | tcp::State::LastAck
+                            | tcp::State::Closing
+                            | tcp::State::TimeWait
+                    );
+                    if peer_fin_received
+                        && socket.can_recv()
+                        && !socket_control.close.is_app_dropped()
+                    {
+                        let tail = rx_tails.entry(*socket_handle).or_default();
+                        while let Ok(n) = socket.recv(|b| {
+                            tail.extend_from_slice(b);
+                            (b.len(), b.len())
+                        }) {
+                            if n == 0 {
+                                break;
+                            }
+                        }
+                        trace!("Stashed {} unread bytes after peer FIN", tail.len());
+                    }
+
                     if past_handshake
                         && !socket.may_recv()
                         && !socket.can_recv()
+                        && !rx_tails.contains_key(socket_handle)
                         && socket_control.close.peer_fin()
                     {
                         socket_control.recv_waker.wake();
@@ -485,9 +535,17 @@ impl TcpListener {
                         // handshake and reports is_active() == false.
                     }
 
-                    if socket.is_active() {
+                    // TimeWait also counts as inactive, but the peer's last
+                    // bytes may still be waiting in `rx_tails` for room in
+                    // the app-side ring. Keep the entry until they have been
+                    // delivered (and the read EOF set), unless the app is
+                    // gone and nobody will read them.
+                    let unread = rx_tails.contains_key(handle)
+                        && !socket_control.close.is_app_dropped();
+                    if socket.is_active() || unread {
                         true
                     } else {
+                        rx_tails.remove(handle);
                         trace!("Removing inactive TCP socket");
                         sockets.remove(*handle);
                         // Unblock any in-flight poll_read / poll_write on this
@@ -507,7 +565,12 @@ impl TcpListener {
                         trace!("device poll delay: {delay:?}");
                         Some(delay.into())
                     }
-                    None => None,
+                    // No socket has a deadline: nothing to do until a packet
+                    // arrives or the app reads/writes, both of which send a
+                    // notifier event. Polling again right away would spin,
+                    // e.g. on a TimeWait-expired socket kept only to deliver
+                    // a stashed RX tail into a ring the app is not draining.
+                    None => Some(Duration::MAX),
                 };
 
                 // Yield to the tokio scheduler so that other tasks (e.g.
