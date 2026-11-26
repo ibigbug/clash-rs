@@ -16,6 +16,11 @@ pub struct NetstackDevice {
     /// it. Only `receive()` updates this: a later successful `transmit()` in
     /// the same poll does not mean the queued packet was handled.
     tx_blocked: bool,
+    /// The last `transmit()` found the outbound channel full, so a socket
+    /// with data to send is stuck until the TUN writer drains it. smoltcp
+    /// then reports a zero poll delay; polling again before there is room
+    /// would only spin.
+    tx_full: bool,
     capabilities: DeviceCapabilities,
 
     iface_notifier: mpsc::UnboundedSender<IfaceEvent<'static>>,
@@ -37,6 +42,7 @@ impl NetstackDevice {
             rx_queue,
             tx_sender,
             tx_blocked: false,
+            tx_full: false,
             capabilities,
             iface_notifier,
         }
@@ -48,6 +54,16 @@ impl NetstackDevice {
 
     pub fn tx_blocked(&self) -> bool {
         self.tx_blocked
+    }
+
+    /// The last `transmit()` failed for lack of room in the outbound channel.
+    pub fn tx_full(&self) -> bool {
+        self.tx_full
+    }
+
+    /// Forget an earlier `transmit()` failure; call before each poll.
+    pub fn reset_tx_full(&mut self) {
+        self.tx_full = false;
     }
 
     /// Inbound packets are waiting to be handed to smoltcp.
@@ -92,10 +108,9 @@ impl Device for NetstackDevice {
     }
 
     fn transmit(&mut self, _timestamp: Instant) -> Option<Self::TxToken<'_>> {
-        self.tx_sender
-            .try_reserve()
-            .map(|permit| TxTokenImpl { tx_sender: permit })
-            .ok()
+        let permit = self.tx_sender.try_reserve().ok();
+        self.tx_full = permit.is_none();
+        permit.map(|permit| TxTokenImpl { tx_sender: permit })
     }
 
     fn capabilities(&self) -> DeviceCapabilities {
