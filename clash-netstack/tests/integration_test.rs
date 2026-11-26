@@ -930,3 +930,55 @@ async fn test_dropped_stream_with_queued_syn_does_not_steal_connection() {
     client_sends(&tun_in, 2000, isn[&2000], b"from-B");
     expect_data(&mut b, b"from-B").await;
 }
+
+/// A bad-checksum SYN (from :1024) is queued behind TX backpressure, so its
+/// Listen socket is kept, in a lower slot than the listener for a valid SYN
+/// from :2000 to the same destination. smoltcp drops the bad SYN and hands
+/// the valid one to the lower slot. The valid client's data must reach its
+/// own stream, and the rejected one must see EOF, not the other's data.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_rejected_syn_listener_does_not_take_other_connection() {
+    use std::time::Duration;
+    use tokio::io::AsyncReadExt;
+    const SYN: u8 = 0x02;
+    init();
+
+    let (mut mock_tun, tun_in, _) = MockTun::new();
+    let (stack, mut tcp_listener, _udp) = NetStack::with_tcp_tx_capacity(1);
+    let (mut stack_sink, mut stack_stream) = stack.split();
+    tokio::spawn(async move {
+        while let Some(pkt) = mock_tun.next().await {
+            if stack_sink.send(Packet::new(pkt)).await.is_err() {
+                break;
+            }
+        }
+    });
+    let syn = |sport| build_tcp_segment_ports(sport, 80, 0, 0, SYN, u16::MAX, &[]);
+
+    // Fill the 1-slot channel so later SYNs stay queued.
+    tun_in.send(syn(3000)).unwrap();
+    let _l = tcp_listener.next().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let mut bad = syn(1024).to_vec();
+    bad[20 + 16] ^= 0xff;
+    tun_in.send(bad.into()).unwrap();
+    let mut rejected = tcp_listener.next().await.unwrap();
+    tun_in.send(syn(2000)).unwrap();
+    let mut good = tcp_listener.next().await.unwrap();
+    assert_eq!(rejected.local_addr().port(), 1024);
+    assert_eq!(good.local_addr().port(), 2000);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let isn = collect_syn_acks(&mut stack_stream, &[2000]).await;
+    tokio::spawn(async move { while stack_stream.next().await.is_some() {} });
+    client_sends(&tun_in, 2000, isn[&2000], b"from-good");
+    expect_data(&mut good, b"from-good").await;
+
+    let mut byte = [0u8; 1];
+    let n = tokio::time::timeout(Duration::from_secs(2), rejected.read(&mut byte))
+        .await
+        .expect("stream for the rejected SYN never closed")
+        .expect("expected EOF, not an error");
+    assert_eq!(n, 0, "rejected stream received another client's data");
+}
