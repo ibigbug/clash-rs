@@ -630,6 +630,32 @@ mod tests {
         assert!(msg.is_close(), "expected a close frame, got {msg:?}");
     }
 
+    /// The first write was accepted, then the server hangs up without
+    /// answering the upgrade: the failure must reach a parked reader and
+    /// every later operation.
+    #[tokio::test]
+    async fn test_handshake_failure_after_accepted_first_write() {
+        let (mut c, mut server) = conn(16);
+        let flag = park_reader(&mut c);
+        start_write(&mut c, b"req").await;
+
+        // Read the upgrade request, then hang up without a response.
+        let mut req = vec![0u8; 4096];
+        let n = server.read(&mut req).await.unwrap();
+        assert!(n > 0, "upgrade request not sent by the first write");
+        drop(server);
+
+        tokio::time::timeout(Duration::from_secs(2), c.read(&mut [0u8; 4]))
+            .await
+            .expect("read hung after handshake failure")
+            .unwrap_err();
+        assert!(woken(&flag), "parked reader must be woken on failure");
+        let err = c.write(b"more").await.unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::NotConnected);
+        let err = c.flush().await.unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::NotConnected);
+    }
+
     #[tokio::test]
     async fn test_empty_first_write_does_not_start_handshake() {
         let (mut c, _server) = conn(16);
