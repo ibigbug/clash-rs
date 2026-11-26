@@ -28,6 +28,15 @@ impl Tracked {
     }
 }
 
+/// The connection was closed through the manager (API or memory pressure).
+/// Permanent, so marked for the dispatcher to end a UDP session on it.
+fn closed_by_manager() -> std::io::Error {
+    crate::proxy::datagram::sink_closed(
+        std::io::ErrorKind::BrokenPipe,
+        "connection closed",
+    )
+}
+
 // ---------------------------------------------------------------------------
 // Shared instrumentation — proxy-chain metadata + optional byte/close tracking.
 // Embedded by both the stream and datagram wrappers; the only difference
@@ -37,7 +46,37 @@ impl Tracked {
 struct Tracking {
     manager: Arc<Manager>,
     tracker: Arc<TrackerInfo>,
-    close_notify: Receiver<()>,
+    /// `None` once the close signal has been seen. A tokio oneshot
+    /// `Receiver` panics if polled again after it resolved, and both halves
+    /// of a split datagram (and a close after a read saw EOF) poll it.
+    close_notify: Option<Receiver<()>>,
+}
+
+impl Tracking {
+    /// Whether `Manager::close` fired (or the manager dropped the sender).
+    /// Registers the task waker while still open.
+    fn poll_close_notify(&mut self, cx: &mut std::task::Context<'_>) -> bool {
+        let Some(rx) = self.close_notify.as_mut() else {
+            return true;
+        };
+        if Pin::new(rx).poll(cx).is_ready() {
+            self.close_notify = None;
+            return true;
+        }
+        false
+    }
+
+    /// Like `poll_close_notify`, for callers without a task context.
+    fn try_close_notify(&mut self) -> bool {
+        let Some(rx) = self.close_notify.as_mut() else {
+            return true;
+        };
+        if matches!(rx.try_recv(), Ok(_) | Err(TryRecvError::Closed)) {
+            self.close_notify = None;
+            return true;
+        }
+        false
+    }
 }
 
 struct Instrumentation {
@@ -82,7 +121,7 @@ impl Instrumentation {
         self.tracking = Some(Tracking {
             manager,
             tracker,
-            close_notify: rx,
+            close_notify: Some(rx),
         });
     }
 
@@ -98,13 +137,11 @@ impl Instrumentation {
         cx: &mut std::task::Context<'_>,
     ) -> Option<std::io::Error> {
         let t = self.tracking.as_mut()?;
-        match Pin::new(&mut t.close_notify).poll(cx) {
-            Poll::Ready(_) => {
-                debug!("connection closed: {}", t.tracker.uuid);
-                Some(std::io::ErrorKind::BrokenPipe.into())
-            }
-            Poll::Pending => None,
+        if !t.poll_close_notify(cx) {
+            return None;
         }
+        debug!("connection closed: {}", t.tracker.uuid);
+        Some(closed_by_manager())
     }
 }
 
@@ -448,7 +485,7 @@ where
         // poll_next returns None (not an error) on close. Poll (not try_recv)
         // so the task waker is registered and an idle receiver wakes on close.
         if let Some(t) = &mut self.inst.tracking
-            && Pin::new(&mut t.close_notify).poll(cx).is_ready()
+            && t.poll_close_notify(cx)
         {
             return Poll::Ready(None);
         }
@@ -486,9 +523,8 @@ where
         if let Some(t) = &mut self.inst.tracking {
             // No task context here; a plain try_recv is the best we can do.
             // Readiness/close wakeups are handled by poll_ready/poll_flush.
-            if matches!(t.close_notify.try_recv(), Ok(_) | Err(TryRecvError::Closed))
-            {
-                return Err(std::io::ErrorKind::BrokenPipe.into());
+            if t.try_close_notify() {
+                return Err(closed_by_manager());
             }
             let upload = item.data.len();
             t.tracker.account_upload(&t.manager, upload);
@@ -514,5 +550,79 @@ where
             return Poll::Ready(Err(e));
         }
         Pin::new(&mut self.inner).poll_close(cx)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use futures::{SinkExt, StreamExt};
+
+    use super::*;
+    use crate::proxy::datagram::is_sink_closed;
+
+    /// Datagram that accepts every packet and never receives one.
+    struct Idle;
+
+    impl Stream for Idle {
+        type Item = UdpPacket;
+
+        fn poll_next(
+            self: Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> Poll<Option<UdpPacket>> {
+            Poll::Pending
+        }
+    }
+
+    impl Sink<UdpPacket> for Idle {
+        type Error = std::io::Error;
+
+        fn poll_ready(
+            self: Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn start_send(self: Pin<&mut Self>, _: UdpPacket) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        fn poll_flush(
+            self: Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_close(
+            self: Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    /// Closing a UDP connection through the manager is seen by both halves
+    /// of the split datagram. The second one used to poll the already
+    /// resolved oneshot again, which panics (and aborts the process in
+    /// release builds).
+    #[tokio::test]
+    async fn manager_close_is_seen_by_both_datagram_halves() {
+        let manager = Manager::new();
+        let mut d = InstrumentedDatagramWrapper::new(Idle);
+        d.install_tracking(manager.clone(), Session::default(), None)
+            .await;
+        let id = d.tracker_info().unwrap().uuid;
+        let (mut w, mut r) = d.split();
+
+        manager.close(id).await;
+        assert!(r.next().await.is_none(), "reader ends on close");
+
+        let err = w.close().await.unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::BrokenPipe);
+        assert!(is_sink_closed(&err), "a closed connection is final");
+        let err = w.send(UdpPacket::default()).await.unwrap_err();
+        assert!(is_sink_closed(&err));
     }
 }

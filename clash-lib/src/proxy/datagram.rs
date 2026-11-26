@@ -95,7 +95,34 @@ impl StreamSendState {
 }
 
 fn broken_err(kind: std::io::ErrorKind, msg: &str) -> std::io::Error {
-    std::io::Error::new(kind, format!("udp stream unusable after: {msg}"))
+    sink_closed(kind, format!("udp stream unusable after: {msg}"))
+}
+
+/// Marks an error from a `Sink<UdpPacket>` after which the sink will never
+/// accept another packet, so the caller should end the session instead of
+/// retrying (and logging) every later packet. Errors without this marker
+/// may be transient (e.g. one unreachable destination on a UDP socket).
+#[derive(Debug)]
+pub(crate) struct SinkClosed(String);
+
+impl Display for SinkClosed {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for SinkClosed {}
+
+pub(crate) fn sink_closed(
+    kind: std::io::ErrorKind,
+    msg: impl Into<String>,
+) -> std::io::Error {
+    std::io::Error::new(kind, SinkClosed(msg.into()))
+}
+
+/// Whether `e` reports a sink that can never send again (see [`SinkClosed`]).
+pub(crate) fn is_sink_closed(e: &std::io::Error) -> bool {
+    e.get_ref().is_some_and(|inner| inner.is::<SinkClosed>())
 }
 
 impl StreamSendState {
@@ -156,7 +183,10 @@ impl StreamSendState {
                         Ok(n) => buf.advance(n),
                         Err(e) => {
                             *self = Self::broken(&e);
-                            return Poll::Ready(Err(e));
+                            return Poll::Ready(Err(sink_closed(
+                                e.kind(),
+                                e.to_string(),
+                            )));
                         }
                     }
                 }
@@ -166,7 +196,9 @@ impl StreamSendState {
                         Ok(()) => Self::Idle,
                         Err(e) => Self::broken(e),
                     };
-                    return Poll::Ready(res);
+                    return Poll::Ready(
+                        res.map_err(|e| sink_closed(e.kind(), e.to_string())),
+                    );
                 }
             }
         }
@@ -303,9 +335,11 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::WriteZero);
+        assert!(super::is_sink_closed(&err), "error marks the sink closed");
         // The stream is closed: later frames are refused, not queued.
         let err = st.start(BytesMut::from(&b"y"[..])).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::WriteZero);
+        assert!(super::is_sink_closed(&err), "error marks the sink closed");
     }
 
     #[tokio::test]
@@ -326,6 +360,7 @@ mod tests {
         assert_eq!(w.out, b"fra");
         let err = st.start(BytesMut::from(&b"x"[..])).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::WriteZero);
+        assert!(super::is_sink_closed(&err), "error marks the sink closed");
     }
 
     #[tokio::test]
@@ -346,10 +381,12 @@ mod tests {
         w.fail_after = None;
         let err = st.start(BytesMut::from(&b"frame-two"[..])).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::ConnectionReset);
+        assert!(super::is_sink_closed(&err), "error marks the sink closed");
         let err = std::future::poll_fn(|cx| st.poll_send(Pin::new(&mut w), cx))
             .await
             .unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::ConnectionReset);
+        assert!(super::is_sink_closed(&err), "error marks the sink closed");
         assert_eq!(w.out, b"fra", "nothing written after the fragment");
     }
 
@@ -370,6 +407,7 @@ mod tests {
         w.fail_after = None;
         let err = st.start(BytesMut::from(&b"next"[..])).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::ConnectionReset);
+        assert!(super::is_sink_closed(&err), "error marks the sink closed");
         assert!(w.out.is_empty());
     }
 
@@ -383,6 +421,7 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::ConnectionReset);
+        assert!(super::is_sink_closed(&err), "error marks the sink closed");
         assert_eq!(w.shutdowns, 1, "stream shut down despite send failure");
 
         // Retrying close still reaches the stream instead of erroring early,
@@ -391,6 +430,7 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::ConnectionReset);
+        assert!(super::is_sink_closed(&err), "error marks the sink closed");
         assert_eq!(w.shutdowns, 2);
     }
 
@@ -413,6 +453,7 @@ mod tests {
             io::ErrorKind::ConnectionReset,
             "flush error kept"
         );
+        assert!(super::is_sink_closed(&err), "error marks the sink closed");
         assert!(
             st.start(BytesMut::from(&b"x"[..])).is_err(),
             "sink is broken"
