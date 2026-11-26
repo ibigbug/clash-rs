@@ -199,7 +199,10 @@ mod tests {
             TcpStream {
                 local_addr: "127.0.0.1:12345".parse().unwrap(),
                 remote_addr: "127.0.0.1:80".parse().unwrap(),
-                handle: Arc::new(TcpStreamHandle::new()),
+                handle: Arc::new(TcpStreamHandle::new(
+                    "127.0.0.1:12345".parse().unwrap(),
+                    "127.0.0.1:80".parse().unwrap(),
+                )),
                 stack_notifier: tx,
             },
             rx,

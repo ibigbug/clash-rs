@@ -101,7 +101,21 @@ impl NetStack {
         crate::tcp_listener::TcpListener,
         crate::udp_socket::UdpSocket,
     ) {
-        let (tcp_packet_sender, tcp_packet_receiver) = mpsc::channel::<Packet>(4096);
+        Self::with_tcp_tx_capacity(4096)
+    }
+
+    /// Like [`NetStack::new`] with a custom bound on queued outbound TCP
+    /// packets. Exposed for tests that exercise TUN-side backpressure.
+    #[doc(hidden)]
+    pub fn with_tcp_tx_capacity(
+        tcp_tx_capacity: usize,
+    ) -> (
+        Self,
+        crate::tcp_listener::TcpListener,
+        crate::udp_socket::UdpSocket,
+    ) {
+        let (tcp_packet_sender, tcp_packet_receiver) =
+            mpsc::channel::<Packet>(tcp_tx_capacity);
         // UDP uses a separate bounded channel.  UDP is inherently lossy so
         // drop-on-full (via try_send) is correct; the bound prevents unbounded
         // memory growth if a remote floods responses faster than the consumer

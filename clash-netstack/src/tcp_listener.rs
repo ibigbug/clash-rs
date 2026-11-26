@@ -15,6 +15,8 @@ use tokio::sync::mpsc;
 
 const DEFAULT_TCP_SEND_BUFFER_SIZE: u32 = 256 * 1024; // 256 KiB
 const DEFAULT_TCP_RECV_BUFFER_SIZE: u32 = 256 * 1024; // 256 KiB
+/// How long a new socket may wait in Listen for its SYN to be processed.
+const LISTEN_GRACE: Duration = Duration::from_secs(10);
 
 /// Time-to-live for SYN tracker entries. Duplicates within this window are
 /// suppressed to prevent the same SYN from creating multiple smoltcp sockets.
@@ -22,6 +24,27 @@ const SYN_TRACK_TTL: std::time::Duration = std::time::Duration::from_secs(60);
 /// Maximum tracked half-open SYN entries. Bounds memory under a SYN flood
 /// (~100 bytes/entry → ~1 MiB at 10 000).
 const SYN_TRACK_MAX: usize = 10_000;
+
+/// A smoltcp TCP socket configured for a netstack connection (not yet
+/// listening).
+fn new_tcp_socket() -> tcp::Socket<'static> {
+    let mut socket = tcp::Socket::new(
+        tcp::SocketBuffer::new(vec![0u8; DEFAULT_TCP_RECV_BUFFER_SIZE as usize]),
+        tcp::SocketBuffer::new(vec![0u8; DEFAULT_TCP_SEND_BUFFER_SIZE as usize]),
+    );
+    socket.set_keep_alive(Some(smoltcp::time::Duration::from_secs(28)));
+    socket.set_timeout(Some(smoltcp::time::Duration::from_secs(
+        if cfg!(target_os = "linux") { 7200 } else { 60 },
+    )));
+    socket.set_ack_delay(Some(Duration::from_millis(10).into()));
+    socket.set_nagle_enabled(false);
+    socket.set_congestion_control(tcp::CongestionControl::Cubic);
+    socket
+}
+
+/// How long an aborted socket may wait for its RST to be sent (the TUN
+/// side may be backpressured) before it is dropped anyway.
+const RST_FLUSH_LIMIT: Duration = Duration::from_secs(1);
 
 pub(crate) struct TcpStreamHandle {
     pub(crate) recv_buffer: LockFreeRingBuffer,
@@ -31,11 +54,18 @@ pub(crate) struct TcpStreamHandle {
 
     /// Read/write half-close and teardown flags shared with `TcpStream`.
     pub(crate) close: TcpCloseState,
+
+    /// The client whose SYN created this stream.
+    pub(crate) peer: SocketAddr,
+    /// The destination that SYN was addressed to.
+    pub(crate) dst: SocketAddr,
 }
 
 impl TcpStreamHandle {
-    pub fn new() -> Self {
+    pub fn new(peer: SocketAddr, dst: SocketAddr) -> Self {
         Self {
+            peer,
+            dst,
             recv_buffer: LockFreeRingBuffer::new(
                 DEFAULT_TCP_RECV_BUFFER_SIZE as usize,
             ),
@@ -226,30 +256,7 @@ impl TcpListener {
                         continue;
                     }
 
-                    let mut socket = tcp::Socket::new(
-                        tcp::SocketBuffer::new(vec![
-                            0u8;
-                            DEFAULT_TCP_RECV_BUFFER_SIZE
-                                as usize
-                        ]),
-                        tcp::SocketBuffer::new(vec![
-                            0u8;
-                            DEFAULT_TCP_SEND_BUFFER_SIZE
-                                as usize
-                        ]),
-                    );
-                    socket.set_keep_alive(Some(smoltcp::time::Duration::from_secs(
-                        28,
-                    )));
-
-                    socket.set_timeout(Some(smoltcp::time::Duration::from_secs(
-                        if cfg!(target_os = "linux") { 7200 } else { 60 },
-                    )));
-                    // Default
-                    socket.set_ack_delay(Some(Duration::from_millis(10).into()));
-                    socket.set_nagle_enabled(false);
-                    socket.set_congestion_control(tcp::CongestionControl::Cubic);
-
+                    let mut socket = new_tcp_socket();
                     if let Err(err) = socket.listen(dst_addr) {
                         error!("listen error: {err:?}");
                         continue;
@@ -261,7 +268,7 @@ impl TcpListener {
 
                     trace!("created TCP connection for {src_addr} <-> {dst_addr}");
 
-                    let handle = Arc::new(TcpStreamHandle::new());
+                    let handle = Arc::new(TcpStreamHandle::new(src_addr, dst_addr));
 
                     tcp_stream_emitter
                         .send(TcpStream {
@@ -321,7 +328,25 @@ impl TcpListener {
         // otherwise lose the tail of the stream.
         let mut rx_tails: HashMap<smoltcp::iface::SocketHandle, Vec<u8>> =
             HashMap::new();
+        // When each socket was added. A new socket sits in Listen until its
+        // SYN is processed, which can be delayed by TX backpressure; smoltcp
+        // reports Listen as inactive, so without this it would be reaped
+        // (and the app's TcpStream closed) before the handshake starts.
+        let mut added_at: HashMap<smoltcp::iface::SocketHandle, std::time::Instant> =
+            HashMap::new();
+        // Sockets reset because they accepted a SYN no stream expects. They
+        // are no longer in `socket_maps`; each is removed once smoltcp has
+        // sent its RST (which clears the remote endpoint) or after
+        // `RST_FLUSH_LIMIT`.
+        let mut aborted: HashMap<smoltcp::iface::SocketHandle, std::time::Instant> =
+            HashMap::new();
+        let tx_waiter = device.tx_waiter();
         let mut next_poll = None;
+        // Poll on the next iteration even with no sockets (ICMP, or the TX
+        // channel regaining room). Going through the normal path drains
+        // pending TcpStream events first, so a SYN injected right after its
+        // socket was queued is never seen by smoltcp without a listener.
+        let mut force_poll = false;
 
         loop {
             trace!(
@@ -331,6 +356,7 @@ impl TcpListener {
             );
 
             let should_poll_now = match (next_poll, socket_maps.len()) {
+                _ if std::mem::take(&mut force_poll) => true,
                 (None, 0) => {
                     trace!("No sockets to poll, waiting indefinitely");
                     false
@@ -369,6 +395,8 @@ impl TcpListener {
                         Ok(IfaceEvent::TcpStream(stream)) => {
                             let socket_handle = sockets.add(stream.0);
                             socket_maps.insert(socket_handle, stream.1);
+                            added_at
+                                .insert(socket_handle, std::time::Instant::now());
                         }
                         Ok(_) => {
                             // DeviceReady, TcpSocketReady, TcpSocketClosed:
@@ -380,6 +408,92 @@ impl TcpListener {
                 }
 
                 iface.poll(now, device, &mut sockets);
+
+                // smoltcp binds a listener to the local endpoint only and
+                // gives a SYN to the first Listen socket (lowest slot) for
+                // that destination. If SYNs stayed queued across polls (TX
+                // backpressure) while a lower slot was reused by a newer
+                // connection to the same destination, that socket took an
+                // older client's SYN. Re-pair every socket that just left
+                // Listen with the stream that expects its actual peer.
+                let fresh: Vec<_> = added_at.keys().copied().collect();
+                // Two passes: first resolve every swap, then treat what is
+                // still unmatched as orphaned. Deciding orphans in the same
+                // pass would depend on HashMap order: a socket judged
+                // orphaned early could move a stream that a later socket's
+                // swap needed, spreading the reset.
+                for orphans_pass in [false, true] {
+                    for h in &fresh {
+                        if aborted.contains_key(h) {
+                            continue;
+                        }
+                        let socket = sockets.get::<tcp::Socket>(*h);
+                        if socket.state() == tcp::State::Listen {
+                            continue;
+                        }
+                        let Some(ep) = socket.remote_endpoint() else {
+                            continue;
+                        };
+                        let actual = SocketAddr::new(ep.addr.into(), ep.port);
+                        let Some(dst) = socket_maps
+                            .get(h)
+                            .filter(|c| c.peer != actual)
+                            .map(|c| c.dst)
+                        else {
+                            continue;
+                        };
+                        // The same client port may be connecting to several
+                        // destinations at once: match the full tuple.
+                        let owner = fresh.iter().copied().find(|o| {
+                            o != h
+                                && socket_maps.get(o).is_some_and(|c| {
+                                    c.peer == actual && c.dst == dst
+                                })
+                        });
+                        if let Some(owner) = owner {
+                            trace!(
+                                "Re-pairing TCP socket {h:?} with stream for \
+                                 {actual}"
+                            );
+                            let mine = socket_maps.remove(h).expect("present");
+                            let theirs =
+                                socket_maps.insert(owner, mine).expect("present");
+                            socket_maps.insert(*h, theirs);
+                        } else if orphans_pass {
+                            // No stream expects this client any more (its app
+                            // stream was dropped while the SYN was queued).
+                            // Reset it rather than
+                            // deliver its data to another client,
+                            // and give this socket's own stream a new listener
+                            // so its SYN, still
+                            // queued, is served. Otherwise that
+                            // SYN would land on the next Listen socket for the
+                            // destination and orphan it in turn.
+                            trace!(
+                                "Aborting TCP socket {h:?}: no stream for {actual}"
+                            );
+                            sockets.get_mut::<tcp::Socket>(*h).abort();
+                            aborted.insert(*h, std::time::Instant::now());
+                            added_at.remove(h);
+                            let stream = socket_maps.remove(h).expect("present");
+                            let mut relisten = new_tcp_socket();
+                            match relisten.listen(stream.dst) {
+                                Ok(()) => {
+                                    let nh = sockets.add(relisten);
+                                    socket_maps.insert(nh, stream);
+                                    added_at.insert(nh, std::time::Instant::now());
+                                }
+                                Err(err) => {
+                                    error!("re-listen error: {err:?}");
+                                    stream.close.socket_gone();
+                                    stream.recv_waker.wake();
+                                    stream.send_waker.wake();
+                                }
+                            }
+                            force_poll = true;
+                        }
+                    }
+                }
 
                 // Poll the sockets for new connections or data
                 for (socket_handle, socket_control) in socket_maps.iter() {
@@ -503,8 +617,27 @@ impl TcpListener {
                     }
                 }
 
+                // Inbound packets still queued in the device (held back by
+                // TX backpressure) may include the SYN a Listen socket waits
+                // for. If nothing is queued, a socket still in Listen had its
+                // SYN rejected by smoltcp and must not linger: smoltcp only
+                // binds the local endpoint, so a stale listener could accept
+                // another client's SYN to the same destination and cross-wire
+                // the two streams.
+                let rx_pending = device.rx_pending();
                 socket_maps.retain(|handle, socket_control| {
                     let socket = sockets.get_mut::<tcp::Socket>(*handle);
+
+                    // A Listen socket whose SYN may still be queued is kept,
+                    // even if the app already dropped its stream: reaping it
+                    // would let that SYN land on another stream's listener
+                    // for the same destination (smoltcp matches the local
+                    // endpoint only), stealing that connection.
+                    let awaiting_syn = socket.state() == tcp::State::Listen
+                        && rx_pending
+                        && added_at
+                            .get(handle)
+                            .is_some_and(|t| t.elapsed() < LISTEN_GRACE);
 
                     if socket_control.close.is_app_dropped() {
                         // The app-side TcpStream was dropped.  Flush any
@@ -527,7 +660,9 @@ impl TcpListener {
                         // Calling close() on an already-closing socket is a
                         // no-op in smoltcp, so this is safe to repeat each
                         // cycle until send_buffer is fully drained.
-                        if buf.is_empty() {
+                        // (Not while still waiting in Listen for a queued SYN:
+                        // close() there drops the listener at once.)
+                        if buf.is_empty() && !awaiting_syn {
                             socket.close();
                         }
                         // Fall through to is_active() check: keep the socket
@@ -542,10 +677,14 @@ impl TcpListener {
                     // gone and nobody will read them.
                     let unread = rx_tails.contains_key(handle)
                         && !socket_control.close.is_app_dropped();
-                    if socket.is_active() || unread {
+                    if socket.state() != tcp::State::Listen {
+                        added_at.remove(handle);
+                    }
+                    if socket.is_active() || unread || awaiting_syn {
                         true
                     } else {
                         rx_tails.remove(handle);
+                        added_at.remove(handle);
                         trace!("Removing inactive TCP socket");
                         sockets.remove(*handle);
                         // Unblock any in-flight poll_read / poll_write on this
@@ -556,6 +695,16 @@ impl TcpListener {
                         socket_control.recv_waker.wake();
                         socket_control.send_waker.wake();
                         false
+                    }
+                });
+                aborted.retain(|h, since| {
+                    let rst_sent =
+                        sockets.get::<tcp::Socket>(*h).remote_endpoint().is_none();
+                    if rst_sent || since.elapsed() >= RST_FLUSH_LIMIT {
+                        sockets.remove(*h);
+                        false
+                    } else {
+                        true
                     }
                 });
 
@@ -572,6 +721,13 @@ impl TcpListener {
                     // a stashed RX tail into a ring the app is not draining.
                     None => Some(Duration::MAX),
                 };
+                // A socket still waiting in Listen has no smoltcp timer, so
+                // wake up when its grace period ends to reap it.
+                if let Some(oldest) = added_at.values().min() {
+                    let left = LISTEN_GRACE.saturating_sub(oldest.elapsed())
+                        + Duration::from_millis(1);
+                    next_poll = next_poll.map(|d| d.min(left));
+                }
 
                 // Yield to the tokio scheduler so that other tasks (e.g.
                 // StackSplitStream draining the tx packet channel) get a chance
@@ -592,6 +748,7 @@ impl TcpListener {
                             IfaceEvent::TcpStream(stream) => {
                                 let socket_handle = sockets.add(stream.0);
                                 socket_maps.insert(socket_handle, stream.1);
+                            added_at.insert(socket_handle, std::time::Instant::now());
                                 trace!("Added new TCP socket: {socket_handle:?}");
                             }
                             IfaceEvent::TcpSocketReady => {
@@ -605,15 +762,22 @@ impl TcpListener {
                             }
                             IfaceEvent::Icmp => {
                                 trace!("ICMP packet received, will poll sockets");
-                                if socket_maps.is_empty() {
-                                    iface.poll(
-                                        smoltcp::time::Instant::now(),
-                                        device,
-                                        &mut sockets,
-                                    );
-                                }
+                                force_poll = true;
                             }
                         }
+                    }
+                    // The TUN writer drained the outbound channel that made
+                    // the last poll stall (inbound packets are left queued
+                    // while it is full). Nothing else would signal this.
+                    Ok(permit) = tx_waiter.reserve(), if device.tx_blocked() => {
+                        trace!("Outbound channel has room again, will poll sockets");
+                        // Release the slot for the device before polling.
+                        drop(permit);
+                        next_poll = None;
+                        // With no sockets the loop would not poll on its own
+                        // (and `tx_blocked` would stay set, so this branch
+                        // would fire again at once).
+                        force_poll = true;
                     }
                     _ = tokio::time::sleep(next_poll.unwrap_or(Duration::MAX)) => {
                         trace!("Woke up to poll sockets after delay");

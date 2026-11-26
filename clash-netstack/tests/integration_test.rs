@@ -6,9 +6,10 @@ mod mock_tun;
 
 use common::{
     build_icmpv4_echo_request, build_icmpv6_echo_request, build_tcp_ack,
-    build_tcp_segment, build_tcp_syn_packet, build_tcp_syn_packet_with_port,
-    build_udp_packet, init, is_icmpv4_echo_reply, is_icmpv6_echo_reply, is_rst,
-    is_syn_ack, parse_server_isn, parse_tcp_data, parse_tcp_header, tcp_dst_port,
+    build_tcp_segment, build_tcp_segment_ports, build_tcp_syn_packet,
+    build_tcp_syn_packet_with_port, build_udp_packet, init, is_icmpv4_echo_reply,
+    is_icmpv6_echo_reply, is_rst, is_syn_ack, parse_server_isn, parse_tcp_data,
+    parse_tcp_header, tcp_dst_port,
 };
 use mock_tun::MockTun;
 
@@ -636,4 +637,348 @@ async fn tail_loss_after_peer_fin(read_delay: std::time::Duration) {
     assert_eq!(got.len(), TOTAL, "bytes lost after FIN in TimeWait");
     assert!(got == payload, "data corrupted");
     drop(tcp_listener);
+}
+
+/// With the outbound TCP channel full (the TUN writer is slow), a new SYN
+/// cannot be processed yet. Its socket is still in Listen, which smoltcp
+/// reports as inactive; it must not be reaped (the app already holds its
+/// TcpStream and would see EOF), and once the channel drains the SYN must be
+/// handled promptly rather than waiting for an unrelated socket timer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_syn_survives_full_tx_channel() {
+    use std::time::Duration;
+    use tokio::io::AsyncReadExt;
+    init();
+
+    let (mut mock_tun, tun_in, _) = MockTun::new();
+    let (stack, mut tcp_listener, _udp) = NetStack::with_tcp_tx_capacity(1);
+    let (mut stack_sink, mut stack_stream) = stack.split();
+    tokio::spawn(async move {
+        while let Some(pkt) = mock_tun.next().await {
+            stack_sink.send(Packet::new(pkt)).await.unwrap();
+        }
+    });
+
+    // Connection A: its SYN-ACK fills the 1-slot channel; nobody drains it.
+    tun_in.send(build_tcp_syn_packet()).unwrap();
+    let _a = tcp_listener.next().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Connection B arrives while the channel is full.
+    tun_in.send(build_tcp_syn_packet_with_port(2000)).unwrap();
+    let mut b = tcp_listener.next().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // B's stream must still be alive (no data yet), not at EOF.
+    let mut byte = [0u8; 1];
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), b.read(&mut byte))
+            .await
+            .is_err(),
+        "stream for a SYN queued behind TX backpressure was torn down"
+    );
+
+    // Drain A's SYN-ACK; B's SYN-ACK must follow without waiting ~1 s for
+    // A's retransmit timer to poll the stack.
+    let first = stack_stream.next().await.unwrap().unwrap();
+    assert_eq!(tcp_dst_port(first.data()), Some(1024));
+    let syn_ack_b = tokio::time::timeout(Duration::from_millis(300), async {
+        loop {
+            let pkt = stack_stream.next().await.unwrap().unwrap();
+            if tcp_dst_port(pkt.data()) == Some(2000) {
+                break pkt;
+            }
+        }
+    })
+    .await
+    .expect("SYN for B not processed after the TX channel drained");
+    assert!(is_syn_ack(syn_ack_b.data()), "B got RST instead of SYN-ACK");
+}
+
+/// With no TCP sockets and a full outbound channel, a queued ICMP request
+/// must be answered once the channel drains.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_icmp_reply_after_full_tx_channel_drains() {
+    use std::time::Duration;
+    init();
+
+    let (mut mock_tun, tun_in, _) = MockTun::new();
+    let (stack, _tcp_listener, _udp) = NetStack::with_tcp_tx_capacity(1);
+    let (mut stack_sink, mut stack_stream) = stack.split();
+    tokio::spawn(async move {
+        while let Some(pkt) = mock_tun.next().await {
+            if stack_sink.send(Packet::new(pkt)).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    for seq in [1u16, 2] {
+        tun_in
+            .send(build_icmpv4_echo_request(
+                [192, 168, 1, 100],
+                [1, 1, 1, 1],
+                0x1234,
+                seq,
+                b"ping",
+            ))
+            .unwrap();
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    for seq in [1u16, 2] {
+        let reply =
+            tokio::time::timeout(Duration::from_millis(500), stack_stream.next())
+                .await
+                .unwrap_or_else(|_| {
+                    panic!("no echo reply {seq} after channel drained")
+                })
+                .unwrap()
+                .unwrap();
+        assert!(is_icmpv4_echo_reply(reply.data(), 0x1234, seq));
+    }
+}
+
+/// A socket whose SYN smoltcp rejects (here: bad checksum) must be reaped
+/// right away, as before the Listen grace period existed: kept around, it
+/// could accept another client's SYN to the same destination and cross-wire
+/// the streams. The app's stream has to see EOF.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_rejected_syn_socket_is_reaped() {
+    use std::time::Duration;
+    use tokio::io::AsyncReadExt;
+    init();
+
+    let (mut mock_tun, tun_in, _) = MockTun::new();
+    let (stack, mut tcp_listener, _udp) = NetStack::new();
+    let (mut stack_sink, mut stack_stream) = stack.split();
+    tokio::spawn(async move {
+        while let Some(pkt) = mock_tun.next().await {
+            if stack_sink.send(Packet::new(pkt)).await.is_err() {
+                break;
+            }
+        }
+    });
+    tokio::spawn(async move { while stack_stream.next().await.is_some() {} });
+
+    let mut syn = build_tcp_syn_packet().to_vec();
+    let tcp_checksum = 20 + 16;
+    syn[tcp_checksum] ^= 0xff;
+    tun_in.send(syn.into()).unwrap();
+
+    let mut s = tcp_listener.next().await.unwrap();
+    let mut byte = [0u8; 1];
+    let n = tokio::time::timeout(Duration::from_secs(1), s.read(&mut byte))
+        .await
+        .expect("listener for a rejected SYN was kept alive")
+        .expect("expected EOF, not an error");
+    assert_eq!(n, 0);
+}
+
+/// Sets up queued SYNs from A (1.1.1.1:1024) and B (1.1.1.1:2000) to the
+/// same destination 2.2.2.2:80, with B's listener in a LOWER slot than A's
+/// even though A's SYN is queued first. smoltcp hands a SYN to the first
+/// Listen socket (lowest slot) for its destination, so A's SYN reaches B's
+/// socket: exactly the situation the re-pairing in `poll_sockets` fixes.
+///
+/// The lower slot is freed by letting an unrelated Listen socket (P, whose
+/// SYN is stuck behind TX backpressure) outlive its 10 s grace period after
+/// A was added. Returns once B's SYN is queued; nothing has drained yet.
+async fn queued_syns_with_reversed_slots() -> (
+    tokio::sync::mpsc::UnboundedSender<bytes::Bytes>,
+    watfaq_netstack::StackSplitStream,
+    watfaq_netstack::TcpListener,
+    [watfaq_netstack::TcpStream; 3],
+) {
+    use std::time::Duration;
+    const SYN: u8 = 0x02;
+    init();
+
+    let (mut mock_tun, tun_in, _) = MockTun::new();
+    let (stack, mut tcp_listener, _udp) = NetStack::with_tcp_tx_capacity(1);
+    let (mut stack_sink, stack_stream) = stack.split();
+    tokio::spawn(async move {
+        while let Some(pkt) = mock_tun.next().await {
+            if stack_sink.send(Packet::new(pkt)).await.is_err() {
+                break;
+            }
+        }
+    });
+    let syn = |sport, dport| {
+        build_tcp_segment_ports(sport, dport, 0, 0, SYN, u16::MAX, &[])
+    };
+
+    // Slot 0: its SYN-ACK fills the 1-slot channel; nobody drains it.
+    tun_in.send(syn(3000, 80)).unwrap();
+    let l = tcp_listener.next().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    // Slot 1: P, to an unrelated destination; its SYN stays queued.
+    tun_in.send(syn(3001, 81)).unwrap();
+    let _p = tcp_listener.next().await.unwrap();
+    tokio::time::sleep(Duration::from_secs(4)).await;
+    // Slot 2: A. Its grace period ends ~4 s after P's.
+    tun_in.send(syn(1024, 80)).unwrap();
+    let a = tcp_listener.next().await.unwrap();
+    // P's grace period ends; its slot is freed and B takes it.
+    tokio::time::sleep(Duration::from_millis(6300)).await;
+    tun_in.send(syn(2000, 80)).unwrap();
+    let b = tcp_listener.next().await.unwrap();
+    assert_eq!(a.local_addr().port(), 1024);
+    assert_eq!(b.local_addr().port(), 2000);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    (tun_in, stack_stream, tcp_listener, [l, a, b])
+}
+
+/// Drain the stack until SYN-ACKs for both given client ports were seen;
+/// returns their ISNs (keyed by port).
+async fn collect_syn_acks(
+    stack_stream: &mut watfaq_netstack::StackSplitStream,
+    ports: &[u16],
+) -> std::collections::HashMap<u16, u32> {
+    let mut isn = std::collections::HashMap::new();
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        while isn.len() < ports.len() {
+            let pkt = stack_stream.next().await.unwrap().unwrap();
+            if let Some(port) = tcp_dst_port(pkt.data())
+                && ports.contains(&port)
+            {
+                assert!(is_syn_ack(pkt.data()), "client {port} was not served");
+                isn.insert(port, parse_server_isn(pkt.data()));
+            }
+        }
+    })
+    .await
+    .expect("SYN-ACKs for every client");
+    isn
+}
+
+/// Complete the handshake for `port` and send `payload`.
+fn client_sends(
+    tun_in: &tokio::sync::mpsc::UnboundedSender<bytes::Bytes>,
+    port: u16,
+    isn: u32,
+    payload: &[u8],
+) {
+    let ack = isn.wrapping_add(1);
+    tun_in
+        .send(build_tcp_segment_ports(
+            port,
+            80,
+            1,
+            ack,
+            0x10,
+            u16::MAX,
+            &[],
+        ))
+        .unwrap();
+    tun_in
+        .send(build_tcp_segment_ports(
+            port,
+            80,
+            1,
+            ack,
+            0x18,
+            u16::MAX,
+            payload,
+        ))
+        .unwrap();
+}
+
+async fn expect_data(stream: &mut watfaq_netstack::TcpStream, want: &[u8]) {
+    use tokio::io::AsyncReadExt;
+    let mut got = vec![0u8; want.len()];
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        stream.read_exact(&mut got),
+    )
+    .await
+    .unwrap_or_else(|_| panic!("no data on stream for {:?}", stream.local_addr()))
+    .unwrap();
+    assert_eq!(
+        got,
+        want,
+        "stream {:?} got another client's data",
+        stream.local_addr()
+    );
+}
+
+/// A's SYN reaches B's (lower-slot) listener; the streams must still be
+/// wired to the right clients.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_queued_syns_to_same_destination_are_not_cross_wired() {
+    let (tun_in, mut stack_stream, _listener, [_l, mut a, mut b]) =
+        queued_syns_with_reversed_slots().await;
+    let isn = collect_syn_acks(&mut stack_stream, &[1024, 2000]).await;
+    tokio::spawn(async move { while stack_stream.next().await.is_some() {} });
+    client_sends(&tun_in, 1024, isn[&1024], b"from-A");
+    client_sends(&tun_in, 2000, isn[&2000], b"from-B");
+    expect_data(&mut a, b"from-A").await;
+    expect_data(&mut b, b"from-B").await;
+}
+
+/// As above, but A's app stream is dropped while its SYN is still queued.
+/// A's SYN must not leave B without a connection: B's SYN is still served
+/// and its data reaches B's stream.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_dropped_stream_with_queued_syn_does_not_steal_connection() {
+    let (tun_in, mut stack_stream, _listener, [_l, a, mut b]) =
+        queued_syns_with_reversed_slots().await;
+    drop(a);
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let isn = collect_syn_acks(&mut stack_stream, &[2000]).await;
+    tokio::spawn(async move { while stack_stream.next().await.is_some() {} });
+    client_sends(&tun_in, 2000, isn[&2000], b"from-B");
+    expect_data(&mut b, b"from-B").await;
+}
+
+/// A bad-checksum SYN (from :1024) is queued behind TX backpressure, so its
+/// Listen socket is kept, in a lower slot than the listener for a valid SYN
+/// from :2000 to the same destination. smoltcp drops the bad SYN and hands
+/// the valid one to the lower slot. The valid client's data must reach its
+/// own stream, and the rejected one must see EOF, not the other's data.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_rejected_syn_listener_does_not_take_other_connection() {
+    use std::time::Duration;
+    use tokio::io::AsyncReadExt;
+    const SYN: u8 = 0x02;
+    init();
+
+    let (mut mock_tun, tun_in, _) = MockTun::new();
+    let (stack, mut tcp_listener, _udp) = NetStack::with_tcp_tx_capacity(1);
+    let (mut stack_sink, mut stack_stream) = stack.split();
+    tokio::spawn(async move {
+        while let Some(pkt) = mock_tun.next().await {
+            if stack_sink.send(Packet::new(pkt)).await.is_err() {
+                break;
+            }
+        }
+    });
+    let syn = |sport| build_tcp_segment_ports(sport, 80, 0, 0, SYN, u16::MAX, &[]);
+
+    // Fill the 1-slot channel so later SYNs stay queued.
+    tun_in.send(syn(3000)).unwrap();
+    let _l = tcp_listener.next().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let mut bad = syn(1024).to_vec();
+    bad[20 + 16] ^= 0xff;
+    tun_in.send(bad.into()).unwrap();
+    let mut rejected = tcp_listener.next().await.unwrap();
+    tun_in.send(syn(2000)).unwrap();
+    let mut good = tcp_listener.next().await.unwrap();
+    assert_eq!(rejected.local_addr().port(), 1024);
+    assert_eq!(good.local_addr().port(), 2000);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let isn = collect_syn_acks(&mut stack_stream, &[2000]).await;
+    tokio::spawn(async move { while stack_stream.next().await.is_some() {} });
+    client_sends(&tun_in, 2000, isn[&2000], b"from-good");
+    expect_data(&mut good, b"from-good").await;
+
+    let mut byte = [0u8; 1];
+    let n = tokio::time::timeout(Duration::from_secs(2), rejected.read(&mut byte))
+        .await
+        .expect("stream for the rejected SYN never closed")
+        .expect("expected EOF, not an error");
+    assert_eq!(n, 0, "rejected stream received another client's data");
 }
