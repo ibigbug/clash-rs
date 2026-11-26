@@ -17,6 +17,9 @@ const DEFAULT_TCP_SEND_BUFFER_SIZE: u32 = 256 * 1024; // 256 KiB
 const DEFAULT_TCP_RECV_BUFFER_SIZE: u32 = 256 * 1024; // 256 KiB
 /// How long a new socket may wait in Listen for its SYN to be processed.
 const LISTEN_GRACE: Duration = Duration::from_secs(10);
+/// How often the stack still polls while waiting for room in a full
+/// outbound channel, so smoltcp timers keep running.
+const TX_FULL_MAINTENANCE: Duration = Duration::from_millis(250);
 
 /// Time-to-live for SYN tracker entries. Duplicates within this window are
 /// suppressed to prevent the same SYN from creating multiple smoltcp sockets.
@@ -716,10 +719,13 @@ impl TcpListener {
                     // A socket has data to send but the outbound channel is
                     // full: polling again before the TUN writer makes room
                     // would only spin. Wait for room (the `tx_waiter`
-                    // branch) or the next packet / app event instead.
+                    // branch) or the next packet / app event instead, but
+                    // still poll now and then so smoltcp timers (timeouts,
+                    // keep-alive) can close dead sockets if the writer
+                    // stays stalled.
                     Some(smoltcp::time::Duration::ZERO) if device.tx_full() => {
                         trace!("Outbound channel full, waiting for room");
-                        Some(Duration::MAX)
+                        Some(TX_FULL_MAINTENANCE)
                     }
                     Some(smoltcp::time::Duration::ZERO) => None,
                     Some(delay) => {
