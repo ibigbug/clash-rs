@@ -197,7 +197,7 @@ impl EnhancedResolver {
         let proxy_server_domains_trie = if !proxy_server_domains.is_empty() {
             let mut domains = trie::StringTrie::new();
             for server in proxy_server_domains {
-                domains.insert(server, Arc::new(true));
+                domains.insert(&Self::proxy_domain_key(server), Arc::new(true));
                 debug!("added proxy server domain: {}", server);
             }
             Some(domains)
@@ -479,10 +479,14 @@ impl EnhancedResolver {
         rv
     }
 
+    fn proxy_domain_key(host: &str) -> String {
+        host.strip_suffix('.').unwrap_or(host).to_ascii_lowercase()
+    }
+
     fn is_proxy_server_domain(&self, host: &str) -> bool {
-        self.proxy_server_domains
-            .as_ref()
-            .is_some_and(|domains| domains.search(host).is_some())
+        self.proxy_server_domains.as_ref().is_some_and(|domains| {
+            domains.search(&Self::proxy_domain_key(host)).is_some()
+        })
     }
 
     /// Whether a lookup for `host` may allocate a fake IP.
@@ -506,10 +510,9 @@ impl EnhancedResolver {
     ) -> anyhow::Result<op::Message> {
         // Check if this is a proxy server domain, use proxy-server-nameserver
         // if configured
-        if let (Some(proxy_resolver), Some(proxy_domains)) =
-            (&self.proxy_resolver, &self.proxy_server_domains)
+        if let Some(proxy_resolver) = &self.proxy_resolver
             && let Some(domain) = EnhancedResolver::domain_name_of_message(message)
-            && proxy_domains.search(&domain).is_some()
+            && self.is_proxy_server_domain(&domain)
         {
             debug!(
                 "using proxy-server-nameserver for proxy server domain: {}",
@@ -1410,13 +1413,14 @@ mod tests {
         config.proxy_server_nameserver = None;
         config.enhance_mode = DNSMode::FakeIp;
         config.fake_ip_range = "198.18.0.1/16".parse().unwrap();
-        let outbounds = make_outbound_registry(&[("proxy", "proxy.example.com")]);
+        let outbounds = make_outbound_registry(&[("proxy", "Proxy.Example.COM.")]);
 
         let resolver =
             EnhancedResolver::new(config, cache_store, None, outbounds, None).await;
 
         assert!(resolver.fake_ip_enabled());
         assert!(!resolver.resolves_with_fake_ip("proxy.example.com"));
+        assert!(!resolver.resolves_with_fake_ip("PROXY.example.com."));
         assert!(resolver.resolves_with_fake_ip("target.example.com"));
     }
 
