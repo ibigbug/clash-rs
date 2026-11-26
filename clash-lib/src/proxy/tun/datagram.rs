@@ -2,7 +2,7 @@ use crate::{
     app::{
         dispatcher::Dispatcher,
         dns::{ThreadSafeDNSResolver, exchange_with_resolver},
-        net::{DEFAULT_OUTBOUND_INTERFACE, SocketMark},
+        net::{OutboundInterface, SocketMark},
     },
     proxy::{channel_datagram::ChannelDatagram, datagram::UdpPacket},
     session::{Network, Session, Type},
@@ -14,6 +14,7 @@ pub(crate) async fn handle_inbound_datagram(
     socket: watfaq_netstack::UdpSocket,
     dispatcher: Arc<Dispatcher>,
     resolver: ThreadSafeDNSResolver,
+    interface: Option<OutboundInterface>,
     so_mark: Option<SocketMark>,
     dns_hijack: bool,
 ) {
@@ -37,11 +38,10 @@ pub(crate) async fn handle_inbound_datagram(
     // is to the tun
     let udp_stream = ChannelDatagram::new(l_tx, d_rx);
 
-    let default_outbound = DEFAULT_OUTBOUND_INTERFACE.read().await;
     let sess = Session {
         network: Network::Udp,
         typ: Type::Tun,
-        iface: default_outbound.clone().inspect(|x| {
+        iface: interface.inspect(|x| {
             debug!("selecting outbound interface: {:?} for tun UDP traffic", x);
         }),
         so_mark,

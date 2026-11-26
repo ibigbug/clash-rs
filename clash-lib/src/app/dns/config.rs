@@ -73,6 +73,24 @@ pub struct Config {
 }
 
 impl Config {
+    pub(crate) fn inherit_interface(
+        &mut self,
+        interface: Option<&OutboundInterface>,
+    ) {
+        if let Some(interface) = interface {
+            for server in self
+                .default_nameserver
+                .iter_mut()
+                .chain(&mut self.nameserver)
+                .chain(&mut self.fallback)
+                .chain(self.proxy_server_nameserver.iter_mut().flatten())
+                .chain(self.nameserver_policy.values_mut())
+            {
+                server.interface.get_or_insert_with(|| interface.clone());
+            }
+        }
+    }
+
     pub fn parse_nameserver(servers: &[String]) -> Result<Vec<NameServer>, Error> {
         let mut nameservers = vec![];
 
@@ -507,6 +525,48 @@ impl From<crate::config::def::FallbackFilter> for FallbackFilter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dns_servers_inherit_only_missing_interfaces() {
+        let interface = |name: &str| {
+            OutboundInterface::from(network_interface::NetworkInterface {
+                name: name.to_owned(),
+                addr: vec![],
+                mac_addr: None,
+                index: 1,
+                internal: false,
+            })
+        };
+        let server = Config::parse_nameserver(&["192.0.2.1".to_owned()])
+            .unwrap()
+            .remove(0);
+        let mut cfg = Config {
+            nameserver: vec![NameServer {
+                interface: Some(interface("explicit")),
+                ..server.clone()
+            }],
+            default_nameserver: vec![server.clone()],
+            fallback: vec![server.clone()],
+            proxy_server_nameserver: Some(vec![server.clone()]),
+            nameserver_policy: HashMap::from([("example.org".into(), server)]),
+            ..Config::default()
+        };
+        cfg.inherit_interface(None);
+        assert!(cfg.default_nameserver[0].interface.is_none());
+        cfg.inherit_interface(Some(&interface("detected")));
+        for ns in [
+            &cfg.default_nameserver[0],
+            &cfg.fallback[0],
+            &cfg.proxy_server_nameserver.as_ref().unwrap()[0],
+            &cfg.nameserver_policy["example.org"],
+        ] {
+            assert_eq!(ns.interface.as_ref().unwrap().name, "detected");
+        }
+        assert_eq!(
+            cfg.nameserver[0].interface.as_ref().unwrap().name,
+            "explicit"
+        );
+    }
 
     #[test]
     fn parse_nameserver_ipv6_without_scheme() {

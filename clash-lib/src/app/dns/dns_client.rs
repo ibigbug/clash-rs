@@ -346,7 +346,9 @@ impl DnsClient {
 
         if matches!(opts.net, DNSNetMode::Dhcp) {
             let host = opts.host.to_string();
-            return Ok(Arc::new(DhcpClient::new(&host, opts.fw_mark).await));
+            return Ok(Arc::new(
+                DhcpClient::new(&host, opts.iface, opts.fw_mark).await,
+            ));
         }
 
         let mut ip: Option<IpAddr> = None;

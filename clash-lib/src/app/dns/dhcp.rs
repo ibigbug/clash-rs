@@ -38,6 +38,7 @@ struct Inner {
 
 pub struct DhcpClient {
     iface: OutboundInterface,
+    outbound_interface: Option<OutboundInterface>,
     fw_mark: Option<SocketMark>,
 
     inner: Mutex<Inner>,
@@ -73,11 +74,16 @@ impl Client for DhcpClient {
 }
 
 impl DhcpClient {
-    pub async fn new(iface: &str, fw_mark: Option<SocketMark>) -> Self {
+    pub async fn new(
+        iface: &str,
+        outbound_interface: Option<OutboundInterface>,
+        fw_mark: Option<SocketMark>,
+    ) -> Self {
         let iface = get_interface_by_name(iface)
             .unwrap_or_else(|| panic!("can not find interface: {iface}"));
         Self {
             iface,
+            outbound_interface,
             inner: Mutex::new(Inner {
                 clients: vec![],
                 iface_expires_at: Instant::now(),
@@ -100,7 +106,7 @@ impl DhcpClient {
                         net: DNSNetMode::Udp,
                         host: url::Host::Ipv4(s),
                         port: 53,
-                        interface: None,
+                        interface: self.outbound_interface.clone(),
                         proxy: None,
                     })
                     .collect(),

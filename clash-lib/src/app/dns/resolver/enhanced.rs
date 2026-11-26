@@ -1,6 +1,10 @@
 use crate::{
     Error,
-    app::{dns::helper::build_dns_response_message, profile::ThreadSafeCacheFile},
+    app::{
+        dns::helper::build_dns_response_message,
+        net::{DEFAULT_OUTBOUND_INTERFACE, OutboundInterface},
+        profile::ThreadSafeCacheFile,
+    },
     common::trie,
     config::def::DNSMode,
     dns::{
@@ -103,6 +107,27 @@ impl EnhancedResolver {
         outbounds: crate::proxy::utils::OutboundHandlerRegistry,
         rule_dispatch: Option<Arc<RuleDispatch>>,
     ) -> Self {
+        let interface = DEFAULT_OUTBOUND_INTERFACE.read().await.clone();
+        Self::new_with_interface(
+            cfg,
+            store,
+            mmdb,
+            outbounds,
+            rule_dispatch,
+            interface.as_ref(),
+        )
+        .await
+    }
+
+    pub(super) async fn new_with_interface(
+        mut cfg: Config,
+        store: ThreadSafeCacheFile,
+        mmdb: Option<PendingMmdb>,
+        outbounds: crate::proxy::utils::OutboundHandlerRegistry,
+        rule_dispatch: Option<Arc<RuleDispatch>>,
+        interface: Option<&OutboundInterface>,
+    ) -> Self {
+        cfg.inherit_interface(interface);
         let edns_client_subnet = cfg.edns_client_subnet.clone();
 
         let default_resolver = Arc::new(EnhancedResolver {

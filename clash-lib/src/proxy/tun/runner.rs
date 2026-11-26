@@ -7,7 +7,9 @@ use url::Url;
 
 use crate::{
     Error,
-    app::{dispatcher::Dispatcher, dns::ThreadSafeDNSResolver},
+    app::{
+        dispatcher::Dispatcher, dns::ThreadSafeDNSResolver, net::OutboundInterface,
+    },
     config::config::TunConfig,
     proxy::tun::{
         datagram::handle_inbound_datagram, routes, stream::handle_inbound_stream,
@@ -25,6 +27,7 @@ struct TunInitializationConfig {
 
 pub struct TunRunner {
     cfg: TunConfig,
+    default_interface: Option<OutboundInterface>,
     dispatcher: Arc<Dispatcher>,
     resolver: ThreadSafeDNSResolver,
     cancellation_token: CancellationToken,
@@ -33,12 +36,14 @@ pub struct TunRunner {
 impl TunRunner {
     pub fn new(
         cfg: TunConfig,
+        default_interface: Option<OutboundInterface>,
         dispatcher: Arc<Dispatcher>,
         resolver: ThreadSafeDNSResolver,
         cancellation_token: Option<CancellationToken>,
     ) -> Result<TunRunner, Error> {
         Ok(Self {
             cfg,
+            default_interface,
             dispatcher,
             resolver,
             cancellation_token: cancellation_token.unwrap_or_default(),
@@ -318,6 +323,7 @@ impl Runner for TunRunner {
         }
 
         let cfg = self.cfg.clone();
+        let default_interface = self.default_interface.clone();
         let so_mark = self.cfg.so_mark;
         let dispatcher = self.dispatcher.clone();
         let resolver = self.resolver.clone();
@@ -427,6 +433,7 @@ impl Runner for TunRunner {
                     tokio::spawn(handle_inbound_stream(
                         stream,
                         dsp.clone(),
+                        default_interface.clone(),
                         so_mark,
                     ));
                 }
@@ -438,6 +445,7 @@ impl Runner for TunRunner {
                     udp_socket,
                     dispatcher.clone(),
                     resolver.clone(),
+                    default_interface.clone(),
                     so_mark,
                     dns_hijack,
                 )
