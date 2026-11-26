@@ -306,9 +306,16 @@ python3 bench/compare_results.py \
 
 ### Updating the Baseline
 
-When merging a PR that improves performance or after significant changes:
+When merging a PR that improves performance or after significant changes.
+The baseline must come from the same build the workflow benchmarks — default
+features, no `--all-features` (`telemetry` writes a Chrome trace and skews the
+numbers) — and ideally from a CI runner: the simplest way is to download the
+`benchmark-pr-results` artifact of a master/PR run and commit it as-is.
 
 ```bash
+# Same build as CI: default features only
+cargo build --release --bin clash-rs
+
 # Run benchmark to generate new baseline
 python3 bench/run_tun_benchmark.py \
   --config bench/tun-benchmark.yaml \

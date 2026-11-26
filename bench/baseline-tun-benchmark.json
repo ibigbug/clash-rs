@@ -1,44 +1,39 @@
 {
-  "timestamp": 1774324308.7311413,
+  "timestamp": 1795699765.7579057,
   "config": "bench/tun-benchmark.yaml",
   "duration": 10,
   "environment": {
     "os": {
       "system": "Linux",
-      "release": "6.6.87.2-microsoft-standard-WSL2",
-      "version": "#1 SMP PREEMPT_DYNAMIC Thu Jun  5 18:30:46 UTC 2025",
+      "release": "7.0.0-1020-azure",
+      "version": "#21-Ubuntu SMP PREEMPT Tue Oct 27 22:34:38 UTC 2026",
       "machine": "x86_64",
       "processor": ""
     },
-    "cpu": "AMD Ryzen 9 9950X3D 16-Core Processor",
-    "cpu_cores": 32,
-    "memory_gb": 45.89,
-    "interfaces": [
-      {
-        "name": "eth0",
-        "speed_mbps": 10000
-      }
-    ],
-    "kernel": "6.6.87.2-microsoft-standard-WSL2"
+    "cpu": "AMD EPYC 7763 64-Core Processor",
+    "cpu_cores": 4,
+    "memory_gb": 15.61,
+    "interfaces": [],
+    "kernel": "7.0.0-1020-azure"
   },
   "baseline": {
-    "throughput_bps": 91922585788.2115,
-    "throughput_gbps": 91.9225857882115,
-    "bytes_transferred": 114918686720,
-    "retransmits": 2,
-    "duration_seconds": 10.001345
+    "throughput_bps": 37031612908.12835,
+    "throughput_gbps": 37.03161290812835,
+    "bytes_transferred": 46295941120,
+    "retransmits": 0,
+    "duration_seconds": 10.001388
   },
   "tun": {
-    "throughput_bps": 6484835499.218761,
-    "throughput_gbps": 6.484835499218762,
-    "bytes_transferred": 8107720704,
-    "retransmits": 0,
-    "duration_seconds": 10.002068
+    "throughput_bps": 2775297674.55857,
+    "throughput_gbps": 2.77529767455857,
+    "bytes_transferred": 3470000128,
+    "retransmits": 157,
+    "duration_seconds": 10.002531
   },
   "comparison": {
-    "baseline_gbps": 91.9225857882115,
-    "tun_gbps": 6.484835499218762,
-    "regression_percent": 92.94532954701717,
-    "overhead_percent": 92.94532954701717
+    "baseline_gbps": 37.03161290812835,
+    "tun_gbps": 2.77529767455857,
+    "regression_percent": 92.50559871252759,
+    "overhead_percent": 92.50559871252759
   }
 }
