@@ -61,9 +61,13 @@ jobs:
           echo "Network namespaces support:"
           sudo ip netns list || echo "No namespaces yet"
 
+      # Default features (what users run; `tun` is included). Do NOT use
+      # --all-features: `telemetry` writes every span to a Chrome trace file
+      # (over 1 GB in a 10 s run) and adds OpenTelemetry / console_subscriber
+      # threads, which distort the throughput this job measures.
       - name: Build clash-rs (release mode)
         run: |
-          cargo build --release --bin clash-rs --all-features
+          cargo build --release --bin clash-rs
           echo "CLASH_BINARY=$PWD/target/release/clash-rs" >> $GITHUB_ENV
 
       - name: Install Python dependencies
