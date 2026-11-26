@@ -206,13 +206,18 @@ impl WebsocketEarlyDataConn {
         } = *idle;
 
         let sent = cmp::min(self.early_data_len, buf.len());
-        let name = HeaderName::from_bytes(self.early_data_header_name.as_bytes())
-            .map_err(|e| {
-                io::Error::new(io::ErrorKind::InvalidInput, e.to_string())
-            })?;
-        let value = HeaderValue::from_str(&URL_SAFE_NO_PAD.encode(&buf[..sent]))
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        req.headers_mut().insert(name, value);
+        // With early data disabled, leave the request alone: an empty header
+        // would still be an offer the server has to echo.
+        if sent > 0 {
+            let name =
+                HeaderName::from_bytes(self.early_data_header_name.as_bytes())
+                    .map_err(|e| {
+                        io::Error::new(io::ErrorKind::InvalidInput, e.to_string())
+                    })?;
+            let value = HeaderValue::from_str(&URL_SAFE_NO_PAD.encode(&buf[..sent]))
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+            req.headers_mut().insert(name, value);
+        }
 
         self.state = State::Connecting(Self::proxy_stream(stream, req, ws_config));
         Ok(sent)
@@ -654,6 +659,34 @@ mod tests {
         assert_eq!(err.kind(), io::ErrorKind::NotConnected);
         let err = c.flush().await.unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::NotConnected);
+    }
+
+    /// With early data disabled the request is sent unchanged, so a server
+    /// that does not echo a subprotocol accepts it, and the first write goes
+    /// over the open stream.
+    #[tokio::test]
+    async fn test_zero_early_data_leaves_request_unchanged() {
+        let (client, server) = tokio::io::duplex(64 * 1024);
+        let mut req = client_req();
+        req.headers_mut().remove(HDR);
+        let mut c = WebsocketEarlyDataConn::new(
+            Box::new(client),
+            req,
+            None,
+            HDR.to_owned(),
+            0,
+        );
+        let srv = tokio::spawn(async move {
+            let mut ws = tokio_tungstenite::accept_async(server).await.unwrap();
+            ws.next().await.unwrap().unwrap().into_data().to_vec()
+        });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            c.write_all(b"hi").await.unwrap();
+            c.flush().await.unwrap();
+        })
+        .await
+        .expect("write with early data disabled hung");
+        assert_eq!(srv.await.unwrap(), b"hi");
     }
 
     #[tokio::test]
