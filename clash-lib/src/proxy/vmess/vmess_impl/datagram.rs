@@ -1,12 +1,16 @@
 use std::{io, pin::Pin, task::Poll};
 
+use bytes::BytesMut;
 use futures::{Sink, Stream, ready};
 use tracing::{debug, error, instrument};
 
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::io::{AsyncRead, ReadBuf};
 
 use crate::{
-    proxy::{AnyStream, datagram::UdpPacket},
+    proxy::{
+        AnyStream,
+        datagram::{StreamSendState, UdpPacket},
+    },
     session::SocksAddr,
 };
 
@@ -14,9 +18,7 @@ pub struct OutboundDatagramVmess {
     inner: AnyStream,
     remote_addr: SocksAddr,
 
-    written: Option<usize>,
-    flushed: bool,
-    pkt: Option<UdpPacket>,
+    send: StreamSendState,
     buf: Vec<u8>,
 }
 
@@ -25,9 +27,7 @@ impl OutboundDatagramVmess {
         Self {
             inner,
             remote_addr,
-            written: None,
-            flushed: true,
-            pkt: None,
+            send: StreamSendState::Idle,
             buf: vec![0u8; 65535],
         }
     }
@@ -40,108 +40,38 @@ impl Sink<UdpPacket> for OutboundDatagramVmess {
         self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Result<(), Self::Error>> {
-        if !self.flushed {
-            match self.poll_flush(cx)? {
-                Poll::Ready(()) => {}
-                Poll::Pending => return Poll::Pending,
-            }
-        }
-
-        Poll::Ready(Ok(()))
+        let this = self.get_mut();
+        this.send.poll_send(Pin::new(&mut this.inner), cx)
     }
 
     fn start_send(
         self: std::pin::Pin<&mut Self>,
         item: UdpPacket,
     ) -> Result<(), Self::Error> {
-        let pin = self.get_mut();
-        pin.pkt = Some(item);
-        pin.flushed = false;
-        Ok(())
+        let this = self.get_mut();
+        // A VMess UDP stream is bound to a single destination; reject the
+        // packet up front so it never occupies the send slot.
+        if item.dst_addr != this.remote_addr {
+            error!(
+                "udp packet dst_addr not match, pkt.dst_addr: {}, remote_addr: {}",
+                item.dst_addr, this.remote_addr
+            );
+            return Err(io::Error::other("udp packet dst_addr not match"));
+        }
+        debug!(
+            "send udp packet to remote vmess server, len: {}, remote_addr: {}",
+            item.data.len(),
+            this.remote_addr
+        );
+        this.send.start(BytesMut::from(&item.data[..]))
     }
 
     fn poll_flush(
-        mut self: std::pin::Pin<&mut Self>,
+        self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Result<(), Self::Error>> {
-        if self.flushed {
-            return Poll::Ready(Ok(()));
-        }
-
-        let Self {
-            ref mut inner,
-            ref mut pkt,
-            ref remote_addr,
-            ref mut flushed,
-            ref mut written,
-            ..
-        } = *self;
-
-        let mut inner = Pin::new(inner);
-
-        let pkt_container = pkt;
-
-        if let Some(pkt) = pkt_container {
-            if &pkt.dst_addr != remote_addr {
-                error!(
-                    "udp packet dst_addr not match, pkt.dst_addr: {}, remote_addr: \
-                     {}",
-                    pkt.dst_addr, remote_addr
-                );
-                return Poll::Ready(Err(io::Error::other(
-                    "udp packet dst_addr not match",
-                )));
-            }
-
-            // Loop until the entire payload is written.  TCP streams may
-            // accept fewer bytes than requested (partial write), and the
-            // previous single-shot poll_write returned an error in that case,
-            // causing intermittent UDP packet loss.  Also guard against
-            // poll_write returning Ok(0) (closed stream) to avoid an infinite
-            // loop.
-            if written.is_none() {
-                *written = Some(0);
-            }
-            let written_val = written.as_mut().unwrap();
-            while *written_val < pkt.data.len() {
-                let n = ready!(
-                    inner.as_mut().poll_write(cx, &pkt.data[*written_val..])
-                )?;
-                if n == 0 {
-                    *pkt_container = None;
-                    *written = None;
-                    return Poll::Ready(Err(io::Error::new(
-                        io::ErrorKind::WriteZero,
-                        "failed to write entire vmess udp packet: stream closed",
-                    )));
-                }
-                *written_val += n;
-                debug!(
-                    "send udp packet to remote vmess server, len: {}, written: {}, \
-                     total: {}, remote_addr: {}, dst_addr: {}",
-                    n,
-                    *written_val,
-                    pkt.data.len(),
-                    remote_addr,
-                    pkt.dst_addr
-                );
-            }
-
-            if !*flushed {
-                let r = inner.as_mut().poll_flush(cx)?;
-                if r.is_pending() {
-                    return Poll::Pending;
-                }
-                *flushed = true;
-            }
-
-            *pkt_container = None;
-            *written = None;
-            Poll::Ready(Ok(()))
-        } else {
-            debug!("no udp packet to send");
-            Poll::Ready(Err(io::Error::other("no packet to send")))
-        }
+        let this = self.get_mut();
+        this.send.poll_send(Pin::new(&mut this.inner), cx)
     }
 
     fn poll_close(

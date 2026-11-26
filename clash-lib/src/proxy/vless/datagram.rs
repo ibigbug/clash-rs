@@ -4,13 +4,16 @@ use std::{
     task::{Context, Poll},
 };
 
-use bytes::{Buf, BufMut, BytesMut};
+use bytes::{BufMut, BytesMut};
 use futures::{Sink, Stream, ready};
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::io::{AsyncRead, ReadBuf};
 use tracing::{debug, trace};
 
 use crate::{
-    proxy::{AnyStream, datagram::UdpPacket},
+    proxy::{
+        AnyStream,
+        datagram::{StreamSendState, UdpPacket},
+    },
     session::SocksAddr,
 };
 
@@ -21,17 +24,13 @@ pub struct OutboundDatagramVless {
     remote_addr: SocksAddr,
 
     // Write state
-    write_buf: BytesMut,
-    pending_packet: Option<UdpPacket>,
+    send: StreamSendState,
 
     // Read state
     packet_buf: BytesMut,
     remaining_bytes: usize,
     length_buf: [u8; 2],
     header_read: usize,
-
-    // State tracking
-    flushed: bool,
 }
 
 impl OutboundDatagramVless {
@@ -39,18 +38,16 @@ impl OutboundDatagramVless {
         Self {
             inner,
             remote_addr,
-            write_buf: BytesMut::new(),
-            pending_packet: None,
+            send: StreamSendState::Idle,
             packet_buf: BytesMut::new(),
             remaining_bytes: 0,
             length_buf: [0; 2],
             header_read: 0,
-            flushed: true,
         }
     }
 
-    fn write_packet(&mut self, payload: &[u8]) -> Result<(), io::Error> {
-        self.write_buf.clear();
+    fn encode_packet(payload: &[u8]) -> io::Result<BytesMut> {
+        let mut write_buf = BytesMut::with_capacity(2 + payload.len());
 
         // VLESS UDP packet format is simpler than expected:
         // Just 2-byte length + payload data
@@ -68,13 +65,13 @@ impl OutboundDatagramVless {
         }
 
         // Write length header (big-endian)
-        self.write_buf.put_u16(payload.len() as u16);
+        write_buf.put_u16(payload.len() as u16);
 
         // Write payload
-        self.write_buf.put_slice(payload);
+        write_buf.put_slice(payload);
 
         trace!("encoded VLESS UDP packet: len={}", payload.len());
-        Ok(())
+        Ok(write_buf)
     }
 }
 
@@ -85,24 +82,12 @@ impl Sink<UdpPacket> for OutboundDatagramVless {
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Result<(), Self::Error>> {
-        if !self.flushed {
-            match self.poll_flush(cx)? {
-                Poll::Ready(()) => {}
-                Poll::Pending => return Poll::Pending,
-            }
-        }
-        Poll::Ready(Ok(()))
+        let this = self.get_mut();
+        this.send.poll_send(Pin::new(&mut this.inner), cx)
     }
 
     fn start_send(self: Pin<&mut Self>, item: UdpPacket) -> Result<(), Self::Error> {
         let this = self.get_mut();
-
-        if this.pending_packet.is_some() {
-            return Err(io::Error::new(
-                io::ErrorKind::WouldBlock,
-                "previous packet not yet sent",
-            ));
-        }
 
         // Handle large packets by chunking them
         let total_len = item.data.len();
@@ -117,10 +102,9 @@ impl Sink<UdpPacket> for OutboundDatagramVless {
             MAX_PACKET_LENGTH
         };
 
-        this.write_packet(&item.data[..chunk_size])?;
-        this.pending_packet = Some(item);
-        this.flushed = false;
-
+        this.send
+            .start(Self::encode_packet(&item.data[..chunk_size])?)?;
+        debug!("queued VLESS UDP packet, data_len={}", chunk_size);
         Ok(())
     }
 
@@ -128,51 +112,16 @@ impl Sink<UdpPacket> for OutboundDatagramVless {
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Result<(), Self::Error>> {
-        if self.flushed {
-            return Poll::Ready(Ok(()));
-        }
-
         let this = self.get_mut();
-
-        if this.write_buf.is_empty() {
-            this.flushed = true;
-            this.pending_packet = None;
-            return Poll::Ready(Ok(()));
-        }
-
-        let mut inner = Pin::new(&mut this.inner);
-
-        // Write the encoded packet
-        while !this.write_buf.is_empty() {
-            let n = ready!(inner.as_mut().poll_write(cx, &this.write_buf))?;
-            if n == 0 {
-                return Poll::Ready(Err(io::Error::new(
-                    io::ErrorKind::WriteZero,
-                    "failed to write packet data",
-                )));
-            }
-            this.write_buf.advance(n);
-        }
-
-        // Flush the underlying stream
-        ready!(inner.poll_flush(cx))?;
-
-        if let Some(packet) = &this.pending_packet {
-            debug!("sent VLESS UDP packet, data_len={}", packet.data.len());
-        }
-
-        this.flushed = true;
-        this.pending_packet = None;
-
-        Poll::Ready(Ok(()))
+        this.send.poll_send(Pin::new(&mut this.inner), cx)
     }
 
     fn poll_close(
-        mut self: Pin<&mut Self>,
+        self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Result<(), Self::Error>> {
-        ready!(self.as_mut().poll_flush(cx))?;
-        Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
+        let this = self.get_mut();
+        this.send.poll_close(Pin::new(&mut this.inner), cx)
     }
 }
 

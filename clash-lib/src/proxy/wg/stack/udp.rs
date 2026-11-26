@@ -9,7 +9,6 @@ pub struct UdpPair {
     recv: tokio::sync::mpsc::Receiver<UdpPacket>,
 
     pkt: Option<UdpPacket>,
-    flushed: bool,
 }
 
 impl UdpPair {
@@ -21,7 +20,6 @@ impl UdpPair {
             send,
             recv,
             pkt: None,
-            flushed: true,
         }
     }
 }
@@ -44,7 +42,7 @@ impl Sink<UdpPacket> for UdpPair {
         self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Result<(), Self::Error>> {
-        if !self.flushed {
+        if self.pkt.is_some() {
             self.poll_flush(cx)
         } else {
             std::task::Poll::Ready(Ok(()))
@@ -57,7 +55,6 @@ impl Sink<UdpPacket> for UdpPair {
     ) -> Result<(), Self::Error> {
         let this = self.get_mut();
         this.pkt = Some(item);
-        this.flushed = false;
         Ok(())
     }
 
@@ -65,12 +62,11 @@ impl Sink<UdpPacket> for UdpPair {
         self: std::pin::Pin<&mut Self>,
         _cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Result<(), Self::Error>> {
-        if !self.flushed {
+        if self.pkt.is_some() {
             let this = self.get_mut();
             if let Some(pkt) = this.pkt.take() {
                 match this.send.try_send(pkt) {
                     Ok(_) => {
-                        this.flushed = true;
                         return std::task::Poll::Ready(Ok(()));
                     }
                     Err(tokio::sync::mpsc::error::TrySendError::Closed(pkt)) => {

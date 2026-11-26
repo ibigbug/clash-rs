@@ -34,7 +34,6 @@ pub struct OutboundDatagramShadowsocks<S> {
     remote_addr: SocketAddr,
 
     // for Sink
-    flushed: bool,
     pkt: Option<UdpPacket>,
 
     // for Stream
@@ -50,7 +49,6 @@ impl<S> OutboundDatagramShadowsocks<S> {
 
         Self {
             inner,
-            flushed: true,
             pkt: None,
             remote_addr,
             buf: vec![0u8; 65535],
@@ -70,7 +68,7 @@ where
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Result<(), Self::Error>> {
-        if !self.flushed {
+        if self.pkt.is_some() {
             match self.poll_flush(cx)? {
                 Poll::Ready(()) => {}
                 Poll::Pending => return Poll::Pending,
@@ -83,7 +81,6 @@ where
     fn start_send(self: Pin<&mut Self>, item: UdpPacket) -> Result<(), Self::Error> {
         let pin = self.get_mut();
         pin.pkt = Some(item);
-        pin.flushed = false;
         Ok(())
     }
 
@@ -92,7 +89,7 @@ where
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Result<(), Self::Error>> {
-        if self.flushed {
+        if self.pkt.is_none() {
             return Poll::Ready(Ok(()));
         }
 
@@ -100,7 +97,6 @@ where
             ref mut inner,
             ref mut pkt,
             ref remote_addr,
-            ref mut flushed,
 
             ref mut ss_control,
             ..
@@ -137,7 +133,6 @@ where
 
             let wrote_all = n == data.len();
             *pkt_container = None;
-            *flushed = true;
 
             let res = if wrote_all {
                 Ok(())

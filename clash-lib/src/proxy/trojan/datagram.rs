@@ -1,18 +1,20 @@
 use std::{
-    io,
     net::{Ipv4Addr, Ipv6Addr},
     pin::Pin,
     task::Poll,
 };
 
-use bytes::{Buf, BufMut, BytesMut};
+use bytes::{BufMut, BytesMut};
 use futures::{Future, Sink, Stream, pin_mut, ready};
 use tracing::{debug, trace};
 
-use tokio::io::{AsyncReadExt, AsyncWrite};
+use tokio::io::AsyncReadExt;
 
 use crate::{
-    proxy::{AnyStream, datagram::UdpPacket},
+    proxy::{
+        AnyStream,
+        datagram::{StreamSendState, UdpPacket},
+    },
     session::{SocksAddr, SocksAddrType},
 };
 
@@ -23,9 +25,7 @@ pub struct OutboundDatagramTrojan {
     state: ReadState,
     read_buf: BytesMut,
 
-    written: Option<usize>,
-    flushed: bool,
-    pkt: Option<UdpPacket>,
+    send: StreamSendState,
 }
 
 impl OutboundDatagramTrojan {
@@ -37,9 +37,7 @@ impl OutboundDatagramTrojan {
             read_buf: BytesMut::new(),
             state: ReadState::Atyp,
 
-            written: None,
-            flushed: true,
-            pkt: None,
+            send: StreamSendState::Idle,
         }
     }
 }
@@ -51,98 +49,34 @@ impl Sink<UdpPacket> for OutboundDatagramTrojan {
         self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Result<(), Self::Error>> {
-        if !self.flushed {
-            match self.poll_flush(cx)? {
-                Poll::Ready(()) => {}
-                Poll::Pending => return Poll::Pending,
-            }
-        }
-
-        Poll::Ready(Ok(()))
+        let this = self.get_mut();
+        this.send.poll_send(Pin::new(&mut this.inner), cx)
     }
 
     fn start_send(
         self: std::pin::Pin<&mut Self>,
         item: UdpPacket,
     ) -> Result<(), Self::Error> {
-        let pin = self.get_mut();
-        pin.pkt = Some(item);
-        pin.flushed = false;
-        Ok(())
+        // Trojan UDP frame: addr | u16 len | CRLF | payload
+        let mut payload = BytesMut::new();
+        item.dst_addr.write_buf(&mut payload);
+        payload.put_u16(item.data.len() as u16);
+        payload.put_slice(b"\r\n");
+        payload.put_slice(&item.data);
+        trace!(
+            "queued trojan udp packet, frame len {}, data len {}",
+            payload.len(),
+            item.data.len()
+        );
+        self.get_mut().send.start(payload)
     }
 
     fn poll_flush(
-        mut self: std::pin::Pin<&mut Self>,
+        self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Result<(), Self::Error>> {
-        if self.flushed {
-            return Poll::Ready(Ok(()));
-        }
-
-        let Self {
-            ref mut inner,
-            ref mut pkt,
-            ref mut written,
-            ref mut flushed,
-            ..
-        } = *self;
-
-        let mut inner = Pin::new(inner);
-
-        let pkt_container = pkt;
-
-        if let Some(pkt) = pkt_container {
-            let data = &pkt.data;
-
-            let mut payload = BytesMut::new();
-            pkt.dst_addr.write_buf(&mut payload);
-            payload.put_u16(data.len() as u16);
-            payload.put_slice(b"\r\n");
-            payload.put_slice(data);
-
-            if let Some(w) = *written {
-                payload.advance(w);
-            } else {
-                *written = Some(0);
-            }
-
-            while !payload.is_empty() {
-                let n = ready!(inner.as_mut().poll_write(cx, payload.as_ref()))?;
-                if n == 0 {
-                    // poll_write returning Ok(0) means the stream is closed
-                    // (per AsyncWrite contract). Without this check, the loop
-                    // would spin forever since payload.advance(0) makes no
-                    // progress. Mirror std::io::Write::write_all behavior.
-                    *pkt_container = None;
-                    *written = None;
-                    return Poll::Ready(Err(io::Error::new(
-                        io::ErrorKind::WriteZero,
-                        "failed to write whole trojan udp packet: stream closed",
-                    )));
-                }
-                *written.as_mut().unwrap() += n;
-                payload.advance(n);
-
-                trace!(
-                    "written {} bytes to trojan stream, remaining {}, data len {}",
-                    n,
-                    payload.len(),
-                    data.len()
-                );
-            }
-
-            if !*flushed {
-                ready!(inner.as_mut().poll_flush(cx))?;
-                *flushed = true;
-            }
-            *written = None;
-            *pkt_container = None;
-
-            Poll::Ready(Ok(()))
-        } else {
-            debug!("no udp packet to send");
-            Poll::Ready(Err(io::Error::other("no packet to send")))
-        }
+        let this = self.get_mut();
+        this.send.poll_send(Pin::new(&mut this.inner), cx)
     }
 
     fn poll_close(
@@ -412,6 +346,7 @@ mod tests {
     use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
     use super::*;
+    use std::io;
 
     struct ChunkedStream {
         buf: Vec<u8>,
