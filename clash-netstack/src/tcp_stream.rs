@@ -5,7 +5,7 @@ use std::{
     net::SocketAddr,
     pin::Pin,
     sync::Arc,
-    task::{Context, Poll, ready},
+    task::{Context, Poll},
 };
 
 pub struct TcpStream {
@@ -168,13 +168,17 @@ impl tokio::io::AsyncWrite for TcpStream {
     }
 
     fn poll_shutdown(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
     ) -> Poll<std::io::Result<()>> {
-        ready!(self.as_mut().poll_flush(cx))?;
         trace!("TcpStream::poll_shutdown called, client side closing");
         self.handle.close.shutdown_requested();
         self.handle.send_waker.wake();
+        // Notify only after the flag is set. Notifying first (as the old
+        // poll_flush call did) lets poll_sockets handle the event before the
+        // flag is visible; nothing then wakes it until the next packet, app
+        // I/O or the 28 s keep-alive, delaying the FIN that long.
+        self.notify_tcp_socket_ready();
         Poll::Ready(Ok(()))
     }
 }
