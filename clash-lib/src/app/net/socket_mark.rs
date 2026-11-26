@@ -24,6 +24,13 @@ impl From<u32> for SocketMark {
     }
 }
 
+#[cfg(target_os = "linux")]
+impl From<SocketMark> for u32 {
+    fn from(mark: SocketMark) -> Self {
+        mark.0
+    }
+}
+
 impl fmt::Display for SocketMark {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.0.fmt(f)

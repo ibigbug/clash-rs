@@ -186,7 +186,8 @@ impl EnhancedResolver {
                 None
             };
 
-        // Only plain outbounds are available before the manager finishes initialization.
+        // Only plain outbounds are available before the manager finishes
+        // initialization.
         let plain_outbounds = outbounds.read().await;
         let proxy_server_domains = plain_outbounds
             .values()

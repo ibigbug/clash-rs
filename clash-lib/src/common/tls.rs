@@ -15,6 +15,18 @@ fn global_root_store() -> Arc<RootCertStore> {
     Arc::new(root_store)
 }
 
+pub(crate) fn is_inline_pem(value: &str) -> bool {
+    value.contains("-----BEGIN")
+}
+
+pub(crate) fn read_pem(value: &str) -> std::io::Result<String> {
+    if is_inline_pem(value) {
+        Ok(value.to_owned())
+    } else {
+        std::fs::read_to_string(value)
+    }
+}
+
 /// Load a PEM certificate chain and private key from either inline PEM strings
 /// or file paths. A string containing `-----BEGIN` is treated as inline PEM;
 /// otherwise it is interpreted as a file path.
@@ -26,27 +38,19 @@ pub fn load_cert_and_key(
     cert: &str,
     key: &str,
 ) -> std::io::Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)> {
-    let cert_pem = if cert.contains("-----BEGIN") {
-        cert.to_owned()
-    } else {
-        std::fs::read_to_string(cert).map_err(|e| {
-            std::io::Error::new(
-                e.kind(),
-                format!("failed to read certificate '{cert}': {e}"),
-            )
-        })?
-    };
+    let cert_pem = read_pem(cert).map_err(|e| {
+        std::io::Error::new(
+            e.kind(),
+            format!("failed to read certificate '{cert}': {e}"),
+        )
+    })?;
 
-    let key_pem = if key.contains("-----BEGIN") {
-        key.to_owned()
-    } else {
-        std::fs::read_to_string(key).map_err(|e| {
-            std::io::Error::new(
-                e.kind(),
-                format!("failed to read private key '{key}': {e}"),
-            )
-        })?
-    };
+    let key_pem = read_pem(key).map_err(|e| {
+        std::io::Error::new(
+            e.kind(),
+            format!("failed to read private key '{key}': {e}"),
+        )
+    })?;
 
     let certs: Vec<CertificateDer<'static>> =
         rustls_pemfile::certs(&mut cert_pem.as_bytes())

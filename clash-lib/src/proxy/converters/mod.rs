@@ -1,5 +1,7 @@
 pub mod anytls;
 pub mod hysteria2;
+#[cfg(feature = "naive")]
+pub mod naive;
 #[cfg(feature = "shadowquic")]
 pub mod shadowquic;
 #[cfg(feature = "shadowsocks")]

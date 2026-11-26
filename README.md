@@ -55,6 +55,7 @@ A custom protocol, rule based network proxy software.
 | `wireguard` | UDP (userspace) | `wireguard` feature |
 | `hysteria2` | QUIC · obfs-salamander | |
 | `tuic` | QUIC (bbr / cubic / new_reno) | `tuic` feature |
+| `naive` | HTTP/2 · QUIC | [Naive outbound guide](clash-lib/src/proxy/naive/README.md) |
 | `shadowquic` | QUIC · over-stream | `shadowquic` feature |
 | `ssh` | SSH tunnel | `ssh` feature |
 | `tor` | Onion routing | `onion` feature (`plus` build) |

@@ -84,11 +84,7 @@ impl Sink<UdpPacket> for TuicDatagramOutbound {
         packet: UdpPacket,
     ) -> Result<(), Self::Error> {
         self.send_tx
-            .start_send_unpin(WindUdpPacket {
-                source: None,
-                target: packet.dst_addr.into(),
-                payload: packet.data.into(),
-            })
+            .start_send_unpin(packet.into())
             .map_err(|err| new_io_error(format!("{err:?}")))
     }
 
@@ -118,14 +114,9 @@ impl Stream for TuicDatagramOutbound {
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Option<Self::Item>> {
-        let local_addr = self.local_addr.clone();
         self.recv_rx.poll_recv(cx).map(|packet| {
             packet.map(|packet| {
-                UdpPacket::new(
-                    packet.payload.to_vec(),
-                    packet.target.into(),
-                    local_addr,
-                )
+                super::super::wind::udp_reply(packet, self.local_addr.clone())
             })
         })
     }

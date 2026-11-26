@@ -359,9 +359,14 @@ impl OutboundManager {
     /// that call sites stay feature-independent.
     pub fn load_plain_outbounds(
         outbounds: Vec<OutboundProxyProtocol>,
-        #[cfg_attr(not(feature = "tailscale"), allow(unused_variables))]
+        #[cfg_attr(
+            not(any(feature = "tailscale", feature = "naive")),
+            allow(unused_variables)
+        )]
         cwd: &std::path::Path,
     ) -> Vec<AnyOutboundHandler> {
+        #[cfg(feature = "naive")]
+        let mut first_cronet_path = None;
         outbounds
             .into_iter()
             .filter_map(|outbound| match outbound {
@@ -444,6 +449,33 @@ impl OutboundManager {
                             );
                         })
                         .ok()
+                }
+                #[cfg(feature = "naive")]
+                OutboundProxyProtocol::Naive(mut config) => {
+                    config.resolve_paths(cwd);
+                    let name = &config.common_opts.name;
+                    let handler = crate::proxy::naive::Handler::try_from(&config)
+                        .inspect_err(|e| {
+                            error!("failed to load naive outbound {}: {}", name, e);
+                        })
+                        .ok()?;
+                    if let Some(path) = config.cronet_lib_path {
+                        let path = PathBuf::from(path);
+                        if let Some((first_path, first_name)) = &first_cronet_path {
+                            if *first_path != path {
+                                tracing::warn!(
+                                    "Naive proxies {first_name} and {name} specify \
+                                     different cronet-lib-path values. All proxies \
+                                     share the first Cronet library loaded in this \
+                                     process"
+                                );
+                            }
+                        } else {
+                            first_cronet_path =
+                                Some((path, config.common_opts.name));
+                        }
+                    }
+                    Some(Arc::new(handler) as AnyOutboundHandler)
                 }
                 #[cfg(feature = "wireguard")]
                 OutboundProxyProtocol::Wireguard(wg) => {
