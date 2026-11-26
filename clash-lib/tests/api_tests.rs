@@ -12,6 +12,11 @@ mod common;
 // Port layout for client tests: 7 ports per instance
 const CLIENT_PORT_BLOCK: u16 = 7;
 
+fn client_ports_without_dns(base: u16) -> Vec<u16> {
+    // API, HTTP, SOCKS and mixed listeners.
+    (base..base + 4).collect()
+}
+
 /// Allocate a unique port block and start an isolated client Clash instance.
 /// Returns (instance, api_port) where api_port = port_base
 /// (external-controller).
@@ -28,7 +33,7 @@ fn start_unique_client() -> (ClashInstance, u16) {
             log_file: None,
             config_path: None,
         },
-        (port_base..port_base + CLIENT_PORT_BLOCK).collect(),
+        client_ports_without_dns(port_base),
     )
     .expect("Failed to start client");
     (clash, port_base)
@@ -78,7 +83,7 @@ async fn test_wildcard_cors_returns_any_origin_header() {
             log_file: None,
             config_path: None,
         },
-        (port_base..port_base + CLIENT_PORT_BLOCK).collect(),
+        client_ports_without_dns(port_base),
     )
     .expect("Failed to start client with wildcard CORS origins");
 
@@ -121,7 +126,7 @@ async fn test_cors_preflight_without_auth_returns_cors_headers() {
             log_file: None,
             config_path: None,
         },
-        (port_base..port_base + CLIENT_PORT_BLOCK).collect(),
+        client_ports_without_dns(port_base),
     )
     .expect("Failed to start client with wildcard CORS origins");
 
@@ -191,7 +196,7 @@ async fn test_config_reload_via_payload() {
             log_file: None,
             config_path: None,
         },
-        (port_base..port_base + CLIENT_PORT_BLOCK).collect(),
+        client_ports_without_dns(port_base),
     )
     .expect("Failed to start clash");
 
@@ -267,7 +272,7 @@ async fn test_config_reload_same_controller_hot_swap_immediately_available() {
             log_file: None,
             config_path: None,
         },
-        (port_base..port_base + CLIENT_PORT_BLOCK).collect(),
+        client_ports_without_dns(port_base),
     )
     .expect("Failed to start clash");
 
@@ -486,7 +491,7 @@ async fn test_config_reload_via_empty_path_uses_stored_config_path() {
             log_file: None,
             config_path: Some(config_file),
         },
-        (port_base..port_base + CLIENT_PORT_BLOCK).collect(),
+        client_ports_without_dns(port_base),
     )
     .expect("Failed to start clash");
 
@@ -560,14 +565,9 @@ async fn test_connections_returns_proxy_chain_names() {
             log_file: None,
             config_path: None,
         },
-        (client_base..client_base + CLIENT_PORT_BLOCK).collect(),
+        client_ports_without_dns(client_base),
     )
     .expect("Failed to start client");
-
-    // Also wait for the SOCKS5 port used by the request task —
-    // ClashInstance::start() only waits for the API port (first in the list)
-    // and the proxy listeners may bind slightly later.
-    wait_port_ready(client_base + 3).expect("mixed-proxy port not ready");
 
     let request_handle = tokio::spawn(async move {
         let proxy =

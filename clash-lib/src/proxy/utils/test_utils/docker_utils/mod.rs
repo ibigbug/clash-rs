@@ -129,6 +129,8 @@ pub fn find_clash_rs_binary() -> std::path::PathBuf {
 pub mod config_helper;
 pub mod consts;
 pub mod docker_runner;
+#[cfg(throughput_test)]
+mod socks5;
 
 fn destination_list(gateway_ip: Option<String>) -> Vec<String> {
     let mut destination_list = vec!["host.docker.internal".to_owned()];
@@ -689,67 +691,6 @@ impl Suite {
 
 // ── SOCKS5 / process-level e2e helpers (docker_test only) ────────────────────
 
-/// Connect to a SOCKS5 proxy at `proxy_addr` and issue a CONNECT to
-/// `target_host:target_port`.  Returns a `TcpStream` ready for data.
-#[cfg(all(docker_test, throughput_test))]
-async fn socks5_connect(
-    proxy_addr: std::net::SocketAddr,
-    target_host: &str,
-    target_port: u16,
-) -> std::io::Result<tokio::net::TcpStream> {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    let mut stream = tokio::net::TcpStream::connect(proxy_addr).await?;
-    // Greeting: VER=5, NMETHODS=1, METHOD=NO_AUTH(0)
-    stream.write_all(&[0x05, 0x01, 0x00]).await?;
-    let mut resp = [0u8; 2];
-    stream.read_exact(&mut resp).await?;
-    if resp[0] != 0x05 || resp[1] != 0x00 {
-        return Err(std::io::Error::other("SOCKS5 auth negotiation failed"));
-    }
-    // CONNECT request: VER=5, CMD=CONNECT(1), RSV=0
-    // Use ATYP=IPv4 for numeric IP addresses so the proxy chain doesn't need
-    // to do DNS resolution; fall back to ATYP=DOMAIN for hostnames.
-    let mut req = Vec::with_capacity(10 + target_host.len());
-    if let Ok(ip) = target_host.parse::<std::net::Ipv4Addr>() {
-        req.extend_from_slice(&[0x05, 0x01, 0x00, 0x01]);
-        req.extend_from_slice(&ip.octets());
-    } else {
-        let host_bytes = target_host.as_bytes();
-        req.extend_from_slice(&[0x05, 0x01, 0x00, 0x03, host_bytes.len() as u8]);
-        req.extend_from_slice(host_bytes);
-    }
-    req.extend_from_slice(&target_port.to_be_bytes());
-    stream.write_all(&req).await?;
-    // Response header: VER, REP, RSV, ATYP
-    let mut hdr = [0u8; 4];
-    stream.read_exact(&mut hdr).await?;
-    if hdr[1] != 0x00 {
-        return Err(std::io::Error::other(format!(
-            "SOCKS5 CONNECT failed: REP={}",
-            hdr[1]
-        )));
-    }
-    // Skip bound address
-    match hdr[3] {
-        0x01 => {
-            let mut _skip = [0u8; 6];
-            stream.read_exact(&mut _skip).await?;
-        }
-        0x03 => {
-            let mut len = [0u8; 1];
-            stream.read_exact(&mut len).await?;
-            let mut skip = vec![0u8; len[0] as usize + 2];
-            stream.read_exact(&mut skip).await?;
-        }
-        0x04 => {
-            let mut _skip = [0u8; 18];
-            stream.read_exact(&mut _skip).await?;
-        }
-        _ => {}
-    }
-    Ok(stream)
-}
-
 /// Wait until a local TCP port accepts connections, or until `timeout_secs`
 /// elapses.
 #[cfg(all(docker_test, throughput_test))]
@@ -777,6 +718,41 @@ pub async fn wait_for_tcp(
         }
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     }
+}
+
+/// Wait for traffic to reach the host through the proxy container.
+#[cfg(all(docker_test, throughput_test))]
+async fn wait_for_proxy_route(
+    proxy: std::net::SocketAddr,
+    destinations: &[String],
+) -> anyhow::Result<usize> {
+    let routes = async {
+        loop {
+            for (index, dest) in destinations.iter().enumerate() {
+                // Isolate late connections from subsequent probes and
+                // measurements.
+                let listener = TcpListener::bind(("0.0.0.0", 0)).await?;
+                let port = listener.local_addr()?.port();
+                let probe = async {
+                    let mut client = socks5::connect(proxy, dest, port).await?;
+                    client.write_u8(1).await?;
+                    let (mut incoming, _) = listener.accept().await?;
+                    incoming.read_u8().await
+                };
+                if let Ok(Ok(1)) =
+                    tokio::time::timeout(Duration::from_secs(2), probe).await
+                {
+                    return Ok(index);
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(20), routes)
+        .await
+        .map_err(|_| {
+            anyhow!("proxy {proxy} could not reach any of {destinations:?}")
+        })?
 }
 
 /// Payload for throughput tests run under netem (50 ms delay, 1% loss).
@@ -883,7 +859,10 @@ pub async fn clash_process_e2e_throughput(
     })?;
 
     // --- find a target address reachable from docker ---
-    let destinations = destination_list(gateway_ip);
+    let proxy_addr = std::net::SocketAddr::from(([127, 0, 0, 1], socks_port));
+    let mut destinations = destination_list(gateway_ip);
+    let ready = wait_for_proxy_route(proxy_addr, &destinations).await?;
+    destinations.rotate_left(ready);
     let mut last_err = anyhow::anyhow!("no destinations");
 
     const RUNS: usize = 3;
@@ -935,11 +914,9 @@ pub async fn clash_process_e2e_throughput(
             });
 
             // client side
-            let proxy_addr: std::net::SocketAddr =
-                format!("127.0.0.1:{}", socks_port).parse().unwrap();
             let mut conn = match tokio::time::timeout(
                 std::time::Duration::from_secs(10),
-                socks5_connect(proxy_addr, dest, echo_port),
+                socks5::connect(proxy_addr, dest, echo_port),
             )
             .await
             {

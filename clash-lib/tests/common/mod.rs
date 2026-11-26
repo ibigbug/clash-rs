@@ -104,16 +104,15 @@ impl ClashInstance {
     ) -> Result<Self, clash_lib::Error> {
         let (handle, token) = clash_lib::start_scaffold_instance(options)?;
 
-        // Wait for the main port (API) to be ready
-        if let Some(&main_port) = ports.first() {
-            wait_port_ready(main_port)?;
-        }
-
-        Ok(Self {
+        let instance = Self {
             ports,
             handle: Some(handle),
             token,
-        })
+        };
+        for &port in &instance.ports {
+            wait_port_ready(port)?;
+        }
+        Ok(instance)
     }
 }
 
