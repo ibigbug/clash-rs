@@ -279,6 +279,10 @@ fn main() -> anyhow::Result<()> {
 
     let mut _guard = None;
     if cli.help_improve {
+        // sentry's reqwest transport is built with `rustls-no-provider`, so the
+        // process-wide rustls provider (aws-lc-rs or ring, per build features)
+        // must be installed before the client is created.
+        clash::setup_default_crypto_provider();
         let mut options = sentry::ClientOptions::default();
         options.release = sentry::release_name!();
         _guard = Some(sentry::init((env!("SENTRY_DSN"), options)));
