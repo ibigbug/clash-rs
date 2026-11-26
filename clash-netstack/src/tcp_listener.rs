@@ -407,6 +407,10 @@ impl TcpListener {
                     }
                 }
 
+                // `tx_full` describes this poll only: a stale flag from an
+                // earlier one would keep the `tx_waiter` branch firing on a
+                // channel that has room, spinning just the same.
+                device.reset_tx_full();
                 iface.poll(now, device, &mut sockets);
 
                 // smoltcp binds a listener to the local endpoint only and
@@ -709,6 +713,14 @@ impl TcpListener {
                 });
 
                 next_poll = match iface.poll_delay(now, &sockets) {
+                    // A socket has data to send but the outbound channel is
+                    // full: polling again before the TUN writer makes room
+                    // would only spin. Wait for room (the `tx_waiter`
+                    // branch) or the next packet / app event instead.
+                    Some(smoltcp::time::Duration::ZERO) if device.tx_full() => {
+                        trace!("Outbound channel full, waiting for room");
+                        Some(Duration::MAX)
+                    }
                     Some(smoltcp::time::Duration::ZERO) => None,
                     Some(delay) => {
                         trace!("device poll delay: {delay:?}");
@@ -769,7 +781,8 @@ impl TcpListener {
                     // The TUN writer drained the outbound channel that made
                     // the last poll stall (inbound packets are left queued
                     // while it is full). Nothing else would signal this.
-                    Ok(permit) = tx_waiter.reserve(), if device.tx_blocked() => {
+                    Ok(permit) = tx_waiter.reserve(),
+                        if device.tx_blocked() || device.tx_full() => {
                         trace!("Outbound channel has room again, will poll sockets");
                         // Release the slot for the device before polling.
                         drop(permit);
