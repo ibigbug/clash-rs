@@ -3,7 +3,8 @@ use std::{
     fmt::Debug,
     io,
     pin::Pin,
-    task::{Context, Poll, Waker},
+    sync::{Arc, Mutex},
+    task::{Context, Poll, Wake, Waker},
 };
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -28,24 +29,68 @@ type HandshakeFuture =
 ///
 /// ```text
 /// Idle ──first poll_write──▶ Connecting ──handshake ok──▶ Open
-///                                 │
-///                                 └──handshake err──▶ Failed
+///  │                              └──handshake err──▶ Failed
+///  └──poll_shutdown (nothing ever written)──▶ Closed
 /// ```
 ///
 /// The first write's payload (up to `early_data_len` bytes) is carried in the
-/// upgrade request header, so nothing can be read or flushed until the
-/// handshake completes.
+/// upgrade request header, so the handshake can only *start* from
+/// `poll_write`. That write reports those bytes as accepted right away, like
+/// a buffered writer; a handshake failure surfaces on the next operation.
+/// Once started, any operation (read, write, flush, shutdown) drives the
+/// handshake, so nothing depends on the first write being polled again.
 enum State {
     /// Waiting for the first write to supply early data. Boxed: the request
     /// and config dwarf the other variants.
     Idle(Box<IdleParts>),
-    /// Upgrade request sent; `sent` is how many bytes of the caller's first
-    /// buffer it carries and is reported once the handshake succeeds.
-    Connecting { fut: HandshakeFuture, sent: usize },
+    /// Upgrade request (carrying the early data) in flight.
+    Connecting(HandshakeFuture),
     /// Handshake complete; all I/O goes to the WebSocket stream.
     Open(AnyStream),
     /// Handshake failed; every subsequent operation errors.
     Failed,
+    /// Shut down before anything was written: no connection was ever made.
+    Closed,
+}
+
+/// Wakers of the read, write and flush/shutdown sides waiting on the
+/// handshake. Waking it wakes them all.
+#[derive(Default)]
+struct Parked([Mutex<Option<Waker>>; 3]);
+
+const READ: usize = 0;
+const WRITE: usize = 1;
+const FLUSH: usize = 2;
+
+impl Parked {
+    fn park(&self, side: usize, waker: &Waker) {
+        let mut slot = self.0[side].lock().unwrap();
+        match &*slot {
+            Some(w) if w.will_wake(waker) => {}
+            _ => *slot = Some(waker.clone()),
+        }
+    }
+
+    fn wake_all(&self) {
+        for slot in &self.0 {
+            // Release the lock before waking: a waker that polls inline
+            // would otherwise re-enter `park` on the same slot.
+            let w = slot.lock().unwrap().take();
+            if let Some(w) = w {
+                w.wake();
+            }
+        }
+    }
+}
+
+impl Wake for Parked {
+    fn wake(self: Arc<Self>) {
+        self.wake_all();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.wake_all();
+    }
 }
 
 struct IdleParts {
@@ -58,19 +103,21 @@ impl State {
     fn name(&self) -> &'static str {
         match self {
             State::Idle(_) => "idle",
-            State::Connecting { .. } => "connecting",
+            State::Connecting(_) => "connecting",
             State::Open(_) => "open",
             State::Failed => "failed",
+            State::Closed => "closed",
         }
     }
 }
 
 pub struct WebsocketEarlyDataConn {
     state: State,
-    /// Reader parked until the handshake finishes.
-    read_waker: Option<Waker>,
-    /// Flusher/shutdown parked until the handshake finishes.
-    flush_waker: Option<Waker>,
+    /// Every side parked on the handshake. The handshake future is polled
+    /// with a waker that wakes all of them, so progress is never reported
+    /// only to a task that has since stopped polling (e.g. a cancelled write
+    /// on one half of a split stream while the read half waits elsewhere).
+    parked: Arc<Parked>,
     early_data_header_name: String,
     early_data_len: usize,
 }
@@ -92,6 +139,13 @@ fn handshake_failed() -> io::Error {
     )
 }
 
+fn closed() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::BrokenPipe,
+        "websocket early data connection shut down",
+    )
+}
+
 impl WebsocketEarlyDataConn {
     pub fn new(
         stream: AnyStream,
@@ -106,8 +160,7 @@ impl WebsocketEarlyDataConn {
                 req,
                 ws_config,
             })),
-            read_waker: None,
-            flush_waker: None,
+            parked: Arc::default(),
             early_data_header_name,
             early_data_len,
         }
@@ -139,8 +192,9 @@ impl WebsocketEarlyDataConn {
     }
 
     /// `Idle` → `Connecting`: put the first `early_data_len` bytes of `buf`
-    /// into the upgrade request header and start the handshake.
-    fn start_handshake(&mut self, buf: &[u8]) -> io::Result<()> {
+    /// into the upgrade request header and start the handshake. Returns how
+    /// many bytes of `buf` the header carries.
+    fn start_handshake(&mut self, buf: &[u8]) -> io::Result<usize> {
         let State::Idle(idle) = std::mem::replace(&mut self.state, State::Failed)
         else {
             unreachable!("start_handshake called outside Idle");
@@ -152,28 +206,53 @@ impl WebsocketEarlyDataConn {
         } = *idle;
 
         let sent = cmp::min(self.early_data_len, buf.len());
-        let name = HeaderName::from_bytes(self.early_data_header_name.as_bytes())
-            .map_err(|e| {
-                io::Error::new(io::ErrorKind::InvalidInput, e.to_string())
-            })?;
-        let value = HeaderValue::from_str(&URL_SAFE_NO_PAD.encode(&buf[..sent]))
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        req.headers_mut().insert(name, value);
+        // With early data disabled, leave the request alone: an empty header
+        // would still be an offer the server has to echo.
+        if sent > 0 {
+            let name =
+                HeaderName::from_bytes(self.early_data_header_name.as_bytes())
+                    .map_err(|e| {
+                        io::Error::new(io::ErrorKind::InvalidInput, e.to_string())
+                    })?;
+            let value = HeaderValue::from_str(&URL_SAFE_NO_PAD.encode(&buf[..sent]))
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+            req.headers_mut().insert(name, value);
+        }
 
-        self.state = State::Connecting {
-            fut: Self::proxy_stream(stream, req, ws_config),
-            sent,
-        };
-        Ok(())
+        self.state = State::Connecting(Self::proxy_stream(stream, req, ws_config));
+        Ok(sent)
     }
 
-    fn wake_parked(&mut self) {
-        if let Some(w) = self.read_waker.take() {
-            w.wake();
-        }
-        if let Some(w) = self.flush_waker.take() {
-            w.wake();
-        }
+    /// Drive `Connecting` to `Open` or `Failed`, waking every parked side on
+    /// completion. `side`'s waker is recorded first; the future itself is
+    /// polled with a waker that wakes every parked side.
+    fn poll_handshake(
+        &mut self,
+        side: usize,
+        cx: &Context<'_>,
+    ) -> Poll<io::Result<()>> {
+        let State::Connecting(fut) = &mut self.state else {
+            return Poll::Ready(Ok(()));
+        };
+        self.parked.park(side, cx.waker());
+        let waker = Waker::from(self.parked.clone());
+        let res = ready!(fut.as_mut().poll(&mut Context::from_waker(&waker)));
+        let out = match res {
+            Ok(stream) => {
+                self.state = State::Open(stream);
+                Ok(())
+            }
+            Err(e) => {
+                self.state = State::Failed;
+                Err(e)
+            }
+        };
+        self.wake_parked();
+        Poll::Ready(out)
+    }
+
+    fn wake_parked(&self) {
+        self.parked.wake_all();
     }
 }
 
@@ -184,12 +263,21 @@ impl AsyncRead for WebsocketEarlyDataConn {
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
         let this = self.get_mut();
-        match &mut this.state {
-            State::Open(s) => Pin::new(s).poll_read(cx, buf),
-            State::Failed => Poll::Ready(Err(handshake_failed())),
-            State::Idle(_) | State::Connecting { .. } => {
-                this.read_waker = Some(cx.waker().clone());
-                Poll::Pending
+        loop {
+            match &mut this.state {
+                State::Open(s) => return Pin::new(s).poll_read(cx, buf),
+                State::Failed => return Poll::Ready(Err(handshake_failed())),
+                // Never connected and never will be: EOF.
+                State::Closed => return Poll::Ready(Ok(())),
+                // Only a write can start the handshake (it supplies the
+                // early data), so wait for one.
+                State::Idle(_) => {
+                    this.parked.park(READ, cx.waker());
+                    return Poll::Pending;
+                }
+                State::Connecting(_) => {
+                    ready!(this.poll_handshake(READ, cx))?;
+                }
             }
         }
     }
@@ -204,25 +292,39 @@ impl AsyncWrite for WebsocketEarlyDataConn {
         let this = self.get_mut();
         loop {
             match &mut this.state {
+                // An empty write is a no-op; it must not start the handshake
+                // with no early data.
+                State::Idle(_) if buf.is_empty() => return Poll::Ready(Ok(0)),
                 State::Idle(_) => {
-                    if let Err(e) = this.start_handshake(buf) {
-                        this.wake_parked();
+                    let sent = match this.start_handshake(buf) {
+                        Ok(sent) => sent,
+                        Err(e) => {
+                            this.wake_parked();
+                            return Poll::Ready(Err(e));
+                        }
+                    };
+                    if sent == 0 {
+                        // No early data allowed: send `buf` once open.
+                        continue;
+                    }
+                    // The bytes are now owned by the upgrade request, so
+                    // report them as written, whatever the handshake's
+                    // progress: a write that returned Pending here would
+                    // have consumed them anyway. Poll once to send the
+                    // request and to catch an immediate failure.
+                    if let Poll::Ready(Err(e)) = this.poll_handshake(WRITE, cx) {
                         return Poll::Ready(Err(e));
                     }
+                    return Poll::Ready(Ok(sent));
                 }
-                State::Connecting { fut, sent } => {
-                    let sent = *sent;
-                    let res = ready!(fut.as_mut().poll(cx));
-                    let (next, out) = match res {
-                        Ok(stream) => (State::Open(stream), Ok(sent)),
-                        Err(e) => (State::Failed, Err(e)),
-                    };
-                    this.state = next;
-                    this.wake_parked();
-                    return Poll::Ready(out);
+                State::Connecting(_) => {
+                    ready!(this.poll_handshake(WRITE, cx))?;
                 }
-                State::Open(s) => return Pin::new(s).poll_write(cx, buf),
+                State::Open(s) => {
+                    return Pin::new(s).poll_write(cx, buf);
+                }
                 State::Failed => return Poll::Ready(Err(handshake_failed())),
+                State::Closed => return Poll::Ready(Err(closed())),
             }
         }
     }
@@ -232,12 +334,15 @@ impl AsyncWrite for WebsocketEarlyDataConn {
         cx: &mut Context<'_>,
     ) -> Poll<io::Result<()>> {
         let this = self.get_mut();
-        match &mut this.state {
-            State::Open(s) => Pin::new(s).poll_flush(cx),
-            State::Failed => Poll::Ready(Err(handshake_failed())),
-            State::Idle(_) | State::Connecting { .. } => {
-                this.flush_waker = Some(cx.waker().clone());
-                Poll::Pending
+        loop {
+            match &mut this.state {
+                State::Open(s) => return Pin::new(s).poll_flush(cx),
+                State::Failed => return Poll::Ready(Err(handshake_failed())),
+                // Nothing has been written, so nothing to flush.
+                State::Idle(_) | State::Closed => return Poll::Ready(Ok(())),
+                State::Connecting(_) => {
+                    ready!(this.poll_handshake(FLUSH, cx))?;
+                }
             }
         }
     }
@@ -247,12 +352,21 @@ impl AsyncWrite for WebsocketEarlyDataConn {
         cx: &mut Context<'_>,
     ) -> Poll<io::Result<()>> {
         let this = self.get_mut();
-        match &mut this.state {
-            State::Open(s) => Pin::new(s).poll_shutdown(cx),
-            State::Failed => Poll::Ready(Err(handshake_failed())),
-            State::Idle(_) | State::Connecting { .. } => {
-                this.flush_waker = Some(cx.waker().clone());
-                Poll::Pending
+        loop {
+            match &mut this.state {
+                State::Open(s) => return Pin::new(s).poll_shutdown(cx),
+                State::Failed => return Poll::Ready(Err(handshake_failed())),
+                State::Closed => return Poll::Ready(Ok(())),
+                State::Idle(_) => {
+                    // Nothing was ever written, so no upgrade was sent; drop
+                    // the transport and let a parked reader see EOF.
+                    this.state = State::Closed;
+                    this.wake_parked();
+                    return Poll::Ready(Ok(()));
+                }
+                State::Connecting(_) => {
+                    ready!(this.poll_handshake(FLUSH, cx))?;
+                }
             }
         }
     }
@@ -273,6 +387,7 @@ mod tests {
     };
 
     use super::*;
+    use std::time::Duration;
 
     const HDR: &str = "Sec-WebSocket-Protocol";
 
@@ -383,6 +498,7 @@ mod tests {
             ws
         });
         c.write_all(b"req").await.unwrap();
+        c.flush().await.unwrap();
         assert!(woken(&flag), "parked reader must be woken on handshake");
 
         let mut out = [0u8; 2];
@@ -398,7 +514,12 @@ mod tests {
 
         // Server hangs up without completing the upgrade.
         drop(server);
-        assert!(c.write(b"data").await.is_err());
+        let res = async {
+            c.write_all(b"data").await?;
+            c.flush().await
+        }
+        .await;
+        assert!(res.is_err());
         assert!(woken(&flag), "parked reader must be woken on failure");
 
         // Subsequent calls must error, not panic by re-polling the
@@ -407,5 +528,195 @@ mod tests {
         assert_eq!(err.kind(), io::ErrorKind::NotConnected);
         let err = c.read(&mut [0u8; 4]).await.unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::NotConnected);
+    }
+
+    /// Poll a first write once while the server has not answered: it must
+    /// report the early data as written even though the handshake is still
+    /// pending, and is then dropped, as a timeout/select! would.
+    async fn start_write(c: &mut WebsocketEarlyDataConn, data: &[u8]) {
+        let fut = c.write(data);
+        tokio::pin!(fut);
+        match futures::poll!(fut.as_mut()) {
+            Poll::Ready(Ok(n)) => assert_eq!(n, data.len()),
+            other => panic!("first write not accepted: {other:?}"),
+        }
+        assert_eq!(c.state.name(), "connecting");
+    }
+
+    #[tokio::test]
+    async fn test_read_drives_handshake_after_first_write() {
+        let (mut c, server) = conn(16);
+        start_write(&mut c, b"req").await;
+
+        let srv = tokio::spawn(async move {
+            let (mut ws, early) = accept(server).await;
+            assert_eq!(early, b"req");
+            ws.send(Message::binary(b"ok".to_vec())).await.unwrap();
+            let next = ws.next().await.unwrap().unwrap();
+            next.into_data().to_vec()
+        });
+
+        // Only reads from here on: they must complete the handshake.
+        let mut out = [0u8; 2];
+        tokio::time::timeout(Duration::from_secs(2), c.read_exact(&mut out))
+            .await
+            .expect("read hung: handshake not driven by poll_read")
+            .unwrap();
+        assert_eq!(&out, b"ok");
+
+        // A new write with the same bytes is new data and must be sent, not
+        // mistaken for the early data.
+        c.write_all(b"req").await.unwrap();
+        c.flush().await.unwrap();
+        assert_eq!(srv.await.unwrap(), b"req");
+    }
+
+    /// Split halves on different tasks: the reader parks before any write,
+    /// the writer starts the handshake and stops polling. The handshake's
+    /// progress must still reach the reader even though nobody else polls.
+    #[tokio::test]
+    async fn test_reader_woken_when_writer_stops_polling() {
+        let (mut c, server) = conn(16);
+        let flag = park_reader(&mut c);
+        start_write(&mut c, b"req").await;
+
+        let srv = tokio::spawn(async move {
+            let (mut ws, _) = accept(server).await;
+            ws.send(Message::binary(b"ok".to_vec())).await.unwrap();
+            ws
+        });
+        // Nobody polls `c` here; only the reader's waker can bring it back.
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !woken(&flag) {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("reader never woken: handshake waker went to the writer");
+
+        let mut out = [0u8; 2];
+        c.read_exact(&mut out).await.unwrap();
+        assert_eq!(&out, b"ok");
+        drop(srv.await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_flush_drives_handshake_after_first_write() {
+        let (mut c, server) = conn(16);
+        start_write(&mut c, b"req").await;
+        let srv = tokio::spawn(async move { accept(server).await });
+        tokio::time::timeout(Duration::from_secs(2), c.flush())
+            .await
+            .expect("flush hung: handshake not driven by poll_flush")
+            .unwrap();
+        // Flush means the early data was delivered: the upgrade completed.
+        assert_eq!(c.state.name(), "open");
+        let (_ws, early) = srv.await.unwrap();
+        assert_eq!(early, b"req");
+    }
+
+    #[tokio::test]
+    async fn test_shutdown_drives_handshake_after_first_write() {
+        let (mut c, server) = conn(16);
+        start_write(&mut c, b"req").await;
+        let srv = tokio::spawn(async move {
+            let (mut ws, early) = accept(server).await;
+            assert_eq!(early, b"req");
+            ws.next().await.unwrap().unwrap()
+        });
+        tokio::time::timeout(Duration::from_secs(2), c.shutdown())
+            .await
+            .expect("shutdown hung: handshake not driven by poll_shutdown")
+            .unwrap();
+        let msg = tokio::time::timeout(Duration::from_secs(2), srv)
+            .await
+            .expect("no close frame")
+            .unwrap();
+        assert!(msg.is_close(), "expected a close frame, got {msg:?}");
+    }
+
+    /// The first write was accepted, then the server hangs up without
+    /// answering the upgrade: the failure must reach a parked reader and
+    /// every later operation.
+    #[tokio::test]
+    async fn test_handshake_failure_after_accepted_first_write() {
+        let (mut c, mut server) = conn(16);
+        let flag = park_reader(&mut c);
+        start_write(&mut c, b"req").await;
+
+        // Read the upgrade request, then hang up without a response.
+        let mut req = vec![0u8; 4096];
+        let n = server.read(&mut req).await.unwrap();
+        assert!(n > 0, "upgrade request not sent by the first write");
+        drop(server);
+
+        tokio::time::timeout(Duration::from_secs(2), c.read(&mut [0u8; 4]))
+            .await
+            .expect("read hung after handshake failure")
+            .unwrap_err();
+        assert!(woken(&flag), "parked reader must be woken on failure");
+        let err = c.write(b"more").await.unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::NotConnected);
+        let err = c.flush().await.unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::NotConnected);
+    }
+
+    /// With early data disabled the request is sent unchanged, so a server
+    /// that does not echo a subprotocol accepts it, and the first write goes
+    /// over the open stream.
+    #[tokio::test]
+    async fn test_zero_early_data_leaves_request_unchanged() {
+        let (client, server) = tokio::io::duplex(64 * 1024);
+        let mut req = client_req();
+        req.headers_mut().remove(HDR);
+        let mut c = WebsocketEarlyDataConn::new(
+            Box::new(client),
+            req,
+            None,
+            HDR.to_owned(),
+            0,
+        );
+        let srv = tokio::spawn(async move {
+            let mut ws = tokio_tungstenite::accept_async(server).await.unwrap();
+            ws.next().await.unwrap().unwrap().into_data().to_vec()
+        });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            c.write_all(b"hi").await.unwrap();
+            c.flush().await.unwrap();
+        })
+        .await
+        .expect("write with early data disabled hung");
+        assert_eq!(srv.await.unwrap(), b"hi");
+    }
+
+    #[tokio::test]
+    async fn test_empty_first_write_does_not_start_handshake() {
+        let (mut c, _server) = conn(16);
+        assert_eq!(c.write(b"").await.unwrap(), 0);
+        assert_eq!(c.state.name(), "idle");
+    }
+
+    #[tokio::test]
+    async fn test_shutdown_before_any_write() {
+        let (mut c, _server) = conn(16);
+        let flag = park_reader(&mut c);
+
+        tokio::time::timeout(Duration::from_secs(1), c.shutdown())
+            .await
+            .expect("shutdown before write must not hang")
+            .unwrap();
+        assert!(woken(&flag), "parked reader must be woken");
+        assert_eq!(c.read(&mut [0u8; 4]).await.unwrap(), 0, "EOF");
+        let err = c.write(b"x").await.unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::BrokenPipe);
+    }
+
+    #[tokio::test]
+    async fn test_flush_before_any_write_is_ready() {
+        let (mut c, _server) = conn(16);
+        tokio::time::timeout(Duration::from_secs(1), c.flush())
+            .await
+            .expect("flush with nothing written must not hang")
+            .unwrap();
     }
 }
