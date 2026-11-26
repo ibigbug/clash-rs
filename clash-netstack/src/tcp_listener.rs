@@ -17,6 +17,9 @@ const DEFAULT_TCP_SEND_BUFFER_SIZE: u32 = 256 * 1024; // 256 KiB
 const DEFAULT_TCP_RECV_BUFFER_SIZE: u32 = 256 * 1024; // 256 KiB
 /// How long a new socket may wait in Listen for its SYN to be processed.
 const LISTEN_GRACE: Duration = Duration::from_secs(10);
+/// How often the stack still polls while waiting for room in a full
+/// outbound channel, so smoltcp timers keep running.
+const TX_FULL_MAINTENANCE: Duration = Duration::from_millis(250);
 
 /// Time-to-live for SYN tracker entries. Duplicates within this window are
 /// suppressed to prevent the same SYN from creating multiple smoltcp sockets.
@@ -407,6 +410,10 @@ impl TcpListener {
                     }
                 }
 
+                // `tx_full` describes this poll only: a stale flag from an
+                // earlier one would keep the `tx_waiter` branch firing on a
+                // channel that has room, spinning just the same.
+                device.reset_tx_full();
                 iface.poll(now, device, &mut sockets);
 
                 // smoltcp binds a listener to the local endpoint only and
@@ -709,6 +716,17 @@ impl TcpListener {
                 });
 
                 next_poll = match iface.poll_delay(now, &sockets) {
+                    // A socket has data to send but the outbound channel is
+                    // full: polling again before the TUN writer makes room
+                    // would only spin. Wait for room (the `tx_waiter`
+                    // branch) or the next packet / app event instead, but
+                    // still poll now and then so smoltcp timers (timeouts,
+                    // keep-alive) can close dead sockets if the writer
+                    // stays stalled.
+                    Some(smoltcp::time::Duration::ZERO) if device.tx_full() => {
+                        trace!("Outbound channel full, waiting for room");
+                        Some(TX_FULL_MAINTENANCE)
+                    }
                     Some(smoltcp::time::Duration::ZERO) => None,
                     Some(delay) => {
                         trace!("device poll delay: {delay:?}");
@@ -769,7 +787,8 @@ impl TcpListener {
                     // The TUN writer drained the outbound channel that made
                     // the last poll stall (inbound packets are left queued
                     // while it is full). Nothing else would signal this.
-                    Ok(permit) = tx_waiter.reserve(), if device.tx_blocked() => {
+                    Ok(permit) = tx_waiter.reserve(),
+                        if device.tx_blocked() || device.tx_full() => {
                         trace!("Outbound channel has room again, will poll sockets");
                         // Release the slot for the device before polling.
                         drop(permit);

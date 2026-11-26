@@ -982,3 +982,83 @@ async fn test_rejected_syn_listener_does_not_take_other_connection() {
         .expect("expected EOF, not an error");
     assert_eq!(n, 0, "rejected stream received another client's data");
 }
+
+/// CPU time used so far by the calling thread.
+#[cfg(target_os = "linux")]
+fn thread_cpu_time() -> std::time::Duration {
+    let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+    assert_eq!(
+        unsafe { libc::getrusage(libc::RUSAGE_THREAD, &mut usage) },
+        0
+    );
+    let tv = |t: libc::timeval| {
+        std::time::Duration::new(t.tv_sec as u64, t.tv_usec as u32 * 1000)
+    };
+    tv(usage.ru_utime) + tv(usage.ru_stime)
+}
+
+/// With data queued to send and the outbound channel full (a stalled TUN
+/// writer), smoltcp reports a zero poll delay. The stack must wait for the
+/// channel to drain instead of re-polling in a loop, which pinned a core
+/// for as long as the writer stalled.
+#[cfg(target_os = "linux")]
+#[test]
+fn test_full_tx_channel_does_not_spin() {
+    use std::time::Duration;
+    use tokio::io::AsyncWriteExt;
+    init();
+
+    // A current-thread runtime on its own thread: the stack task runs here,
+    // so this thread's CPU time is the stack's.
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let (busy, resumed) = rt.block_on(async {
+        let (mut mock_tun, tun_in, _) = MockTun::new();
+        let (stack, mut tcp_listener, _udp) = NetStack::with_tcp_tx_capacity(1);
+        let (mut stack_sink, mut stack_stream) = stack.split();
+        tokio::spawn(async move {
+            while let Some(pkt) = mock_tun.next().await {
+                if stack_sink.send(Packet::new(pkt)).await.is_err() {
+                    break;
+                }
+            }
+        });
+
+        tun_in.send(build_tcp_syn_packet_with_port(2000)).unwrap();
+        let mut stream = tcp_listener.next().await.unwrap();
+        let isn = collect_syn_acks(&mut stack_stream, &[2000]).await[&2000];
+        client_sends(&tun_in, 2000, isn, b"hi");
+        expect_data(&mut stream, b"hi").await;
+
+        // More than one segment: the first fills the 1-slot channel, the
+        // rest stay queued in smoltcp with nobody draining the channel.
+        stream.write_all(&[7u8; 16 * 1024]).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let start = thread_cpu_time();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let busy = thread_cpu_time() - start;
+
+        // Draining the channel must let the transfer continue: the segment
+        // that sat in the channel, then the next one the stack sends.
+        let resumed = tokio::time::timeout(Duration::from_secs(2), async {
+            let mut segments = 0;
+            while segments < 2 {
+                let pkt = stack_stream.next().await.unwrap().unwrap();
+                if parse_tcp_data(pkt.data()).is_some_and(|(_, n)| n > 0) {
+                    segments += 1;
+                }
+            }
+        })
+        .await;
+        (busy, resumed.is_ok())
+    });
+
+    assert!(resumed, "stack stopped sending after the channel drained");
+    assert!(
+        busy < Duration::from_millis(100),
+        "stack spun while the TX channel was full: {busy:?} CPU in 500 ms"
+    );
+}
