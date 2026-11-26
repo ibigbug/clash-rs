@@ -9,7 +9,9 @@ use crate::{
         internal::proxy::{PROXY_DIRECT, PROXY_GLOBAL},
     },
     proxy::{
-        AnyInboundDatagram, ProxyStream, datagram::UdpPacket, utils::ToCanonical,
+        AnyInboundDatagram, ProxyStream,
+        datagram::{UdpPacket, is_sink_closed},
+        utils::ToCanonical,
     },
     session::{Session, SocksAddr},
 };
@@ -386,88 +388,19 @@ impl Dispatcher {
                             )
                             .await;
 
-                        let (mut remote_w, mut remote_r) = outbound_datagram.split();
-                        let (remote_sender, mut remote_forwarder) =
+                        let (remote_w, remote_r) = outbound_datagram.split();
+                        let (remote_sender, remote_forwarder) =
                             tokio::sync::mpsc::channel::<(UdpPacket, SocksAddr)>(
                                 256,
                             );
 
-                        // Per-session task: owns orig_map and all dst_addr
-                        // substitution logic. Outgoing arm rewrites dst_addr
-                        // to the logical destination (from reverse_lookup) and
-                        // saves the original for src_addr restoration.
-                        let rw_handle = tokio::spawn(async move {
-                            // Bound the reverse-mapping table to prevent
-                            // unbounded
-                            // memory growth on long-lived sessions with many
-                            // dests.
-                            const ORIG_MAP_MAX: usize = 256;
-                            let mut orig_map: HashMap<SocksAddr, SocksAddr> =
-                                HashMap::new();
-                            // Best-effort fallback for proxy outbounds that do
-                            // not echo dst_addr as src_addr in responses (e.g.
-                            // Shadowsocks returns the real upstream IP).
-                            let mut last_orig_addr: Option<SocksAddr> = None;
-                            loop {
-                                tokio::select! {
-                                    // local -> remote
-                                    pkt = remote_forwarder.recv() => {
-                                        let Some((mut packet, dest)) = pkt else { break };
-                                        let orig = packet.dst_addr.clone();
-                                        packet.dst_addr = dest;
-                                        if orig != packet.dst_addr {
-                                            if orig_map.len() >= ORIG_MAP_MAX
-                                                && let Some(k) =
-                                                    orig_map.keys().next().cloned()
-                                            {
-                                                orig_map.remove(&k);
-                                            }
-                                            orig_map.insert(packet.dst_addr.clone(), orig.clone());
-                                        }
-                                        last_orig_addr = Some(orig);
-                                        match remote_w.send(packet).await {
-                                            Ok(_) => {}
-                                            Err(err) => {
-                                                warn!(
-                                                    "failed to send packet to \
-                                                     remote: {err:?}"
-                                                );
-                                            }
-                                        }
-                                    }
-                                    // remote -> local
-                                    pkt = remote_r.next() => {
-                                        let Some(mut packet) = pkt else { break };
-                                        if let Some(orig) =
-                                            orig_map.get(&packet.src_addr).cloned()
-                                        {
-                                            packet.src_addr = orig;
-                                        } else if !orig_map.is_empty() {
-                                            // Proxy didn't echo dst_addr as src —
-                                            // best-effort for single-dest flows.
-                                            if let Some(ref fallback) = last_orig_addr {
-                                                packet.src_addr = fallback.clone();
-                                            }
-                                        }
-                                        packet.dst_addr = sess.source.into();
-                                        debug!(
-                                            "UDP NAT for packet: {:?}, session: {}",
-                                            packet, sess
-                                        );
-                                        match remote_receiver_w.send(packet).await {
-                                            Ok(_) => {}
-                                            Err(err) => {
-                                                warn!(
-                                                    "failed to send packet to \
-                                                     local: {}",
-                                                    err
-                                                );
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        });
+                        let rw_handle = tokio::spawn(relay_udp_session(
+                            remote_w,
+                            remote_r,
+                            remote_forwarder,
+                            remote_receiver_w,
+                            sess,
+                        ));
 
                         outbound_handle_guard
                             .insert(
@@ -507,6 +440,10 @@ impl Dispatcher {
             while let Some(packet) = remote_receiver_r.recv().await {
                 match local_w.send(packet).await {
                     Ok(_) => {}
+                    Err(err) if is_sink_closed(&err) => {
+                        warn!("local udp sink closed for {}: {}", ss, err);
+                        break;
+                    }
                     Err(err) => {
                         error!("failed to send packet to local: {}", err);
                     }
@@ -535,6 +472,111 @@ impl Dispatcher {
 // if the destination is an IP address, check if it's a fake IP
 // or look for cached IP
 // if the destination is a domain name, don't resolve
+
+/// Per-session relay task: owns orig_map and all dst_addr substitution logic.
+/// The local -> remote arm rewrites dst_addr to the logical destination (from
+/// reverse_lookup) and saves the original for src_addr restoration. Returns
+/// when the outbound stream ends, the session's forwarder is closed, or the
+/// outbound sink can never send again.
+async fn relay_udp_session<W, R>(
+    mut remote_w: W,
+    mut remote_r: R,
+    mut remote_forwarder: tokio::sync::mpsc::Receiver<(UdpPacket, SocksAddr)>,
+    remote_receiver_w: tokio::sync::mpsc::Sender<UdpPacket>,
+    sess: Session,
+) where
+    W: futures::Sink<UdpPacket, Error = std::io::Error> + Unpin,
+    R: futures::Stream<Item = UdpPacket> + Unpin,
+{
+    // Bound the reverse-mapping table to prevent unbounded memory growth on
+    // long-lived sessions with many dests.
+    const ORIG_MAP_MAX: usize = 256;
+    let mut orig_map: HashMap<SocksAddr, SocksAddr> = HashMap::new();
+    // Best-effort fallback for proxy outbounds that do not echo dst_addr as
+    // src_addr in responses (e.g. Shadowsocks returns the real upstream IP).
+    let mut last_orig_addr: Option<SocksAddr> = None;
+    loop {
+        tokio::select! {
+            // local -> remote
+            pkt = remote_forwarder.recv() => {
+                let Some((mut packet, dest)) = pkt else { break };
+                let orig = packet.dst_addr.clone();
+                packet.dst_addr = dest;
+                if orig != packet.dst_addr {
+                    if orig_map.len() >= ORIG_MAP_MAX
+                        && let Some(k) =
+                            orig_map.keys().next().cloned()
+                    {
+                        orig_map.remove(&k);
+                    }
+                    orig_map.insert(packet.dst_addr.clone(), orig.clone());
+                }
+                last_orig_addr = Some(orig);
+                match remote_w.send(packet).await {
+                    Ok(_) => {}
+                    // The outbound can never send
+                    // again: end the session so the
+                    // next packet reconnects instead
+                    // of failing here until the NAT
+                    // entry times out.
+                    Err(err) if is_sink_closed(&err) => {
+                        warn!(
+                            "outbound udp sink closed, \
+                             ending session {sess}: {err}"
+                        );
+                        break;
+                    }
+                    Err(err) => {
+                        warn!(
+                            "failed to send packet to \
+                             remote: {err:?}"
+                        );
+                    }
+                }
+            }
+            // remote -> local
+            pkt = remote_r.next() => {
+                let Some(mut packet) = pkt else { break };
+                if let Some(orig) =
+                    orig_map.get(&packet.src_addr).cloned()
+                {
+                    packet.src_addr = orig;
+                } else if !orig_map.is_empty() {
+                    // Proxy didn't echo dst_addr as src —
+                    // best-effort for single-dest flows.
+                    if let Some(ref fallback) = last_orig_addr {
+                        packet.src_addr = fallback.clone();
+                    }
+                }
+                packet.dst_addr = sess.source.into();
+                debug!(
+                    "UDP NAT for packet: {:?}, session: {}",
+                    packet, sess
+                );
+                match remote_receiver_w.send(packet).await {
+                    Ok(_) => {}
+                    Err(err) => {
+                        warn!(
+                            "failed to send packet to \
+                             local: {}",
+                            err
+                        );
+                    }
+                }
+            }
+        }
+    }
+    // Close the sender side first, so the next packet
+    // for this flow sees the session as dead and
+    // reconnects rather than queueing behind the
+    // close below.
+    drop(remote_forwarder);
+    // Best effort: let stream-based outbounds send
+    // FIN / close_notify instead of just dropping the
+    // connection.
+    let _ = tokio::time::timeout(Duration::from_secs(1), remote_w.close()).await;
+}
+
 async fn reverse_lookup(
     resolver: &Arc<dyn ClashResolver>,
     dst: &SocksAddr,
@@ -798,5 +840,120 @@ mod tests {
 
         assert!(map.get_outbound_sender_mut("proxy", src()).is_some());
         assert_eq!(map.0.len(), 1);
+    }
+
+    /// Sink that fails every send with `err` and counts close calls.
+    struct FailingSink {
+        closed_marker: bool,
+        sends: usize,
+        closes: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl futures::Sink<UdpPacket> for FailingSink {
+        type Error = std::io::Error;
+
+        fn poll_ready(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+
+        fn start_send(
+            mut self: std::pin::Pin<&mut Self>,
+            _: UdpPacket,
+        ) -> std::io::Result<()> {
+            self.sends += 1;
+            let kind = std::io::ErrorKind::ConnectionReset;
+            Err(if self.closed_marker {
+                crate::proxy::datagram::sink_closed(kind, "stream reset")
+            } else {
+                std::io::Error::new(kind, "transient")
+            })
+        }
+
+        fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+
+        fn poll_close(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            self.closes
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    fn packet() -> (UdpPacket, SocksAddr) {
+        let dst: SocksAddr = "1.1.1.1:53".parse().unwrap();
+        (
+            UdpPacket::new(b"q".to_vec(), src().into(), dst.clone()),
+            dst,
+        )
+    }
+
+    fn spawn_relay(
+        closed_marker: bool,
+    ) -> (
+        tokio::task::JoinHandle<()>,
+        tokio::sync::mpsc::Sender<(UdpPacket, SocksAddr)>,
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        let closes = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let sink = FailingSink {
+            closed_marker,
+            sends: 0,
+            closes: closes.clone(),
+        };
+        let (fwd_tx, fwd_rx) = tokio::sync::mpsc::channel(4);
+        let (local_tx, _local_rx) = tokio::sync::mpsc::channel(4);
+        let sess = Session {
+            source: src(),
+            ..Default::default()
+        };
+        let handle = tokio::spawn(relay_udp_session(
+            sink,
+            futures::stream::pending::<UdpPacket>(),
+            fwd_rx,
+            local_tx,
+            sess,
+        ));
+        (handle, fwd_tx, closes)
+    }
+
+    /// A sink that can never send again ends the session, so the next packet
+    /// for the flow reconnects instead of failing until the NAT entry times
+    /// out.
+    #[tokio::test]
+    async fn dead_outbound_sink_ends_udp_session() {
+        let (handle, fwd_tx, closes) = spawn_relay(true);
+        fwd_tx.send(packet()).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), handle)
+            .await
+            .expect("session must end once the outbound sink is dead")
+            .unwrap();
+        assert!(
+            fwd_tx.is_closed(),
+            "dispatcher must see the session as dead"
+        );
+        assert_eq!(closes.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    /// Other send errors may be transient (one unreachable destination on a
+    /// UDP socket); they must not tear the session down.
+    #[tokio::test]
+    async fn transient_send_error_keeps_udp_session() {
+        let (handle, fwd_tx, _closes) = spawn_relay(false);
+        fwd_tx.send(packet()).await.unwrap();
+        fwd_tx.send(packet()).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(!handle.is_finished(), "transient error ended the session");
+        assert!(!fwd_tx.is_closed());
+        handle.abort();
     }
 }
