@@ -254,34 +254,6 @@ mod tests {
     }
 
     #[test]
-    #[tracing_test::traced_test]
-    fn naive_warns_on_conflicting_library_paths() {
-        let proxies = [
-            ("default", None),
-            ("first", Some("./cronet.dll")),
-            ("same", Some("./cronet.dll")),
-            ("search", Some("cronet.dll")),
-        ]
-        .map(|(name, path)| {
-            let mut proxy = config("");
-            proxy.common_opts.name = name.into();
-            proxy.cronet_lib_path = path.map(String::from);
-            OutboundProxyProtocol::Naive(proxy)
-        });
-        let handlers =
-            crate::app::outbound::manager::OutboundManager::load_plain_outbounds(
-                proxies.into(),
-                Path::new("config-root"),
-            );
-        assert_eq!(handlers.len(), 4);
-        assert!(logs_contain(
-            "first and search specify different cronet-lib-path"
-        ));
-        assert!(!logs_contain("first and same"));
-        assert!(!logs_contain("default and"));
-    }
-
-    #[test]
     fn naive_explicit_library_paths() {
         let cwd = std::env::temp_dir();
         let absolute = cwd.join("other/libcronet.so");

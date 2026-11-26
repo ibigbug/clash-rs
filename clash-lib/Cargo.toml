@@ -195,13 +195,13 @@ tor-rtcompat = { version = "0.47", optional = true, default-features = false, fe
 
 
 # Keep all Wind crates on the same exact revision.
-wind-tuic = { git = "https://github.com/rust-proxy/wind", rev = "4f67795492f55ca1124310e67d3ac484182a7211", optional = true, default-features = false, features = ["client", "decode", "quinn"] }
-wind-core = { git = "https://github.com/rust-proxy/wind", rev = "4f67795492f55ca1124310e67d3ac484182a7211", optional = true, default-features = false }
+wind-tuic = { git = "https://github.com/rust-proxy/wind", rev = "c0c285b2fc4c5af33a2e8023c71b112a34b6ab26", optional = true, default-features = false, features = ["client", "decode", "quinn"] }
+wind-core = { git = "https://github.com/rust-proxy/wind", rev = "c0c285b2fc4c5af33a2e8023c71b112a34b6ab26", optional = true, default-features = false }
 # Cronet loads at runtime wherever the target supports it. Apple targets link the
 # static archive by default and only load a shared library with naive-dynamic;
 # Android links statically only when the naive-static feature is enabled.
-wind-naive = { git = "https://github.com/rust-proxy/wind", rev = "4f67795492f55ca1124310e67d3ac484182a7211", optional = true, default-features = false }
-wind-quic = { git = "https://github.com/rust-proxy/wind", rev = "4f67795492f55ca1124310e67d3ac484182a7211", optional = true, default-features = false, features = ["quinn"] }
+wind-naive = { git = "https://github.com/rust-proxy/wind", rev = "c0c285b2fc4c5af33a2e8023c71b112a34b6ab26", optional = true, default-features = false }
+wind-quic = { git = "https://github.com/rust-proxy/wind", rev = "c0c285b2fc4c5af33a2e8023c71b112a34b6ab26", optional = true, default-features = false, features = ["quinn"] }
 # Keep Wind's Quinn fork separate from the crates.io Quinn used by Hysteria2.
 wind-quinn = { package = "quinn", git = "https://github.com/Tipuch/quinn.git", branch = "bbrv3", optional = true, default-features = false, features = ["runtime-tokio"] }
 
@@ -255,8 +255,8 @@ reqwest = { version = "0.13", features = ["socks"] }
 # Only network enumeration is needed; the default system feature fails on musl.
 sysinfo = { version = "0.40", default-features = false, features = ["network"]}
 moka = { version = "0.12", features = ["future"] }
-wind-tuic = { git = "https://github.com/rust-proxy/wind", rev = "4f67795492f55ca1124310e67d3ac484182a7211", default-features = false, features = ["server", "client", "quinn"] }
-wind-base = { git = "https://github.com/rust-proxy/wind", rev = "4f67795492f55ca1124310e67d3ac484182a7211" }
+wind-tuic = { git = "https://github.com/rust-proxy/wind", rev = "c0c285b2fc4c5af33a2e8023c71b112a34b6ab26", default-features = false, features = ["server", "client", "quinn"] }
+wind-base = { git = "https://github.com/rust-proxy/wind", rev = "c0c285b2fc4c5af33a2e8023c71b112a34b6ab26" }
 eyre = "0.6"
 
 [build-dependencies]
