@@ -107,8 +107,9 @@ impl Stream for OutboundDatagramVmess {
         let rv = ready!(inner.poll_read(cx, &mut buf));
 
         match rv {
-            // A read that fills nothing is EOF. Reporting it as an empty
-            // packet would make the stream yield empty packets forever.
+            // A read that fills nothing is EOF: VMess turns the empty
+            // end-of-stream chunk into one. Reporting it as an empty packet
+            // would keep the session reading after the server ended it.
             Ok(()) if buf.filled().is_empty() => Poll::Ready(None),
             Ok(()) => Poll::Ready(Some(UdpPacket {
                 data: buf.filled().to_vec(),
