@@ -28,10 +28,16 @@ fn naive_request_timeout_cancels_pending_dial() -> Result<()> {
 mod cronet;
 
 async fn fixture() -> Result<(TcpListener, tokio_rustls::TlsAcceptor, Handler)> {
+    fixture_for("127.0.0.1").await
+}
+
+async fn fixture_for(
+    server: &str,
+) -> Result<(TcpListener, tokio_rustls::TlsAcceptor, Handler)> {
     let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
     let port = listener.local_addr()?.port();
     let key = rcgen::KeyPair::generate()?;
-    let mut params = rcgen::CertificateParams::new(vec!["127.0.0.1".into()])?;
+    let mut params = rcgen::CertificateParams::new(vec![server.to_owned()])?;
     let now = time::OffsetDateTime::now_utc();
     params.not_before = now - time::Duration::days(1);
     params.not_after = now + time::Duration::days(1);
@@ -46,7 +52,7 @@ async fn fixture() -> Result<(TcpListener, tokio_rustls::TlsAcceptor, Handler)> 
     tls.alpn_protocols.push(b"h2".to_vec());
     let cronet_lib = cronet::library_path()?;
     let config: OutboundNaive = serde_json::from_value(serde_json::json!({
-        "name":"timeout-test", "server":"127.0.0.1", "port":port,
+        "name":"timeout-test", "server":server, "port":port,
         "username":"fixture", "password":"fixture", "ca-cert":cert.pem(),
         "request-timeout":1000, "udp":true,
         "cronet-lib-path":cronet_lib
@@ -159,4 +165,82 @@ async fn established_udp_survives_request_timeout() -> Result<()> {
             result = exchange => result,
         }
     }).await?
+}
+
+#[tokio::test]
+#[cfg_attr(
+    not(all(feature = "naive-static", not(feature = "naive-dynamic"))),
+    ignore = "set CLASH_NAIVE_CRONET_LIB to an absolute path for dynamic builds"
+)]
+async fn failed_dials_refresh_the_proxy_address_for_new_connections() -> Result<()> {
+    use crate::app::dns::MockClashResolver;
+    for udp in [false, true] {
+        let (listener, tls, handler) = fixture_for("proxy.test").await?;
+        let mut mock = MockClashResolver::new();
+        let mut answers = ["127.0.0.2", "127.0.0.2", "127.0.0.1"].into_iter();
+        mock.expect_resolve_all().times(3).returning(move |_, _| {
+            Ok(vec![
+                answers.next().context("unexpected DNS lookup")?.parse()?,
+            ])
+        });
+        mock.expect_is_fake_ip().returning(|_| false);
+        let resolver: ThreadSafeDNSResolver = Arc::new(mock);
+        let session = Session {
+            destination: SocksAddr::Ip("127.0.0.1:80".parse()?),
+            ..Default::default()
+        };
+        let old = handler.outbound(&session, &resolver).await?;
+        for _ in 0..2 {
+            ensure!(Arc::ptr_eq(
+                &old,
+                &handler.outbound(&session, &resolver).await?
+            ));
+            if udp {
+                let mut association =
+                    handler.connect_datagram(&session, resolver.clone()).await?;
+                association.send(Default::default()).await?;
+                ensure!(
+                    timeout(Duration::from_secs(5), association.next())
+                        .await?
+                        .is_none()
+                );
+            } else {
+                ensure!(
+                    handler
+                        .connect_stream(&session, resolver.clone())
+                        .await
+                        .is_err()
+                );
+            }
+        }
+
+        let peer = async {
+            let (socket, _) = listener.accept().await?;
+            let mut h2 = h2::server::handshake(tls.accept(socket).await?).await?;
+            let (_request, mut response) =
+                h2.accept().await.context("missing CONNECT")??;
+            let _stream = response.send_response(http::Response::new(()), false)?;
+            let _ = h2.accept().await;
+            anyhow::Ok(())
+        };
+        let dial = async {
+            let stream = handler.connect_stream(&session, resolver.clone()).await?;
+            let new = handler.outbound(&session, &resolver).await?;
+            ensure!(!Arc::ptr_eq(&old, &new));
+            // A later failure from the old generation cannot invalidate the new
+            // one.
+            old.dial_failed();
+            ensure!(Arc::ptr_eq(
+                &new,
+                &handler.outbound(&session, &resolver).await?
+            ));
+            drop(stream);
+            anyhow::Ok(())
+        };
+        tokio::select! {
+            res = peer => { res?; anyhow::bail!("peer closed before the new tunnel was ready"); },
+            res = dial => res?,
+        }
+    }
+    Ok(())
 }

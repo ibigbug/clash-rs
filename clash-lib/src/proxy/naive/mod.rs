@@ -5,7 +5,8 @@ use std::{collections::HashMap, io, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use erased_serde::Serialize as ErasedSerialize;
-use tokio::sync::OnceCell;
+use std::sync::atomic::{AtomicBool, Ordering};
+use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use wind_core::{FlowContext, hooks::Protocol, rule::NetworkType};
 use wind_naive::{NaiveOutbound, NaiveOutboundOpts, SocketPolicy};
@@ -36,7 +37,20 @@ pub struct HandlerOptions {
     pub wind: NaiveOutboundOpts,
 }
 
-type EngineCell = OnceCell<Arc<NaiveOutbound>>;
+struct CachedEngine {
+    outbound: Arc<NaiveOutbound>,
+    resolver_rule: Option<String>,
+    // Late failures only invalidate this engine's DNS pin.
+    check_dns: AtomicBool,
+}
+
+impl CachedEngine {
+    fn dial_failed(&self) {
+        self.check_dns.store(true, Ordering::Relaxed);
+    }
+}
+
+type EngineCell = Mutex<Option<Arc<CachedEngine>>>;
 
 /// Each policy owns a Cronet connection pool.
 const MAX_POLICY_ENGINES: usize = 8;
@@ -60,7 +74,7 @@ impl PolicyEngines {
             engines.push((cached, cell.clone()));
             return (cell, None);
         }
-        let cell = Arc::new(EngineCell::new());
+        let cell = Arc::new(EngineCell::default());
         engines.push((policy.clone(), cell.clone()));
         let evicted = if engines.len() > MAX_POLICY_ENGINES {
             Some(engines.remove(0).1)
@@ -68,6 +82,13 @@ impl PolicyEngines {
             None
         };
         (cell, evicted)
+    }
+}
+
+// Cronet shutdown can block the thread that releases its last reference.
+fn retire_engine<T: Send + 'static>(evicted: Option<T>) {
+    if let Some(engine) = evicted {
+        drop(tokio::task::spawn_blocking(move || drop(engine)));
     }
 }
 
@@ -84,7 +105,7 @@ impl Handler {
     pub fn new(opts: HandlerOptions) -> Self {
         Self {
             opts,
-            outbound: OnceCell::new(),
+            outbound: EngineCell::default(),
             policy_engines: Default::default(),
             cancel: CancellationToken::new(),
             dns_checked: std::sync::Once::new(),
@@ -95,32 +116,12 @@ impl Handler {
         &self,
         sess: &Session,
         resolver: &ThreadSafeDNSResolver,
-    ) -> io::Result<Arc<NaiveOutbound>> {
+    ) -> io::Result<Arc<CachedEngine>> {
         #[cfg(any(target_os = "linux", target_vendor = "apple", windows))]
         if let Some(policy) = session_socket_policy(sess)? {
-            // Each policy owns its connection pool. Release the lock before
-            // starting Cronet, and keep the evicted engine's shutdown off the
-            // async workers.
             let (cell, evicted) = self.policy_engines.claim(&policy).await;
-            if let Some(evicted) = evicted {
-                // Detached, because Cronet tears an engine down synchronously.
-                drop(tokio::task::spawn_blocking(move || drop(evicted)));
-            }
-            return cell
-                .get_or_try_init(|| async {
-                    NaiveOutbound::new_with_socket_policy(
-                        self.wind_opts(resolver).await,
-                        policy,
-                        self.opts.request_timeout,
-                    )
-                    .await
-                    .map(Arc::new)
-                    .map_err(|error| {
-                        io::Error::other(format!("Naive engine: {error}"))
-                    })
-                })
-                .await
-                .cloned();
+            retire_engine(evicted);
+            return self.cached_engine(&cell, Some(policy), resolver).await;
         }
         #[cfg(not(any(target_os = "linux", target_vendor = "apple", windows)))]
         if sess.iface.is_some() || sess.so_mark.is_some() {
@@ -133,17 +134,51 @@ impl Handler {
                 );
             });
         }
-        self.outbound
-            .get_or_try_init(|| async {
-                NaiveOutbound::new(self.wind_opts(resolver).await)
-                    .await
-                    .map(Arc::new)
-                    .map_err(|error| {
-                        io::Error::other(format!("Naive engine: {error}"))
-                    })
-            })
-            .await
-            .cloned()
+        self.cached_engine(&self.outbound, None, resolver).await
+    }
+
+    async fn cached_engine(
+        &self,
+        cell: &EngineCell,
+        policy: Option<SocketPolicy>,
+        resolver: &ThreadSafeDNSResolver,
+    ) -> io::Result<Arc<CachedEngine>> {
+        // Each policy refreshes independently; active sessions retain their
+        // engine.
+        let mut cached = cell.lock().await;
+        if let Some(engine) = cached.as_ref()
+            && !engine.check_dns.load(Ordering::Relaxed)
+        {
+            return Ok(engine.clone());
+        }
+        let opts = self.wind_opts(resolver).await;
+        let resolver_rule = opts.host_resolver_rules.clone();
+        if let Some(engine) = cached.as_ref()
+            && (resolver_rule.is_none() || resolver_rule == engine.resolver_rule)
+        {
+            // A temporary DNS failure must not discard a usable pin.
+            engine.check_dns.store(false, Ordering::Relaxed);
+            return Ok(engine.clone());
+        }
+        let outbound = match policy {
+            Some(policy) => {
+                NaiveOutbound::new_with_socket_policy(
+                    opts,
+                    policy,
+                    self.opts.request_timeout,
+                )
+                .await
+            }
+            None => NaiveOutbound::new(opts).await,
+        }
+        .map_err(|error| io::Error::other(format!("Naive engine: {error}")))?;
+        let engine = Arc::new(CachedEngine {
+            outbound: Arc::new(outbound),
+            resolver_rule,
+            check_dns: AtomicBool::new(false),
+        });
+        retire_engine(cached.replace(engine.clone()));
+        Ok(engine)
     }
 
     /// Build the engine options, pinning the server to a Clash-resolved
@@ -324,15 +359,25 @@ impl OutboundHandler for Handler {
         sess: &Session,
         resolver: ThreadSafeDNSResolver,
     ) -> io::Result<BoxedInstrumentedStream> {
-        let io = tokio::time::timeout(self.opts.request_timeout, async {
-            let outbound = self.outbound(sess, &resolver).await?;
-            stream::connect(outbound, tcp_flow(sess), self.cancel.child_token())
+        let deadline = tokio::time::sleep(self.opts.request_timeout).deadline();
+        let timed_out =
+            |_| io::Error::new(io::ErrorKind::TimedOut, "Naive CONNECT timed out");
+        let engine =
+            tokio::time::timeout_at(deadline, self.outbound(sess, &resolver))
                 .await
-        })
+                .map_err(timed_out)??;
+        let io = tokio::time::timeout_at(
+            deadline,
+            stream::connect(
+                engine.outbound.clone(),
+                tcp_flow(sess),
+                self.cancel.child_token(),
+            ),
+        )
         .await
-        .map_err(|_| {
-            io::Error::new(io::ErrorKind::TimedOut, "Naive CONNECT timed out")
-        })??;
+        .map_err(timed_out)
+        .flatten()
+        .inspect_err(|_| engine.dial_failed())?;
         let stream = InstrumentedStreamWrapper::new(io);
         stream.append_to_chain(self.name()).await;
         Ok(Box::new(stream))
@@ -349,16 +394,16 @@ impl OutboundHandler for Handler {
                 "Naive UDP-over-TCP is disabled",
             ));
         }
-        let timer = tokio::time::sleep(self.opts.request_timeout);
-        let deadline = timer.deadline();
-        let outbound = tokio::select! {
-            biased;
-            result = self.outbound(sess, &resolver) => result?,
-            _ = timer => return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "Naive engine initialization timed out",
-            )),
-        };
+        let deadline = tokio::time::sleep(self.opts.request_timeout).deadline();
+        let outbound =
+            tokio::time::timeout_at(deadline, self.outbound(sess, &resolver))
+                .await
+                .map_err(|_| {
+                    io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "Naive engine initialization timed out",
+                    )
+                })??;
         let datagram = InstrumentedDatagramWrapper::new(datagram::Datagram::new(
             outbound,
             sess,

@@ -5,6 +5,7 @@ use std::{
     task::{Context, Poll},
 };
 
+use super::CachedEngine;
 use futures::{Sink, SinkExt, Stream};
 use tokio::sync::mpsc;
 use tokio_util::{
@@ -12,7 +13,6 @@ use tokio_util::{
     task::AbortOnDropHandle,
 };
 use wind_core::udp::{UdpPacket as WindPacket, UdpStream};
-use wind_naive::NaiveOutbound;
 
 use crate::{
     proxy::datagram::UdpPacket,
@@ -28,7 +28,7 @@ pub(super) struct Datagram {
 
 impl Datagram {
     pub(super) fn new(
-        outbound: Arc<NaiveOutbound>,
+        engine: Arc<CachedEngine>,
         sess: &Session,
         deadline: tokio::time::Instant,
         cancel: CancellationToken,
@@ -37,15 +37,21 @@ impl Datagram {
         let (recv_tx, rx) = mpsc::channel(32);
         let task = AbortOnDropHandle::new(tokio::spawn(async move {
             let udp = UdpStream {
-                tx: recv_tx,
+                tx: recv_tx.clone(),
                 rx: send_rx,
             };
             tokio::select! {
-                result = outbound.handle_udp_with_deadline(udp, Some(deadline)) => {
-                    if let Err(error) = result { tracing::debug!("Naive UDP session ended: {error}"); }
+                result = engine.outbound.handle_udp_with_deadline(udp, Some(deadline)) => {
+                    if let Err(error) = result {
+                        engine.dial_failed();
+                        tracing::debug!("Naive UDP session ended: {error}");
+                    }
                 }
                 _ = cancel.cancelled() => {}
             }
+            // Publish any failure before the caller sees the receive channel
+            // close.
+            drop(recv_tx);
         }));
         Self {
             tx: PollSender::new(tx),
