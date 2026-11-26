@@ -83,8 +83,10 @@ impl Sink<UdpPacket> for OutboundDatagramTrojan {
         self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Result<(), Self::Error>> {
-        ready!(self.poll_flush(cx))?;
-        Poll::Ready(Ok(()))
+        // The sink owns the stream: shut it down so the server sees the
+        // association end instead of an idle connection.
+        let this = self.get_mut();
+        this.send.poll_close(Pin::new(&mut this.inner), cx)
     }
 }
 
@@ -436,5 +438,37 @@ mod tests {
         assert_eq!(received.data, test_payload);
         assert_eq!(received.dst_addr, dst_addr);
         assert_eq!(received.src_addr, remote_addr);
+    }
+
+    /// Closing the sink must shut the stream down, so the server sees the
+    /// association end rather than an idle connection.
+    #[tokio::test]
+    async fn test_trojan_datagram_close_shuts_stream_down() {
+        let (client_io, server_io) = tokio::io::duplex(4096);
+        let remote_addr: SocksAddr = "1.1.1.1:443".parse().unwrap();
+        let mut client =
+            OutboundDatagramTrojan::new(Box::new(client_io), remote_addr.clone());
+        let mut server =
+            OutboundDatagramTrojan::new(Box::new(server_io), remote_addr.clone());
+
+        let dst_addr: SocksAddr = "8.8.8.8:53".parse().unwrap();
+        client
+            .send(UdpPacket {
+                data: b"last".to_vec(),
+                src_addr: remote_addr.clone(),
+                dst_addr,
+                inbound_user: None,
+            })
+            .await
+            .unwrap();
+        client.close().await.expect("close must succeed");
+
+        let first = server.next().await.expect("packet sent before close");
+        assert_eq!(first.data, b"last");
+        let end =
+            tokio::time::timeout(std::time::Duration::from_secs(1), server.next())
+                .await
+                .expect("server must see EOF after the client closed the sink");
+        assert!(end.is_none());
     }
 }

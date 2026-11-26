@@ -78,8 +78,10 @@ impl Sink<UdpPacket> for OutboundDatagramVmess {
         self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Result<(), Self::Error>> {
-        ready!(self.poll_flush(cx))?;
-        Poll::Ready(Ok(()))
+        // The sink owns the stream: shut it down so the server sees the
+        // association end instead of an idle connection.
+        let this = self.get_mut();
+        this.send.poll_close(Pin::new(&mut this.inner), cx)
     }
 }
 
@@ -105,6 +107,9 @@ impl Stream for OutboundDatagramVmess {
         let rv = ready!(inner.poll_read(cx, &mut buf));
 
         match rv {
+            // A read that fills nothing is EOF. Reporting it as an empty
+            // packet would make the stream yield empty packets forever.
+            Ok(()) if buf.filled().is_empty() => Poll::Ready(None),
             Ok(()) => Poll::Ready(Some(UdpPacket {
                 data: buf.filled().to_vec(),
                 src_addr: remote_addr.clone(),
@@ -113,5 +118,54 @@ impl Stream for OutboundDatagramVmess {
             })),
             Err(_) => Poll::Ready(None),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use futures::{SinkExt, StreamExt};
+
+    use super::*;
+
+    /// Closing the sink must shut the stream down, so the server sees the
+    /// association end rather than an idle connection.
+    #[tokio::test]
+    async fn test_vmess_datagram_close_shuts_stream_down() {
+        let (client_io, server_io) = tokio::io::duplex(4096);
+        let remote_addr: SocksAddr = "8.8.8.8:53".parse().unwrap();
+        let mut client =
+            OutboundDatagramVmess::new(Box::new(client_io), remote_addr.clone());
+        let mut server =
+            OutboundDatagramVmess::new(Box::new(server_io), remote_addr.clone());
+
+        client
+            .send(UdpPacket {
+                data: b"last".to_vec(),
+                src_addr: remote_addr.clone(),
+                dst_addr: remote_addr.clone(),
+                inbound_user: None,
+            })
+            .await
+            .unwrap();
+        client.close().await.expect("close must succeed");
+
+        let first = server.next().await.expect("packet sent before close");
+        assert_eq!(first.data, b"last");
+        let end =
+            tokio::time::timeout(std::time::Duration::from_secs(1), server.next())
+                .await
+                .expect("server must see EOF after the client closed the sink");
+        assert!(end.is_none());
+    }
+
+    /// EOF on the stream must end it, not yield empty packets forever.
+    #[tokio::test]
+    async fn test_vmess_datagram_ends_on_eof() {
+        let (client_io, server_io) = tokio::io::duplex(64);
+        drop(server_io);
+        let remote_addr: SocksAddr = "8.8.8.8:53".parse().unwrap();
+        let mut client =
+            OutboundDatagramVmess::new(Box::new(client_io), remote_addr);
+        assert!(client.next().await.is_none());
     }
 }
