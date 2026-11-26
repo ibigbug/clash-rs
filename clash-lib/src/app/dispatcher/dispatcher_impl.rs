@@ -485,7 +485,7 @@ async fn relay_udp_session<W, R>(
     remote_receiver_w: tokio::sync::mpsc::Sender<UdpPacket>,
     sess: Session,
 ) where
-    W: futures::Sink<UdpPacket, Error = std::io::Error> + Unpin,
+    W: futures::Sink<UdpPacket, Error = std::io::Error> + Unpin + Send + 'static,
     R: futures::Stream<Item = UdpPacket> + Unpin,
 {
     // Bound the reverse-mapping table to prevent unbounded memory growth on
@@ -553,28 +553,24 @@ async fn relay_udp_session<W, R>(
                     "UDP NAT for packet: {:?}, session: {}",
                     packet, sess
                 );
-                match remote_receiver_w.send(packet).await {
-                    Ok(_) => {}
-                    Err(err) => {
-                        warn!(
-                            "failed to send packet to \
-                             local: {}",
-                            err
-                        );
-                    }
+                // The receiver only goes away with the inbound session,
+                // so a failed send is final.
+                if let Err(err) = remote_receiver_w.send(packet).await {
+                    warn!("inbound udp session gone, ending {sess}: {err}");
+                    break;
                 }
             }
         }
     }
-    // Close the sender side first, so the next packet
-    // for this flow sees the session as dead and
-    // reconnects rather than queueing behind the
-    // close below.
+    // Close the sender side first, so the next packet for this flow sees the
+    // session as dead and reconnects at once.
     drop(remote_forwarder);
-    // Best effort: let stream-based outbounds send
-    // FIN / close_notify instead of just dropping the
-    // connection.
-    let _ = tokio::time::timeout(Duration::from_secs(1), remote_w.close()).await;
+    // Best effort: let stream-based outbounds send FIN / close_notify instead
+    // of just dropping the connection. Detached, because the reconnect aborts
+    // this task (and would cancel the close with it).
+    tokio::spawn(async move {
+        let _ = tokio::time::timeout(Duration::from_secs(1), remote_w.close()).await;
+    });
 }
 
 async fn reverse_lookup(
@@ -941,6 +937,14 @@ mod tests {
             fwd_tx.is_closed(),
             "dispatcher must see the session as dead"
         );
+        // The close runs detached; give it a moment.
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while closes.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("outbound sink closed after the session ended");
         assert_eq!(closes.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
