@@ -1,6 +1,6 @@
 use super::dns::ThreadSafeDNSResolver;
 use crate::{
-    app::net::{DEFAULT_OUTBOUND_INTERFACE, SocketMark},
+    app::net::{DEFAULT_OUTBOUND_INTERFACE, OutboundInterface, SocketMark},
     common::{
         errors::{IntoIoResultExt as _, new_io_error},
         timed_future::TimedFuture,
@@ -119,6 +119,7 @@ struct ProxyState {
 /// ProxyManager is the latency registry.
 #[derive(Clone)]
 pub struct ProxyManager {
+    default_interface: Arc<RwLock<Option<OutboundInterface>>>,
     proxy_state: Arc<RwLock<HashMap<String, ProxyState>>>,
     dns_resolver: ThreadSafeDNSResolver,
     /// Firewall Mark for url test
@@ -151,6 +152,18 @@ impl ProxyManager {
         dns_resolver: ThreadSafeDNSResolver,
         fw_mark: Option<SocketMark>,
     ) -> Self {
+        Self::with_interface(
+            dns_resolver,
+            fw_mark,
+            DEFAULT_OUTBOUND_INTERFACE.clone(),
+        )
+    }
+
+    pub(crate) fn with_interface(
+        dns_resolver: ThreadSafeDNSResolver,
+        fw_mark: Option<SocketMark>,
+        default_interface: Arc<RwLock<Option<OutboundInterface>>>,
+    ) -> Self {
         let backoff_rounds = std::env::var("CLASH_RS_BACKOFF_ROUNDS")
             .ok()
             .and_then(|s| s.parse().ok())
@@ -163,6 +176,7 @@ impl ProxyManager {
             .unwrap_or(8);
         Self {
             dns_resolver,
+            default_interface,
             proxy_state: Default::default(),
             fw_mark,
             check_round: Arc::new(AtomicU64::new(0)),
@@ -940,7 +954,7 @@ impl ProxyManager {
                 destination: (host.to_owned(), port)
                     .try_into()
                     .expect("must be valid destination"),
-                iface: DEFAULT_OUTBOUND_INTERFACE.read().await.clone(),
+                iface: self.default_interface.read().await.clone(),
                 so_mark: self.fw_mark,
                 ..Default::default()
             };

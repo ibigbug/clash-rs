@@ -9,9 +9,10 @@ use crate::{
         dns::{self, SystemResolver, ThreadSafeDNSResolver, config::DNSListenAddr},
         inbound::manager::InboundManager,
         logging::LogEvent,
-        net::init_net_config,
+        net::{get_outbound_interface, set_net_config},
         outbound::manager::OutboundManager,
         profile,
+        remote_content_manager::ProxyManager,
         router::Router,
     },
     common::{
@@ -436,10 +437,11 @@ async fn create_components(
     cwd: PathBuf,
     config: InternalConfig,
 ) -> Result<RuntimeComponents> {
-    if config.tun.enable {
-        debug!("tun enabled, initializing default outbound interface");
-        init_net_config(config.tun.so_mark).await;
-    }
+    let (default_interface, tun_mark) = if config.tun.enable {
+        (get_outbound_interface(), config.tun.so_mark)
+    } else {
+        (None, None)
+    };
 
     let cancellation_token = tokio_util::sync::CancellationToken::new();
 
@@ -528,18 +530,19 @@ async fn create_components(
         None
     };
 
-    let dns_resolver = dns::new_resolver(
+    let dns_resolver = dns::resolver::new_with_interface(
         config.dns,
         Some(cache_store.clone()),
         pending_country_mmdb.clone(),
         outbound_registry.clone(),
         rule_dispatch.clone(),
+        default_interface.as_ref(),
     )
     .await;
 
     debug!("initializing outbound manager");
     let outbound_manager = Arc::new(
-        OutboundManager::new(
+        OutboundManager::new_with_proxy_manager(
             plain_outbounds,
             config
                 .proxy_groups
@@ -554,7 +557,11 @@ async fn create_components(
             dns_resolver.clone(),
             cache_store.clone(),
             cwd.to_string_lossy().to_string(),
-            config.general.routing_mask,
+            ProxyManager::with_interface(
+                dns_resolver.clone(),
+                config.general.routing_mask,
+                Arc::new(tokio::sync::RwLock::new(default_interface.clone())),
+            ),
             outbound_registry.clone(),
         )
         .await?,
@@ -725,6 +732,7 @@ async fn create_components(
     #[cfg(feature = "tun")]
     let tun_runner: ArcRunner = Arc::new(tun::TunRunner::new(
         config.tun,
+        default_interface.clone(),
         dispatcher.clone(),
         dns_resolver.clone(),
         Some(cancellation_token.child_token()),
@@ -739,6 +747,8 @@ async fn create_components(
         Some(cancellation_token.child_token()),
     ));
 
+    // Publish the process defaults only once the replacement is usable.
+    set_net_config(default_interface, tun_mark).await;
     info!("all components initialized");
     Ok(RuntimeComponents {
         cache_store,

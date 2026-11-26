@@ -243,6 +243,13 @@ impl ProxySetProvider {
                                     let h: tuic::Handler = tuic.try_into()?;
                                     Ok(Arc::new(h) as _)
                                 }
+                                #[cfg(feature = "naive")]
+                                OutboundProxyProtocol::Naive(config) => {
+                                    config.validate_provider_options()?;
+                                    let h: crate::proxy::naive::Handler =
+                                        config.try_into()?;
+                                    Ok(Arc::new(h) as _)
+                                }
                                 #[cfg(feature = "shadowquic")]
                                 OutboundProxyProtocol::ShadowQuic(sq) => {
                                     let h: crate::proxy::shadowquic::Handler =
@@ -388,6 +395,72 @@ mod tests {
             },
         },
     };
+
+    #[cfg(feature = "naive")]
+    #[tokio::test]
+    async fn naive_provider_rejects_local_paths_and_accepts_inline_ca() {
+        use serde_json::json;
+
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("provider.yaml");
+        let pem = rcgen::generate_simple_self_signed(vec!["localhost".into()])
+            .unwrap()
+            .cert
+            .pem();
+        std::fs::write(dir.path().join("ca.pem"), &pem).unwrap();
+        let payload = |field: &str, value: &str| {
+            let mut proxy = json!({
+                "type": "naive", "name": "test", "server": "localhost",
+                "port": 443, "username": "user", "password": "test"
+            });
+            proxy[field] = json!(value);
+            serde_json::to_vec(&json!({ "proxies": [proxy] })).unwrap()
+        };
+
+        let cached = payload("ca-cert", &pem);
+        std::fs::write(&cache, &cached).unwrap();
+        let mut vehicle = MockProviderVehicle::new();
+        vehicle
+            .expect_path()
+            .return_const(cache.to_str().unwrap().to_owned());
+        vehicle.expect_typ().return_const(ProviderVehicleType::Http);
+        for (field, value) in [
+            ("cronet-lib-path", "custom-library"),
+            ("ca-cert", "ca.pem"),
+            ("ca-cert", "-----BEGIN CERTIFICATE-----"),
+        ] {
+            let content = payload(field, value);
+            vehicle
+                .expect_read()
+                .once()
+                .return_once(move || Ok(content));
+        }
+        let hc = HealthCheck::new(
+            vec![],
+            "http://localhost".into(),
+            0,
+            true,
+            ProxyManager::new(Arc::new(MockClashResolver::new()), None),
+        );
+        let provider = ProxySetProvider::new(
+            "test".into(),
+            Duration::ZERO,
+            Arc::new(vehicle),
+            hc,
+            None,
+            Some(dir.path().into()),
+        )
+        .unwrap();
+
+        let proxies = provider.fetcher.initial().await.unwrap();
+        assert_eq!(proxies.len(), 1);
+        assert_eq!(proxies[0].name(), "test");
+        for message in ["cronet-lib-path", "inline PEM", "ca-cert"] {
+            let error = provider.update().await.unwrap_err();
+            assert!(error.to_string().contains(message), "{error}");
+            assert_eq!(std::fs::read(&cache).unwrap(), cached);
+        }
+    }
 
     #[tokio::test]
     async fn test_proxy_set_provider() {

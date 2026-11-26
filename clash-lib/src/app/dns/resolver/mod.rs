@@ -15,7 +15,10 @@ pub use system::SystemResolver;
 
 use super::{Config, ThreadSafeDNSResolver};
 use crate::{
-    app::profile::ThreadSafeCacheFile,
+    app::{
+        net::{DEFAULT_OUTBOUND_INTERFACE, OutboundInterface},
+        profile::ThreadSafeCacheFile,
+    },
     dns::{RuleDispatch, filters::PendingMmdb},
     print_and_exit,
     proxy::utils::OutboundHandlerRegistry,
@@ -28,11 +31,38 @@ pub async fn new(
     outbounds: OutboundHandlerRegistry,
     rule_dispatch: Option<Arc<RuleDispatch>>,
 ) -> ThreadSafeDNSResolver {
+    let interface = DEFAULT_OUTBOUND_INTERFACE.read().await.clone();
+    new_with_interface(
+        cfg,
+        store,
+        mmdb,
+        outbounds,
+        rule_dispatch,
+        interface.as_ref(),
+    )
+    .await
+}
+
+pub(crate) async fn new_with_interface(
+    cfg: Config,
+    store: Option<ThreadSafeCacheFile>,
+    mmdb: Option<PendingMmdb>,
+    outbounds: OutboundHandlerRegistry,
+    rule_dispatch: Option<Arc<RuleDispatch>>,
+    interface: Option<&OutboundInterface>,
+) -> ThreadSafeDNSResolver {
     if cfg.enable {
         match store {
             Some(store) => Arc::new(
-                EnhancedResolver::new(cfg, store, mmdb, outbounds, rule_dispatch)
-                    .await,
+                EnhancedResolver::new_with_interface(
+                    cfg,
+                    store,
+                    mmdb,
+                    outbounds,
+                    rule_dispatch,
+                    interface,
+                )
+                .await,
             ),
             _ => print_and_exit!("enhanced resolver requires cache store"),
         }

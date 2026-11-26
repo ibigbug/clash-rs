@@ -1,5 +1,5 @@
 use crate::{
-    app::net::{DEFAULT_OUTBOUND_INTERFACE, SocketMark},
+    app::net::SocketMark,
     config::internal::proxy::PROXY_DIRECT,
     dns::{
         ClashResolver, EdnsClientSubnet, RuleDispatch, ThreadSafeDNSClient,
@@ -50,10 +50,8 @@ pub async fn make_clients(
             net: s.net.to_owned(),
             iface: s
                 .interface
-                .as_ref()
-                .or(DEFAULT_OUTBOUND_INTERFACE.read().await.as_ref())
-                .inspect(|x| debug!("DNS client interface: {:?}", x))
-                .cloned(),
+                .clone()
+                .inspect(|x| debug!("DNS client interface: {:?}", x)),
             proxy,
             ecs: edns_client_subnet.clone(),
             fw_mark,

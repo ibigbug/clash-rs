@@ -1,21 +1,27 @@
 # Clash-rs Build Target Configuration
 # Fully expanded from original CI matrix include
 
+# Cronet's prebuilt ELF archives encode relocations as SHT_CREL, which the cross
+# images' binutils (2.42, and even 2.45) cannot read. Linux targets therefore ask
+# rustc for its bundled LLD via -C linker-features=+lld: gcc still drives it with
+# -fuse-ld=lld, so crt and system libraries keep coming from gcc.
+
 # Linux GNU
 [[target]]
 os = "ubuntu-latest"
 target = "x86_64-unknown-linux-gnu"
 release-name = "x86_64-unknown-linux-gnu"
 tool = "cross"
-extra-args = "-F plus"
+extra-args = "--config=.github/docker-tests.toml -F plus,naive-static,naive-download"
+rustflags = "-Z unstable-options -C linker-features=+lld --cfg tokio_unstable"
 
 [[target]]
 os = "ubuntu-latest"
 target = "i686-unknown-linux-gnu"
 release-name = "i686-unknown-linux-gnu"
 tool = "cross"
-extra-args = "-F plus"
-zig = "2.17"
+extra-args = "-F plus,naive-static,naive-download"
+rustflags = "-Z unstable-options -C linker-features=+lld --cfg tokio_unstable"
 # qemu-i386 in the cross container returns ENOSYS for the socketpair tokio's
 # signal driver creates during runtime setup, so every tokio test panics before
 # it runs. Lint and build this target, but skip tests like the mips targets.
@@ -27,22 +33,24 @@ os = "ubuntu-latest"
 target = "x86_64-unknown-linux-musl"
 release-name = "x86_64-unknown-linux-musl"
 tool = "cross"
-extra-args = "-F perf"
+extra-args = "--config=.github/docker-tests.toml -F perf,naive-static,naive-download"
+rustflags = "-Z unstable-options -C linker-features=+lld --cfg tokio_unstable"
 
 [[target]]
 os = "ubuntu-latest"
 target = "i686-unknown-linux-musl"
 release-name = "i686-unknown-linux-musl"
 tool = "cross"
-extra-args = "-F plus"
+extra-args = "--config=.github/docker-tests.toml -F plus,naive-static,naive-download"
+rustflags = "-Z unstable-options -C linker-features=+lld --cfg tokio_unstable"
 
 # Linux x86 gnu static-crt
 [[target]]
 os = "ubuntu-latest"
 target = "x86_64-unknown-linux-gnu"
 release-name = "x86_64-unknown-linux-gnu-static-crt"
-extra-args = "-F plus"
-rustflags = "-Ctarget-feature=+crt-static --cfg tokio_unstable"
+extra-args = "--config=.github/docker-tests.toml -F plus,naive-static,naive-download"
+rustflags = "-Ctarget-feature=+crt-static -Z unstable-options -C linker-features=+lld --cfg tokio_unstable"
 
 # Linux arm gnu
 [[target]]
@@ -50,22 +58,24 @@ os = "ubuntu-latest"
 target = "aarch64-unknown-linux-gnu"
 release-name = "aarch64-unknown-linux-gnu"
 tool = "cross"
-extra-args = "-F plus"
+extra-args = "--config=.github/docker-tests.toml -F plus,naive-static,naive-download"
+rustflags = "-Z unstable-options -C linker-features=+lld --cfg tokio_unstable"
 
 [[target]]
 os = "ubuntu-latest"
 target = "armv7-unknown-linux-gnueabi"
 release-name = "armv7-unknown-linux-gnueabi"
 tool = "cross"
-extra-args = "-F plus"
+# The Cronet ARM archive uses the hard-float ABI.
+extra-args = "--config=.github/docker-tests.toml -F plus"
 
 [[target]]
 os = "ubuntu-latest"
 target = "armv7-unknown-linux-gnueabihf"
 release-name = "armv7-unknown-linux-gnueabihf"
 tool = "cross"
-extra-args = "-F plus"
-zig = "2.17"
+extra-args = "--config=.github/docker-tests.toml -F plus,naive-static,naive-download"
+rustflags = "-Z unstable-options -C linker-features=+lld --cfg tokio_unstable"
 
 # Linux arm musl
 [[target]]
@@ -73,14 +83,16 @@ os = "ubuntu-latest"
 target = "aarch64-unknown-linux-musl"
 release-name = "aarch64-unknown-linux-musl"
 tool = "cross"
-extra-args = "-F perf"
+extra-args = "--config=.github/docker-tests.toml -F perf,naive-static,naive-download"
+rustflags = "-Z unstable-options -C linker-features=+lld --cfg tokio_unstable"
 
 [[target]]
 os = "ubuntu-latest"
 target = "armv7-unknown-linux-musleabihf"
 release-name = "armv7-unknown-linux-musleabihf"
 tool = "cross"
-extra-args = "-F plus"
+extra-args = "--config=.github/docker-tests.toml -F plus,naive-static,naive-download"
+rustflags = "-Z unstable-options -C linker-features=+lld --cfg tokio_unstable"
 
 # Linux RISC-V
 [[target]]
@@ -88,7 +100,8 @@ os = "ubuntu-latest"
 target = "riscv64gc-unknown-linux-gnu"
 release-name = "riscv64gc-unknown-linux-gnu"
 tool = "cross"
-extra-args = "-F standard"
+extra-args = "--config=.github/docker-tests.toml -F standard,naive-static,naive-download"
+rustflags = "-Z unstable-options -C linker-features=+lld --cfg tokio_unstable"
 
 # Linux MIPS
 [[target]]
@@ -96,6 +109,7 @@ os = "ubuntu-latest"
 target = "mips-unknown-linux-musl"
 release-name = "mips-unknown-linux-musl"
 tool = "cross"
+# Cronet publishes MIPS archives for little-endian targets only.
 extra-args = "--no-default-features -F standard,ring -Z build-std=std,panic_abort"
 build-std = true
 skip-test = true
@@ -105,7 +119,8 @@ os = "ubuntu-latest"
 target = "mipsel-unknown-linux-musl"
 release-name = "mipsel-unknown-linux-musl"
 tool = "cross"
-extra-args = "--no-default-features -F standard,ring -Z build-std=std,panic_abort"
+extra-args = "--no-default-features -F standard,ring,naive-static,naive-download -Z build-std=std,panic_abort"
+rustflags = "-Z unstable-options -C linker-features=+lld --cfg tokio_unstable"
 build-std = true
 skip-test = true
 
@@ -115,7 +130,7 @@ os = "windows-latest"
 target = "x86_64-pc-windows-msvc"
 release-name = "x86_64-pc-windows-msvc"
 postfix = ".exe"
-extra-args = "-F plus"
+extra-args = "-F plus,naive-static,naive-download"
 nasm = true
 
 [[target]]
@@ -123,6 +138,7 @@ os = "windows-latest"
 target = "i686-pc-windows-msvc"
 release-name = "i686-pc-windows-msvc"
 postfix = ".exe"
+# Cronet has no 32-bit Windows archive.
 extra-args = "-F plus"
 nasm = true
 
@@ -131,7 +147,7 @@ os = "windows-latest"
 target = "aarch64-pc-windows-msvc"
 release-name = "aarch64-pc-windows-msvc"
 postfix = ".exe"
-extra-args = "-F standard"
+extra-args = "-F standard,naive-static,naive-download"
 nasm = true
 skip-test = true
 
@@ -141,7 +157,7 @@ os = "windows-latest"
 target = "x86_64-pc-windows-msvc"
 release-name = "x86_64-pc-windows-msvc-static-crt"
 postfix = ".exe"
-extra-args = "-F plus"
+extra-args = "-F plus,naive-static,naive-download"
 rustflags = "-Ctarget-feature=+crt-static --cfg tokio_unstable"
 
 [[target]]
@@ -149,6 +165,7 @@ os = "windows-latest"
 target = "i686-pc-windows-msvc"
 release-name = "i686-pc-windows-msvc-static-crt"
 postfix = ".exe"
+# Cronet has no 32-bit Windows archive.
 extra-args = "-F plus"
 rustflags = "-Ctarget-feature=+crt-static --cfg tokio_unstable"
 
@@ -157,7 +174,7 @@ os = "windows-latest"
 target = "aarch64-pc-windows-msvc"
 release-name = "aarch64-pc-windows-msvc-static-crt"
 postfix = ".exe"
-extra-args = "-F standard"
+extra-args = "-F standard,naive-static,naive-download"
 rustflags = "-Ctarget-feature=+crt-static --cfg tokio_unstable"
 nasm = true
 skip-test = true
@@ -167,20 +184,20 @@ skip-test = true
 os = "macos-latest"
 target = "x86_64-apple-darwin"
 release-name = "x86_64-apple-darwin"
-extra-args = "-F plus"
+extra-args = "-F plus,naive-static,naive-download"
 
 [[target]]
 os = "macos-latest"
 target = "aarch64-apple-darwin"
 release-name = "aarch64-apple-darwin"
-extra-args = "-F plus"
+extra-args = "-F plus,naive-static,naive-download"
 
 # macOS static-crt
 [[target]]
 os = "macos-latest"
 target = "x86_64-apple-darwin"
 release-name = "x86_64-apple-darwin-static-crt"
-extra-args = "-F plus"
+extra-args = "-F plus,naive-static,naive-download"
 rustflags = "-Ctarget-feature=+crt-static --cfg tokio_unstable"
 
 [[target]]
@@ -188,7 +205,7 @@ os = "macos-latest"
 target = "aarch64-apple-darwin"
 release-name = "aarch64-apple-darwin-static-crt"
 tool = "cargo"
-extra-args = "-F plus"
+extra-args = "-F plus,naive-static,naive-download"
 rustflags = "-Ctarget-feature=+crt-static --cfg tokio_unstable"
 
 # BSD
@@ -197,6 +214,7 @@ os = "ubuntu-latest"
 target = "x86_64-unknown-freebsd"
 release-name = "x86_64-unknown-freebsd"
 tool = "cross"
+# Cronet has no FreeBSD archive.
 extra-args = "--no-default-features -F bsd"
 skip-test = true
 
@@ -206,6 +224,6 @@ os = "ubuntu-latest"
 target = "x86_64-linux-android"
 release-name = "x86_64-linux-android"
 tool = "cross"
-extra-args = "--no-default-features -F android"
+extra-args = "--no-default-features -F android,naive-static,naive-download"
 skip-upload = true
 skip-test = true

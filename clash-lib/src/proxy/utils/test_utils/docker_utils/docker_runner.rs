@@ -75,6 +75,12 @@ pub struct DockerTestRunner {
 }
 
 impl DockerTestRunner {
+    /// Share this container's network namespace with a test fixture.
+    #[allow(dead_code)]
+    pub fn container_id(&self) -> &str {
+        &self.id
+    }
+
     pub async fn try_new(
         image_conf: Option<CreateImageOptions>,
         mut container_conf: ContainerCreateBody,
@@ -94,24 +100,35 @@ impl DockerTestRunner {
             Docker::connect_with_socket_defaults()?
         };
 
-        let mut pull_attempts = 0;
-        loop {
-            match docker
-                .create_image(image_conf.clone(), None, None)
-                .try_collect::<Vec<_>>()
-                .await
-            {
-                Ok(_) => break,
-                Err(e) if pull_attempts < 3 => {
-                    pull_attempts += 1;
-                    tracing::warn!(
-                        "create_image failed (attempt {}): {}, retrying in 2s...",
-                        pull_attempts,
-                        e
-                    );
-                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        // Immutable fixtures remain usable when the registry is unavailable.
+        // Mutable tags still refresh on every run.
+        let cached_pinned = match container_conf.image.as_deref() {
+            Some(image) if image.contains("@sha256:") => {
+                docker.inspect_image(image).await.is_ok()
+            }
+            _ => false,
+        };
+        if !cached_pinned {
+            let mut pull_attempts = 0;
+            loop {
+                match docker
+                    .create_image(image_conf.clone(), None, None)
+                    .try_collect::<Vec<_>>()
+                    .await
+                {
+                    Ok(_) => break,
+                    Err(e) if pull_attempts < 3 => {
+                        pull_attempts += 1;
+                        tracing::warn!(
+                            "create_image failed (attempt {}): {}, retrying in \
+                             2s...",
+                            pull_attempts,
+                            e
+                        );
+                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    }
+                    Err(e) => return Err(e.into()),
                 }
-                Err(e) => return Err(e.into()),
             }
         }
 
@@ -199,6 +216,50 @@ impl DockerTestRunner {
             id,
             inspect,
         })
+    }
+
+    /// Wait for application readiness, including UDP-only listeners.
+    #[allow(dead_code)]
+    pub async fn wait_for_log(
+        &self,
+        marker: &str,
+        timeout: std::time::Duration,
+    ) -> anyhow::Result<()> {
+        tokio::time::timeout(timeout, async {
+            loop {
+                let logs = self
+                    .instance
+                    .logs(
+                        &self.id,
+                        Some(LogsOptions {
+                            stdout: true,
+                            stderr: true,
+                            ..Default::default()
+                        }),
+                    )
+                    .try_collect::<Vec<_>>()
+                    .await?;
+                let output =
+                    logs.iter().map(ToString::to_string).collect::<String>();
+                let inspect =
+                    self.instance.inspect_container(&self.id, None).await?;
+                if !inspect
+                    .state
+                    .and_then(|state| state.running)
+                    .unwrap_or(false)
+                {
+                    anyhow::bail!("container exited before readiness: {output}");
+                }
+                if output.contains(marker) {
+                    return Ok(());
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .map_err(|_| {
+            anyhow::anyhow!("container readiness timeout waiting for {marker:?}")
+        })?
     }
 
     pub fn container_ip(&self) -> Option<String> {

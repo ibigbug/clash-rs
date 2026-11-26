@@ -39,6 +39,9 @@ pub const IMAGE_TUIC: &str =
 pub const IMAGE_SHADOWQUIC: &str =
     "ghcr.io/spongebob888/shadowquic@sha256:\
      753e3993fc9b8d7b33ccf82be1ac889e9f63b77fb0b15af668ab4f5a5b6252ff";
+#[cfg(feature = "naive")]
+#[allow(dead_code)] // Also included by the standalone Naive integration tests.
+pub const IMAGE_NAIVE_SINGBOX: &str = "ghcr.io/sagernet/sing-box:v1.14.4";
 pub const IMAGE_SINGBOX: &str = "ghcr.io/sagernet/sing-box:v1.13.8";
 #[cfg(all(docker_test, throughput_test))]
 pub const IMAGE_NETEM: &str =

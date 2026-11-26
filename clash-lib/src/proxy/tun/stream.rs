@@ -4,7 +4,7 @@ use std::sync::Arc;
 use tracing::debug;
 
 use crate::{
-    app::{dispatcher::Dispatcher, net::DEFAULT_OUTBOUND_INTERFACE},
+    app::{dispatcher::Dispatcher, net::OutboundInterface},
     session::{Network, Session, Type},
 };
 
@@ -12,6 +12,7 @@ pub(crate) async fn handle_inbound_stream(
     stream: watfaq_netstack::TcpStream,
 
     dispatcher: Arc<Dispatcher>,
+    interface: Option<OutboundInterface>,
     so_mark: Option<SocketMark>,
 ) {
     let sess = Session {
@@ -19,16 +20,12 @@ pub(crate) async fn handle_inbound_stream(
         typ: Type::Tun,
         source: stream.local_addr(),
         destination: stream.remote_addr().into(),
-        iface: DEFAULT_OUTBOUND_INTERFACE
-            .read()
-            .await
-            .clone()
-            .inspect(|x| {
-                debug!(
-                    "selecting outbound interface: {:?} for tun TCP connection",
-                    x
-                );
-            }),
+        iface: interface.inspect(|x| {
+            debug!(
+                "selecting outbound interface: {:?} for tun TCP connection",
+                x
+            );
+        }),
         so_mark,
         ..Default::default()
     };

@@ -101,13 +101,38 @@ impl OutboundManager {
         fw_mark: Option<SocketMark>,
         registry: OutboundHandlerRegistry,
     ) -> Result<Self, Error> {
+        let proxy_manager = ProxyManager::new(dns_resolver.clone(), fw_mark);
+        Self::new_with_proxy_manager(
+            outbounds,
+            outbound_groups,
+            proxy_providers,
+            proxy_names,
+            dns_resolver,
+            cache_store,
+            cwd,
+            proxy_manager,
+            registry,
+        )
+        .await
+    }
+
+    pub(crate) async fn new_with_proxy_manager(
+        outbounds: Vec<AnyOutboundHandler>,
+        outbound_groups: Vec<OutboundGroupProtocol>,
+        proxy_providers: HashMap<String, OutboundProxyProviderDef>,
+        proxy_names: Vec<String>,
+        dns_resolver: ThreadSafeDNSResolver,
+        cache_store: ThreadSafeCacheFile,
+        cwd: String,
+        proxy_manager: ProxyManager,
+        registry: OutboundHandlerRegistry,
+    ) -> Result<Self, Error> {
         // Build all handlers in a plain HashMap during initialization.
         // Once fully assembled it is written into the shared registry so that
         // DNS clients and the HTTP client can look up any handler by name.
         let mut handlers: HashMap<String, AnyOutboundHandler> = HashMap::new();
         let provider_registry = HashMap::new();
         let selector_control = HashMap::new();
-        let proxy_manager = ProxyManager::new(dns_resolver.clone(), fw_mark);
 
         let mut m = Self {
             registry,
@@ -334,7 +359,10 @@ impl OutboundManager {
     /// that call sites stay feature-independent.
     pub fn load_plain_outbounds(
         outbounds: Vec<OutboundProxyProtocol>,
-        #[cfg_attr(not(feature = "tailscale"), allow(unused_variables))]
+        #[cfg_attr(
+            not(any(feature = "tailscale", feature = "naive")),
+            allow(unused_variables)
+        )]
         cwd: &std::path::Path,
     ) -> Vec<AnyOutboundHandler> {
         outbounds
@@ -419,6 +447,17 @@ impl OutboundManager {
                             );
                         })
                         .ok()
+                }
+                #[cfg(feature = "naive")]
+                OutboundProxyProtocol::Naive(mut config) => {
+                    config.resolve_paths(cwd);
+                    let name = &config.common_opts.name;
+                    let handler = crate::proxy::naive::Handler::try_from(&config)
+                        .inspect_err(|e| {
+                            error!("failed to load naive outbound {}: {}", name, e);
+                        })
+                        .ok()?;
+                    Some(Arc::new(handler) as AnyOutboundHandler)
                 }
                 #[cfg(feature = "wireguard")]
                 OutboundProxyProtocol::Wireguard(wg) => {
