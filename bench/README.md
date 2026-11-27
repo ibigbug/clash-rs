@@ -281,8 +281,9 @@ The benchmark uses **veth pairs with network namespaces** to ensure traffic actu
 ### Running Benchmarks Locally
 
 ```bash
-# Build clash-rs
-cargo build --release --bin clash-rs --all-features
+# Build clash-rs (default features, same as CI; --all-features enables
+# telemetry, which slows the data path far below normal)
+cargo build --release --bin clash-rs
 
 # Run the benchmark (includes baseline test)
 python3 bench/run_tun_benchmark.py \
@@ -310,7 +311,8 @@ When merging a PR that improves performance or after significant changes.
 The baseline must come from the same build the workflow benchmarks — default
 features, no `--all-features` (`telemetry` writes a Chrome trace and skews the
 numbers) — and ideally from a CI runner: the simplest way is to download the
-`benchmark-pr-results` artifact of a master/PR run and commit it as-is.
+`benchmark-pr-results` artifact of a recent PR run (or a manual
+`workflow_dispatch` run on master) and commit it as-is.
 
 ```bash
 # Same build as CI: default features only

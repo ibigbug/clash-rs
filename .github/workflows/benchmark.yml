@@ -32,7 +32,7 @@ jobs:
         uses: actions/checkout@v7
         with:
           fetch-depth: 0  # Full history for comparison
-          ref: ${{ needs.check-trigger.outputs.pr_sha || github.event.pull_request.head.sha }}
+          ref: ${{ github.event.pull_request.head.sha }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -42,7 +42,9 @@ jobs:
       - name: Cache Rust dependencies
         uses: Itsusinn/rust-cache@92e40e4e88556b42f44b1a0c0e417d27f4e30f90
         with:
-          key: benchmark-${{ runner.os }}
+          # Separate key from the old --all-features cache: rust-cache does not
+          # re-save on an exact hit, so the stale artifacts would never be replaced.
+          key: benchmark-default-features-${{ runner.os }}
 
       - name: Install system dependencies
         run: |
