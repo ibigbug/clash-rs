@@ -156,12 +156,46 @@ mod desktop {
         // Declared before the device so that, on an error below, the device
         // is closed first and the interface destroyed after it.
         let created = CreatedInterface::create(name)?;
-        let device = builder(cfg, dev, true).build_async()?;
+        let device = build_new(cfg, dev)?;
         wait_until_visible(name).await?;
         info!("setting up routes for tun {}", name);
         maybe_add_routes(cfg, name)?;
         created.keep();
         Ok(device)
+    }
+
+    /// Linux: create the interface with TUN offload (IFF_VNET_HDR,
+    /// TSO/USO): the kernel hands over and accepts multi-segment packets,
+    /// which tun-rs splits on read and coalesces on write, so a bulk
+    /// transfer costs far fewer syscalls and wakeups. Fall back to a plain
+    /// device if the kernel refuses it.
+    ///
+    /// Only interfaces we create get offload: the TUN_F_* mask is device
+    /// state that outlives us, and a pre-existing interface may be shared
+    /// with programs that do not expect multi-segment packets.
+    #[cfg(target_os = "linux")]
+    fn build_new(
+        cfg: &TunConfig,
+        dev: &NamedDevice,
+    ) -> std::io::Result<tun_rs::AsyncDevice> {
+        builder(cfg, dev, true)
+            .offload(true)
+            .build_async()
+            .or_else(|e| {
+                tracing::warn!(
+                    "creating tun with offload failed ({e}); retrying without \
+                     offload"
+                );
+                builder(cfg, dev, true).build_async()
+            })
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn build_new(
+        cfg: &TunConfig,
+        dev: &NamedDevice,
+    ) -> std::io::Result<tun_rs::AsyncDevice> {
+        builder(cfg, dev, true).build_async()
     }
 
     /// Builder for `dev`. Addresses are only assigned to an interface we
