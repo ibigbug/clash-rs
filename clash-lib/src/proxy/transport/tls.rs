@@ -1,8 +1,14 @@
 use async_trait::async_trait;
 use serde::Serialize;
-use std::{io, sync::Arc};
+use std::{
+    io,
+    sync::{Arc, atomic::AtomicBool},
+};
 
-use super::Transport;
+use super::{
+    Transport, VisionOptions,
+    splice_tls::{RecordChunkIo, SplicableTlsStream},
+};
 use crate::{
     common::{
         errors::map_io_error,
@@ -91,6 +97,32 @@ impl Client {
 #[async_trait]
 impl Transport for Client {
     async fn proxy_stream(&self, stream: AnyStream) -> io::Result<AnyStream> {
+        Ok(Box::new(self.connect_checked(stream).await?))
+    }
+
+    /// Same handshake, but splice-capable for `xtls-rprx-vision`: an Xray
+    /// server leaves the outer TLS layer for its downlink exactly as it does
+    /// behind Reality, so the stream is handed out with a `VisionOptions`
+    /// read flag (see `reality::Client::proxy_stream_spliced`).
+    async fn proxy_stream_spliced(
+        &self,
+        stream: AnyStream,
+    ) -> io::Result<(AnyStream, Option<VisionOptions>)> {
+        let read_flag = Arc::new(AtomicBool::new(false));
+        let chunked: AnyStream =
+            Box::new(RecordChunkIo::new(stream, Arc::clone(&read_flag)));
+        let tls_stream = self.connect_checked(chunked).await?;
+        let splicable = SplicableTlsStream::new(tls_stream, Arc::clone(&read_flag));
+        let opts = VisionOptions { read_flag };
+        Ok((Box::new(splicable), Some(opts)))
+    }
+}
+
+impl Client {
+    async fn connect_checked(
+        &self,
+        stream: AnyStream,
+    ) -> io::Result<tokio_rustls::client::TlsStream<AnyStream>> {
         let dns_name =
             rustls::pki_types::ServerName::try_from(self.sni.as_str().to_owned())
                 .map_err(map_io_error)?;
@@ -113,7 +145,7 @@ impl Transport for Client {
 
                 Ok(x)
             });
-        c.map(|x| Box::new(x) as _)
+        c
     }
 }
 

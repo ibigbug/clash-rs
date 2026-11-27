@@ -20,8 +20,8 @@ const CMD_PADDING_CONTINUE: u8 = 0x00; // more Vision frames coming
 const CMD_PADDING_END: u8 = 0x01; // last Vision frame, do not splice yet
 const CMD_PADDING_DIRECT: u8 = 0x02; // last Vision frame, enter splice mode
 
-/// TLS ApplicationData record type; triggers the direct-mode transition.
-const TLS_APPLICATION_DATA: u8 = 0x17;
+/// A frame's content length is a `u16`; larger writes are split.
+const MAX_FRAME_CONTENT: usize = u16::MAX as usize;
 
 /// State machine for the server-side Vision read path.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -60,24 +60,25 @@ impl ReadState {
 /// - `0x02` `PaddingDirect`:   last Vision frame; enter XTLS-splice (raw) mode.
 ///
 /// ## XTLS-splice mode
-/// When CMD_PADDING_DIRECT (0x02) is sent or received, both peers must bypass
-/// the outer Reality TLS layer and communicate over raw TCP.  VisionStream
-/// signals this via optional `Arc<AtomicBool>` flags shared with the
-/// `SplicableTlsStream` that sits below VlessStream in the stack.
+/// Only the server decides to splice: once it has recognised the proxied
+/// traffic as TLS 1.3 it sends `CMD_PADDING_DIRECT` (0x02) and leaves the outer
+/// TLS layer (Xray-core `proxy/proxy.go`, `VisionWriter.WriteMultiBuffer`).
+/// The client therefore never sends `CMD_PADDING_DIRECT` and keeps its whole
+/// uplink framed inside TLS; the server's uplink reader follows suit, because
+/// it only goes raw after receiving that command.  On the downlink,
+/// `VisionStream` signals `CMD_PADDING_DIRECT` through the optional
+/// `Arc<AtomicBool>` shared with the `SplicableTlsStream` below.
 pub struct VisionStream {
     inner: AnyStream,
 
     // --- write state ---
     /// User UUID to prepend to the very first Vision frame, then `None`.
     user_uuid: Option<[u8; 16]>,
-    /// True once we have sent the first TLS ApplicationData record as a
-    /// Vision `0x02` frame; subsequent writes are raw.
-    write_direct: bool,
     /// Buffered Vision-framed bytes for the in-progress write.
     write_buf: BytesMut,
-    /// True when the pending `write_buf` was built from an ApplicationData
-    /// payload, so we flip `write_direct` once the buffer is drained.
-    write_buf_app_data: bool,
+    /// Content bytes carried by `write_buf`; reported back to the caller as
+    /// the number of bytes consumed once the frame has been written.
+    write_frame_content: usize,
 
     // --- read state ---
     /// Whether the server's 16-byte UUID prefix has been consumed.
@@ -89,22 +90,19 @@ pub struct VisionStream {
     /// Current Vision read state (framed / end / direct-splice).
     read_state: ReadState,
 
-    // --- XTLS-splice signals (optional, only used with Reality transport) ---
-    /// Set when CMD_DIRECT received from server → underlying TLS must switch
+    // --- XTLS-splice signal (optional, only used with Reality transport) ---
+    /// Set when CMD_DIRECT is received from server → underlying TLS must switch
     /// to raw reads.
     read_splice_flag: Option<Arc<AtomicBool>>,
-    /// Set when CMD_DIRECT sent to server → underlying TLS must switch to raw
-    /// writes.
-    write_splice_flag: Option<Arc<AtomicBool>>,
 }
 
 impl VisionStream {
     /// Create a `VisionStream`.
     ///
     /// Pass `Some(VisionOptions)` when the underlying transport is Reality, to
-    /// enable XTLS-splice: once `CMD_PADDING_DIRECT` is exchanged, the flags
-    /// inside `opts` signal `SplicableTlsStream` to bypass Reality TLS and
-    /// communicate over raw TCP.  Pass `None` for plain TLS (no splice).
+    /// enable XTLS-splice: once the server sends `CMD_PADDING_DIRECT`, the flag
+    /// inside `opts` signals `SplicableTlsStream` to bypass Reality TLS for
+    /// reads.  Pass `None` for plain TLS (no splice).
     pub fn new(
         inner: AnyStream,
         uuid: String,
@@ -115,26 +113,28 @@ impl VisionStream {
                 io::Error::new(io::ErrorKind::InvalidInput, "invalid UUID")
             })?
             .into_bytes();
-        let (read_splice_flag, write_splice_flag) = opts
-            .map(|o| (Some(o.read_flag), Some(o.write_flag)))
-            .unwrap_or((None, None));
+        let read_splice_flag = opts.map(|o| o.read_flag);
         Ok(Self {
             inner,
             user_uuid: Some(uuid_bytes),
-            write_direct: false,
             write_buf: BytesMut::new(),
-            write_buf_app_data: false,
+            write_frame_content: 0,
             server_uuid_consumed: false,
             decoded: BytesMut::new(),
             raw: BytesMut::new(),
             read_state: ReadState::Framed,
             read_splice_flag,
-            write_splice_flag,
         })
     }
 
-    /// Build a Vision frame for `data` into `self.write_buf`.
-    fn build_vision_frame(&mut self, data: &[u8]) {
+    /// Build a Vision `CMD_PADDING_CONTINUE` frame for `data` (at most
+    /// `MAX_FRAME_CONTENT` bytes) in `self.write_buf`, returning how many
+    /// content bytes the frame carries.
+    ///
+    /// The uplink never switches to direct copy, so every write is framed;
+    /// the Xray server keeps unpadding for as long as the command is `0x00`
+    /// (`XtlsUnpadding` resets to the next header only in that case).
+    fn build_vision_frame(&mut self, data: &[u8]) -> usize {
         let is_first_frame = self.user_uuid.is_some();
 
         // Prepend UUID on the first frame (cleared immediately after).
@@ -142,13 +142,7 @@ impl VisionStream {
             self.write_buf.put_slice(&uuid);
         }
 
-        let is_app_data = data.first() == Some(&TLS_APPLICATION_DATA);
-        let command = if is_app_data {
-            CMD_PADDING_DIRECT
-        } else {
-            CMD_PADDING_CONTINUE
-        };
-
+        let data = &data[..data.len().min(MAX_FRAME_CONTENT)];
         let content_len = data.len() as u16;
         // Add random padding only on the first frame for traffic-analysis
         // resistance; subsequent frames use no padding.
@@ -161,7 +155,7 @@ impl VisionStream {
             0
         };
 
-        self.write_buf.put_u8(command);
+        self.write_buf.put_u8(CMD_PADDING_CONTINUE);
         self.write_buf.put_u16(content_len);
         self.write_buf.put_u16(padding_len);
         self.write_buf.put_slice(data);
@@ -169,7 +163,7 @@ impl VisionStream {
             self.write_buf.put_u8(rand::random::<u8>());
         }
 
-        self.write_buf_app_data = is_app_data;
+        data.len()
     }
 }
 
@@ -312,17 +306,11 @@ impl AsyncWrite for VisionStream {
     ) -> Poll<io::Result<usize>> {
         let this = self.get_mut(); // safe: VisionStream is Unpin
 
-        // After the splice transition, send raw bytes.
-        if this.write_direct {
-            return Pin::new(&mut this.inner).poll_write(cx, buf);
-        }
-
-        let orig_len = buf.len();
-
-        // Build the Vision frame for `buf` if we don't already have one
-        // pending from a previous Pending-returning call.
+        // Build the Vision frame if we don't already have one pending from a
+        // previous Pending-returning call.
         if this.write_buf.is_empty() {
-            this.build_vision_frame(buf);
+            let take = buf.len().min(MAX_FRAME_CONTENT);
+            this.write_frame_content = this.build_vision_frame(&buf[..take]);
         }
 
         // Write all pending framed bytes to the inner stream.
@@ -350,15 +338,7 @@ impl AsyncWrite for VisionStream {
         }
 
         // All framed bytes written.
-        if this.write_buf_app_data {
-            this.write_direct = true;
-            this.write_buf_app_data = false;
-            // Signal the underlying SplicableTlsStream to bypass TLS.
-            if let Some(flag) = &this.write_splice_flag {
-                flag.store(true, Ordering::Release);
-            }
-        }
-        Poll::Ready(Ok(orig_len))
+        Poll::Ready(Ok(this.write_frame_content))
     }
 
     fn poll_flush(
@@ -402,10 +382,8 @@ mod tests {
     -> (VisionStream, tokio::io::DuplexStream, Arc<AtomicBool>) {
         let (client, server) = tokio::io::duplex(65536);
         let read_flag = Arc::new(AtomicBool::new(false));
-        let write_flag = Arc::new(AtomicBool::new(false));
         let opts = VisionOptions {
             read_flag: Arc::clone(&read_flag),
-            write_flag,
         };
         (
             VisionStream::new(
@@ -480,32 +458,86 @@ mod tests {
         assert_eq!(plen, 0);
     }
 
+    /// Only the server switches to direct copy, so ApplicationData must be
+    /// framed like any other payload and later writes must stay framed too
+    /// (a client-side `CMD_PADDING_DIRECT` would make the server read raw
+    /// bytes while this side still encrypts).
     #[tokio::test]
-    async fn test_write_app_data_uses_direct_command_and_switches_to_raw() {
+    async fn test_write_app_data_stays_framed() {
         let (mut vs, mut server) = make_vision_pair();
 
-        // Send a fake TLS ApplicationData record.
-        let app_data = [TLS_APPLICATION_DATA, 0x03, 0x03, 0x00, 0x04, 1, 2, 3, 4];
-        vs.write_all(&app_data).await.unwrap();
+        // A fake TLS ApplicationData record.
+        let app_data = [0x17, 0x03, 0x03, 0x00, 0x04, 1, 2, 3, 4];
+        let written = vs.write(&app_data).await.unwrap();
+        assert_eq!(written, app_data.len());
         vs.flush().await.unwrap();
 
         let mut buf = vec![0u8; 65536];
         let n = server.read(&mut buf).await.unwrap();
         let received = &buf[..n];
 
-        // UUID prefix on first frame, then CMD_PADDING_DIRECT.
+        // UUID prefix on first frame, then a plain Continue frame.
         assert_eq!(&received[..16], &TEST_UUID);
         let (cmd, content, ..) = parse_frame(received, 16);
-        assert_eq!(cmd, CMD_PADDING_DIRECT);
+        assert_eq!(cmd, CMD_PADDING_CONTINUE);
         assert_eq!(content, app_data);
 
-        // Next write must be raw (no Vision framing).
-        let raw_payload = b"raw bytes after splice";
-        vs.write_all(raw_payload).await.unwrap();
+        // The next write must still be Vision-framed.
+        let payload = b"more app data";
+        assert_eq!(vs.write(payload).await.unwrap(), payload.len());
         vs.flush().await.unwrap();
 
         let n = server.read(&mut buf).await.unwrap();
-        assert_eq!(&buf[..n], raw_payload.as_slice());
+        let (cmd, content, plen, next) = parse_frame(&buf[..n], 0);
+        assert_eq!(cmd, CMD_PADDING_CONTINUE);
+        assert_eq!(content, payload);
+        assert_eq!(plen, 0);
+        assert_eq!(next, n, "exactly one frame on the wire");
+    }
+
+    /// Read exactly one Vision frame (no UUID prefix) off the wire.
+    async fn read_frame(server: &mut tokio::io::DuplexStream) -> (u8, Vec<u8>, u16) {
+        let mut head = [0u8; 5];
+        server.read_exact(&mut head).await.unwrap();
+        let content_len = u16::from_be_bytes([head[1], head[2]]) as usize;
+        let padding_len = u16::from_be_bytes([head[3], head[4]]);
+        let mut content = vec![0u8; content_len];
+        server.read_exact(&mut content).await.unwrap();
+        let mut padding = vec![0u8; padding_len as usize];
+        server.read_exact(&mut padding).await.unwrap();
+        (head[0], content, padding_len)
+    }
+
+    /// `content_len` is a `u16`: a larger write is split into several frames
+    /// instead of silently truncating the length field.
+    #[tokio::test]
+    async fn test_write_splits_payload_larger_than_u16() {
+        let (client, mut server) = tokio::io::duplex(1 << 20);
+        let mut vs =
+            VisionStream::new(Box::new(client), TEST_UUID_STR.to_owned(), None)
+                .unwrap();
+
+        let payload = vec![0x5au8; MAX_FRAME_CONTENT + 100];
+        let written = vs.write(&payload).await.unwrap();
+        assert_eq!(written, MAX_FRAME_CONTENT, "first frame is capped");
+        vs.flush().await.unwrap();
+
+        let mut uuid = [0u8; 16];
+        server.read_exact(&mut uuid).await.unwrap();
+        assert_eq!(&uuid, &TEST_UUID);
+        let (cmd, content, _) = read_frame(&mut server).await;
+        assert_eq!(cmd, CMD_PADDING_CONTINUE);
+        assert_eq!(content.len(), MAX_FRAME_CONTENT);
+        assert_eq!(content, payload[..MAX_FRAME_CONTENT]);
+
+        // Remainder goes out as its own frame.
+        let rest = &payload[MAX_FRAME_CONTENT..];
+        assert_eq!(vs.write(rest).await.unwrap(), rest.len());
+        vs.flush().await.unwrap();
+        let (cmd, content, plen) = read_frame(&mut server).await;
+        assert_eq!(cmd, CMD_PADDING_CONTINUE);
+        assert_eq!(content, rest);
+        assert_eq!(plen, 0);
     }
 
     // -----------------------------------------------------------------------
