@@ -32,7 +32,7 @@ jobs:
         uses: actions/checkout@v7
         with:
           fetch-depth: 0  # Full history for comparison
-          ref: ${{ needs.check-trigger.outputs.pr_sha || github.event.pull_request.head.sha }}
+          ref: ${{ github.event.pull_request.head.sha }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -42,7 +42,9 @@ jobs:
       - name: Cache Rust dependencies
         uses: Itsusinn/rust-cache@92e40e4e88556b42f44b1a0c0e417d27f4e30f90
         with:
-          key: benchmark-${{ runner.os }}
+          # Separate key from the old --all-features cache: rust-cache does not
+          # re-save on an exact hit, so the stale artifacts would never be replaced.
+          key: benchmark-default-features-${{ runner.os }}
 
       - name: Install system dependencies
         run: |
@@ -61,9 +63,13 @@ jobs:
           echo "Network namespaces support:"
           sudo ip netns list || echo "No namespaces yet"
 
+      # Default features (what users run; `tun` is included). Do NOT use
+      # --all-features: `telemetry` writes every span to a Chrome trace file
+      # (over 1 GB in a 10 s run) and adds OpenTelemetry / console_subscriber
+      # threads, which distort the throughput this job measures.
       - name: Build clash-rs (release mode)
         run: |
-          cargo build --release --bin clash-rs --all-features
+          cargo build --release --bin clash-rs
           echo "CLASH_BINARY=$PWD/target/release/clash-rs" >> $GITHUB_ENV
 
       - name: Install Python dependencies
