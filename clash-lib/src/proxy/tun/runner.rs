@@ -238,13 +238,7 @@ async fn tun_to_stack(
                     error!("tun stream error: {}", e);
                     break;
                 }
-                // One warning per run of failures, so a stream of bad
-                // packets mixed with good ones cannot flood the log.
-                if read_errors == 1 {
-                    warn!("tun read failed, skipping packet: {}", e);
-                } else {
-                    debug!("tun read failed again, skipping packet: {}", e);
-                }
+                warn!("tun read failed, skipping packet: {}", e);
                 continue;
             }
         };
