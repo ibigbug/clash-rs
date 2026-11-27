@@ -238,7 +238,13 @@ async fn tun_to_stack(
                     error!("tun stream error: {}", e);
                     break;
                 }
-                warn!("tun read failed, skipping packet: {}", e);
+                // One warning per run of failures, so a stream of bad
+                // packets mixed with good ones cannot flood the log.
+                if read_errors == 1 {
+                    warn!("tun read failed, skipping packet: {}", e);
+                } else {
+                    debug!("tun read failed again, skipping packet: {}", e);
+                }
                 continue;
             }
         };
@@ -275,11 +281,11 @@ async fn accept_tcp(
 
 /// Drive a sink operation (readiness or flush) past TUN backpressure.
 ///
-/// Only Wintun reports it: a write that found the send ring full for ~5 s
-/// returns TimedOut after the device gave up on (dropped) that packet and
-/// moved on, so every retry makes progress and the loop ends once the
-/// buffered packets are drained. On Unix the async fd turns a full buffer
-/// into `Pending` and this is a plain poll.
+/// Only the Windows drivers (Wintun, TAP) report it: a write that found the
+/// send buffer full for too long returns TimedOut after the device gave up on
+/// (dropped) that packet and moved on, so every retry makes progress and the
+/// loop ends once the buffered packets are drained. On Unix the async fd turns
+/// a full buffer into `Pending` and this is a plain poll.
 async fn retry_on_backpressure<S>(
     sink: &mut S,
     mut op: impl FnMut(&mut S, &mut Context<'_>) -> Poll<std::io::Result<()>>,
