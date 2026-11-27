@@ -311,8 +311,9 @@ When merging a PR that improves performance or after significant changes.
 The baseline must come from the same build the workflow benchmarks — default
 features, no `--all-features` (`telemetry` writes a Chrome trace and skews the
 numbers) — and ideally from a CI runner: the simplest way is to download the
-`benchmark-pr-results` artifact of a recent PR run (or a manual
-`workflow_dispatch` run on master) and commit it as-is.
+`benchmark-pr-results` artifact of a manual `workflow_dispatch` run on
+master and commit it as-is. A PR run measures the PR head, so only use one
+whose tested code is identical to master (e.g. a PR that only touches CI).
 
 ```bash
 # Same build as CI: default features only
