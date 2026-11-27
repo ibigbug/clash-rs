@@ -11,8 +11,8 @@
 //!
 //! All four loops run in one task; whichever ends first (or cancellation)
 //! stops the runner. Per-connection tasks they spawned (TCP streams, UDP
-//! forwarding) are not joined or cancelled here: they end on their own once
-//! the netstack side they talk to is dropped.
+//! forwarding) are not joined or cancelled here; they run until their own
+//! I/O ends.
 
 use std::sync::Arc;
 
