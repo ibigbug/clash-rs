@@ -301,8 +301,13 @@ mod tests {
     #[test]
     fn rejects_unknown_scheme_and_missing_host() {
         assert!(DeviceSource::parse("tcp://tun0").is_err());
+        // Used to try (and fail) to create a nameless interface.
         assert!(DeviceSource::parse("dev://").is_err());
         assert!(DeviceSource::parse("fd://").is_err());
+        // No authority at all: used to panic on `host().expect(..)`.
+        assert!(DeviceSource::parse("fd:3").is_err());
+        assert!(DeviceSource::parse("dev:tun0").is_err());
+        assert!(DeviceSource::parse("dev:").is_err());
     }
 
     #[cfg(not(target_os = "macos"))]
