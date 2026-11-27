@@ -1470,11 +1470,7 @@ rules:
         assert_eq!(des.dns.fallback_filter.geo_ip_code, String::from("CN"));
 
         let proxies = des.proxy.as_ref().expect("proxies should be set");
-        // 3 ss entries only counted when the shadowsocks feature is enabled
-        #[cfg(feature = "shadowsocks")]
         assert_eq!(proxies.len(), 14);
-        #[cfg(not(feature = "shadowsocks"))]
-        assert_eq!(proxies.len(), 11);
 
         // vless parses with correct name
         let vless = proxies
@@ -1506,23 +1502,20 @@ rules:
             assert_eq!(h.password, "hy2-password");
         }
 
-        #[cfg(feature = "shadowsocks")]
-        {
-            let proxy2 = &proxies[2];
-            if let OutboundProxyProtocol::Ss(ss) = proxy2 {
-                assert_eq!(ss.common_opts.name, "ss3");
-                assert_eq!(
-                    ss.plugin_opts
-                        .as_ref()
-                        .unwrap()
-                        .get("mode")
-                        .unwrap()
-                        .as_str(),
-                    Some("websocket")
-                );
-            } else {
-                panic!("expected Ss proxy at index 2");
-            }
+        let proxy2 = &proxies[2];
+        if let OutboundProxyProtocol::Ss(ss) = proxy2 {
+            assert_eq!(ss.common_opts.name, "ss3");
+            assert_eq!(
+                ss.plugin_opts
+                    .as_ref()
+                    .unwrap()
+                    .get("mode")
+                    .unwrap()
+                    .as_str(),
+                Some("websocket")
+            );
+        } else {
+            panic!("expected Ss proxy at index 2");
         }
 
         // Verify all proxy group types parse
