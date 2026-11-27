@@ -170,9 +170,11 @@ mod desktop {
     /// transfer costs far fewer syscalls and wakeups. Fall back to a plain
     /// device if the kernel refuses it.
     ///
-    /// Only interfaces we create get offload: the TUN_F_* mask is device
-    /// state that outlives us, and a pre-existing interface may be shared
-    /// with programs that do not expect multi-segment packets.
+    /// Only interfaces we create (and that go away with us) get offload. A
+    /// pre-existing interface is attached without it, as before: the TUN_F_*
+    /// mask is device state that would outlive us, and others using that
+    /// interface after us may not expect multi-segment packets. (tun-rs's
+    /// plain attach resets the mask to 0, the kernel default.)
     #[cfg(target_os = "linux")]
     fn build_new(
         cfg: &TunConfig,
