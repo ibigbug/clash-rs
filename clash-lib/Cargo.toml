@@ -255,6 +255,10 @@ reqwest = { version = "0.13", features = ["socks"] }
 # Only network enumeration is needed; the default system feature fails on musl.
 sysinfo = { version = "0.40", default-features = false, features = ["network"]}
 moka = { version = "0.12", features = ["future"] }
+# `client` is needed even though tests only use the server: wind-tuic's
+# quinn/tls.rs imports `quinn::outbound`, which only exists with `client`.
+# Without it, a build without the `tuic` feature (e.g. `cargo test -p
+# clash-lib`) fails to compile wind-tuic.
 wind-tuic = { git = "https://github.com/rust-proxy/wind", rev = "c0c285b2fc4c5af33a2e8023c71b112a34b6ab26", default-features = false, features = ["server", "client", "quinn"] }
 wind-base = { git = "https://github.com/rust-proxy/wind", rev = "c0c285b2fc4c5af33a2e8023c71b112a34b6ab26" }
 eyre = "0.6"

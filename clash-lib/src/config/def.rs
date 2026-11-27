@@ -902,12 +902,17 @@ pub struct InlineRuleProviderDef {
 
 #[cfg(test)]
 mod tests {
-    use crate::config::{
-        def::Port,
-        internal::proxy::{
-            OutboundGroupProtocol, OutboundProxyProtocol, OutboundProxyProviderDef,
-        },
-    };
+    use crate::config::{def::Port, internal::proxy::OutboundProxyProviderDef};
+    // Only the feature-gated tests below match on these.
+    #[cfg(feature = "shadowsocks")]
+    use crate::config::internal::proxy::OutboundGroupProtocol;
+    #[cfg(any(
+        feature = "shadowsocks",
+        feature = "tuic",
+        feature = "wireguard",
+        feature = "ssh"
+    ))]
+    use crate::config::internal::proxy::OutboundProxyProtocol;
 
     use super::Config;
 
@@ -1165,6 +1170,8 @@ rule-providers:
         }
     }
 
+    /// The example uses `type: ss` proxies.
+    #[cfg(feature = "shadowsocks")]
     #[test]
     fn parse_example() {
         let example_cfg = r###"
@@ -1463,11 +1470,7 @@ rules:
         assert_eq!(des.dns.fallback_filter.geo_ip_code, String::from("CN"));
 
         let proxies = des.proxy.as_ref().expect("proxies should be set");
-        // 3 ss entries only counted when the shadowsocks feature is enabled
-        #[cfg(feature = "shadowsocks")]
         assert_eq!(proxies.len(), 14);
-        #[cfg(not(feature = "shadowsocks"))]
-        assert_eq!(proxies.len(), 11);
 
         // vless parses with correct name
         let vless = proxies
@@ -1499,23 +1502,20 @@ rules:
             assert_eq!(h.password, "hy2-password");
         }
 
-        #[cfg(feature = "shadowsocks")]
-        {
-            let proxy2 = &proxies[2];
-            if let OutboundProxyProtocol::Ss(ss) = proxy2 {
-                assert_eq!(ss.common_opts.name, "ss3");
-                assert_eq!(
-                    ss.plugin_opts
-                        .as_ref()
-                        .unwrap()
-                        .get("mode")
-                        .unwrap()
-                        .as_str(),
-                    Some("websocket")
-                );
-            } else {
-                panic!("expected Ss proxy at index 2");
-            }
+        let proxy2 = &proxies[2];
+        if let OutboundProxyProtocol::Ss(ss) = proxy2 {
+            assert_eq!(ss.common_opts.name, "ss3");
+            assert_eq!(
+                ss.plugin_opts
+                    .as_ref()
+                    .unwrap()
+                    .get("mode")
+                    .unwrap()
+                    .as_str(),
+                Some("websocket")
+            );
+        } else {
+            panic!("expected Ss proxy at index 2");
         }
 
         // Verify all proxy group types parse
