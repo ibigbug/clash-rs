@@ -165,7 +165,8 @@ mod desktop {
     }
 
     /// Builder for `dev`. Addresses are only assigned to an interface we
-    /// create: an existing one keeps whatever it was configured with.
+    /// create; an existing one keeps its addresses. The MTU (`tun.mtu` or the
+    /// platform default) is applied in both cases, as it always has been.
     fn builder(
         cfg: &TunConfig,
         dev: &NamedDevice,

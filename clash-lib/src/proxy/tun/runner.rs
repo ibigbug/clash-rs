@@ -10,7 +10,9 @@
 //! ```
 //!
 //! All four loops run in one task; whichever ends first (or cancellation)
-//! stops the runner.
+//! stops the runner. Per-connection tasks they spawned (TCP streams, UDP
+//! forwarding) are not joined or cancelled here: they end on their own once
+//! the netstack side they talk to is dropped.
 
 use std::sync::Arc;
 
