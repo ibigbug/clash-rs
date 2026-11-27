@@ -92,7 +92,7 @@ async fn find_proxy_by_name(
     }
 }
 
-async fn get_proxy(
+pub(super) async fn get_proxy(
     Extension(outbound_manager): Extension<ThreadSafeOutboundManager>,
     Extension(proxy): Extension<AnyOutboundHandler>,
 ) -> impl IntoResponse {

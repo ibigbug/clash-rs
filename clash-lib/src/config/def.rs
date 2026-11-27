@@ -403,6 +403,8 @@ pub struct Config {
     /// Log level
     /// Either `debug`, `info`, `warning`, `error` or `off`
     pub log_level: LogLevel,
+    /// Measure latency again on the established HTTP connection.
+    pub unified_delay: bool,
     /// DNS client/server settings
     pub dns: DNS,
     /// Profile settings

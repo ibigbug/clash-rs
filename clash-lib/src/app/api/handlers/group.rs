@@ -44,9 +44,11 @@ pub fn routes(
 ) -> Router<Arc<AppState>> {
     let state = GroupState { components };
     Router::new()
+        .route("/", get(get_groups))
         .nest(
             "/{name}",
             Router::new()
+                .route("/", get(super::proxy::get_proxy))
                 .route("/delay", get(get_group_delay))
                 .route_layer(middleware::from_fn_with_state(
                     state.clone(),
@@ -57,6 +59,15 @@ pub fn routes(
         .with_state(state)
 }
 
+async fn get_groups(State(state): State<GroupState>) -> impl IntoResponse {
+    let manager = state.outbound_manager();
+    let mut groups = Vec::new();
+    for group in manager.get_groups().await {
+        groups.push(manager.get_proxy(&group).await);
+    }
+    Json(HashMap::from([("proxies", groups)]))
+}
+
 async fn find_group_by_name(
     State(state): State<GroupState>,
     Path(name): Path<String>,
@@ -65,12 +76,17 @@ async fn find_group_by_name(
 ) -> Response {
     let outbound_manager = state.outbound_manager();
     match outbound_manager.get_outbound(&name).await {
-        Some(proxy) => {
+        Some(proxy) if proxy.try_as_group_handler().is_some() => {
             req.extensions_mut().insert(outbound_manager);
             req.extensions_mut().insert(proxy);
             next.run(req).await
         }
-        _ => (StatusCode::NOT_FOUND, format!("group {name} not found"))
+        Some(_) => (
+            StatusCode::NOT_FOUND,
+            format!("proxy {name} is not a group"),
+        )
+            .into_response(),
+        None => (StatusCode::NOT_FOUND, format!("group {name} not found"))
             .into_response(),
     }
 }
@@ -84,23 +100,10 @@ async fn get_group_delay(
     let timeout = Duration::from_millis(q.timeout.into());
     let name = proxy.name().to_owned();
 
-    if proxy.try_as_group_handler().is_some() {
-        let (actual, _) =
-            match group_url_test(&outbound_manager, proxy, &q.url, timeout).await {
-                Ok(result) => result,
-                Err(err) => {
-                    return (StatusCode::BAD_REQUEST, err.to_string())
-                        .into_response();
-                }
-            };
-        let mut res = HashMap::new();
-        res.insert(name, actual.as_millis());
-        Json(res).into_response()
-    } else {
-        (
-            StatusCode::NOT_FOUND,
-            format!("proxy {} is not a group", proxy.name()),
-        )
-            .into_response()
+    match group_url_test(&outbound_manager, proxy, &q.url, timeout).await {
+        Ok((actual, _)) => {
+            Json(HashMap::from([(name, actual.as_millis())])).into_response()
+        }
+        Err(err) => (StatusCode::BAD_REQUEST, err.to_string()).into_response(),
     }
 }

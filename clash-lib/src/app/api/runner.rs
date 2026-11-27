@@ -236,7 +236,15 @@ impl Runner for ApiRunner {
             // Handle IPC listening
             let ipc_fut = ipc_addr.as_ref().map(|ipc_path| {
                 let ipc_path = ipc_path.clone();
-                async move { ipc::serve_ipc(router, &ipc_path).await }
+                async move {
+                    ipc::serve_ipc(
+                        router,
+                        &ipc_path,
+                        #[cfg(windows)]
+                        controller_cfg.pipe_sddl.as_deref(),
+                    )
+                    .await
+                }
             });
 
             match (tcp_addr_display.as_deref(), ipc_addr_display.as_deref()) {

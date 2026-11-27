@@ -86,6 +86,7 @@ pub struct General {
     pub controller: Controller,
     pub mode: RunMode,
     pub log_level: LogLevel,
+    pub unified_delay: bool,
     pub ipv6: bool,
     pub interface: Option<Interface>,
     pub routing_mask: Option<SocketMark>,
@@ -192,6 +193,9 @@ impl FromStr for BindAddress {
 
 #[derive(Serialize, Deserialize, Default, Clone, PartialEq, Eq)]
 pub struct Controller {
+    #[cfg(windows)]
+    #[serde(skip)]
+    pub pipe_sddl: Option<String>,
     pub external_controller: Option<String>,
     pub external_controller_ipc: Option<String>,
     pub external_ui: Option<String>,

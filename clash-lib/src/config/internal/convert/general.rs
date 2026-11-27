@@ -17,6 +17,8 @@ pub(super) fn convert(c: &def::Config) -> Result<General, crate::Error> {
     Ok(General {
         authentication: c.authentication.clone(),
         controller: Controller {
+            #[cfg(windows)]
+            pipe_sddl: None,
             external_controller: c.external_controller.clone(),
             external_ui: c.external_ui.clone(),
             external_ui_download_url: c.external_ui_url.clone(),
@@ -26,6 +28,7 @@ pub(super) fn convert(c: &def::Config) -> Result<General, crate::Error> {
         },
         mode: c.mode,
         log_level: c.log_level,
+        unified_delay: c.unified_delay,
         ipv6: c.ipv6,
         interface: c.interface.as_ref().map(|iface| {
             if let Ok(addr) = iface.parse::<IpAddr>() {

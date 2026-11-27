@@ -341,6 +341,11 @@ pub async fn start(
             };
 
             let new_controller_cfg = config.general.controller.clone();
+            #[cfg(windows)]
+            let new_controller_cfg = crate::config::internal::config::Controller {
+                pipe_sddl: current_controller_cfg.pipe_sddl.clone(),
+                ..new_controller_cfg
+            };
 
             let new_components =
                 match create_components(cwd_clone.clone(), config).await {
@@ -560,6 +565,7 @@ async fn create_components(
             ProxyManager::with_interface(
                 dns_resolver.clone(),
                 config.general.routing_mask,
+                config.general.unified_delay,
                 Arc::new(tokio::sync::RwLock::new(default_interface.clone())),
             ),
             outbound_registry.clone(),

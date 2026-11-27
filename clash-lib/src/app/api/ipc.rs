@@ -2,7 +2,11 @@ use axum::Router;
 use tracing::error;
 
 #[cfg(windows)]
-pub async fn serve_ipc(router: Router, path: &str) -> crate::Result<()> {
+pub async fn serve_ipc(
+    router: Router,
+    path: &str,
+    sddl: Option<&str>,
+) -> crate::Result<()> {
     use axum::ServiceExt;
     use tower::{Layer, util::MapRequestLayer};
     use tracing::info;
@@ -12,6 +16,10 @@ pub async fn serve_ipc(router: Router, path: &str) -> crate::Result<()> {
 
     let listener = NamedPipeListener {
         path: path.to_string(),
+        sddl: std::ffi::CString::new(
+            sddl.unwrap_or("D:(A;;GRGW;;;BU)(A;;GRGW;;;SY)"),
+        )
+        .map_err(|_| crate::Error::Operation("invalid NUL in pipe SDDL".into()))?,
         first_instance: true,
     };
     let app = MapRequestLayer::new(rewrite_websocket_uri).layer(router);
@@ -80,7 +88,7 @@ struct SecurityAttributesGuard {
 
 #[cfg(windows)]
 impl SecurityAttributesGuard {
-    fn new() -> crate::Result<Self> {
+    fn new(sddl: &std::ffi::CStr) -> crate::Result<Self> {
         use windows::{
             Win32::Security::{
                 Authorization::{
@@ -89,23 +97,15 @@ impl SecurityAttributesGuard {
                 },
                 PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES,
             },
-            core::PSTR,
+            core::PCSTR,
         };
-
-        // SDDL string for:
-        // - Allow Read/Write for BUILTIN\Users
-        // - Allow Read/Write for NT AUTHORITY\SYSTEM
-        // D: = DACL
-        // (A;;GRGW;;;BU) = Allow Generic Read/Generic Write for Built-in Users
-        // (A;;GRGW;;;SY) = Allow Generic Read/Generic Write for System
-        let sddl = b"D:(A;;GRGW;;;BU)(A;;GRGW;;;SY)\0";
 
         unsafe {
             let mut sd = PSECURITY_DESCRIPTOR::default();
             let mut sd_size = 0u32;
 
             ConvertStringSecurityDescriptorToSecurityDescriptorA(
-                PSTR::from_raw(sddl.as_ptr() as *mut u8),
+                PCSTR::from_raw(sddl.as_ptr().cast()),
                 SDDL_REVISION_1,
                 &mut sd,
                 Some(&mut sd_size),
@@ -149,10 +149,11 @@ impl Drop for SecurityAttributesGuard {
 fn create_named_pipe_with_security(
     path: &str,
     first_instance: bool,
+    sddl: &std::ffi::CStr,
 ) -> crate::Result<tokio::net::windows::named_pipe::NamedPipeServer> {
     use tokio::net::windows::named_pipe;
 
-    let mut guard = SecurityAttributesGuard::new()?;
+    let mut guard = SecurityAttributesGuard::new(sddl)?;
 
     unsafe {
         let mut options = named_pipe::ServerOptions::new();
@@ -178,6 +179,7 @@ use tokio::net::windows::named_pipe::NamedPipeServer;
 #[cfg(windows)]
 struct NamedPipeListener {
     path: String,
+    sddl: std::ffi::CString,
     first_instance: bool,
 }
 
@@ -193,7 +195,11 @@ impl axum::serve::Listener for NamedPipeListener {
         let mut retry_count = 0u32;
 
         let server = loop {
-            match create_named_pipe_with_security(&self.path, self.first_instance) {
+            match create_named_pipe_with_security(
+                &self.path,
+                self.first_instance,
+                &self.sddl,
+            ) {
                 Ok(server) => break server,
                 Err(e) => {
                     retry_count += 1;
@@ -337,7 +343,7 @@ mod tests {
         let server_handle = tokio::spawn({
             let router = router.clone();
             async move {
-                let _ = serve_ipc(router, path).await;
+                let _ = serve_ipc(router, path, None).await;
             }
         });
 
@@ -583,7 +589,7 @@ mod tests {
         let server_handle = tokio::spawn({
             let router = router.clone();
             async move {
-                let _ = serve_ipc(router, path).await;
+                let _ = serve_ipc(router, path, None).await;
             }
         });
 
@@ -670,7 +676,7 @@ mod tests {
         let server_handle = tokio::spawn({
             let router = router.clone();
             async move {
-                serve_ipc(router, path).await.unwrap();
+                serve_ipc(router, path, None).await.unwrap();
             }
         });
 

@@ -155,6 +155,13 @@ struct Cli {
     )]
     controller_ipc: Option<String>,
 
+    #[cfg(windows)]
+    #[clap(
+        long,
+        help = "Set the security descriptor for the controller named pipe"
+    )]
+    controller_pipe_sddl: Option<String>,
+
     #[clap(
         long,
         help = "Enable compatibility mode, which make behaviors more consistent \
@@ -288,6 +295,10 @@ fn main() -> anyhow::Result<()> {
         .inspect_err(|err| eprintln!("Failed to parse configuration: {err}"))?;
 
     config.general.controller.external_controller_ipc = cli.controller_ipc;
+    #[cfg(windows)]
+    {
+        config.general.controller.pipe_sddl = cli.controller_pipe_sddl;
+    }
     if cli.compatibility {
         println!(
             "Compatibility mode enabled. This may cause some issues, but it is \

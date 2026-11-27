@@ -206,6 +206,26 @@ impl OutboundManager {
         self.selector_control.get(name).cloned()
     }
 
+    pub async fn get_groups(&self) -> Vec<AnyOutboundHandler> {
+        // The default provider contains static handlers in profile order.
+        let mut groups = if let Some(provider) =
+            self.get_proxy_provider(RESERVED_PROVIDER_NAME)
+        {
+            provider
+                .proxies()
+                .await
+                .into_iter()
+                .filter(|p| p.try_as_group_handler().is_some())
+                .collect()
+        } else {
+            Vec::new()
+        };
+        if let Some(global) = self.get_outbound(PROXY_GLOBAL).await {
+            groups.push(global);
+        }
+        groups
+    }
+
     /// Get all proxies in the manager, excluding those in providers.
     pub async fn get_proxies(&self) -> HashMap<String, Box<dyn Serialize + Send>> {
         let mut r = HashMap::new();
@@ -302,6 +322,10 @@ impl OutboundManager {
         proxy_manager
             .check(outbounds, url, Some(timeout), force)
             .await
+    }
+
+    pub(crate) fn unified_delay(&self) -> &std::sync::atomic::AtomicBool {
+        &self.proxy_manager.unified_delay
     }
 
     pub fn get_proxy_providers(&self) -> HashMap<String, ArcProxyProvider> {
