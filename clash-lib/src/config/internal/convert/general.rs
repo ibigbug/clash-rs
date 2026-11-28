@@ -19,7 +19,10 @@ pub(super) fn convert(c: &def::Config) -> Result<General, crate::Error> {
         controller: Controller {
             #[cfg(windows)]
             pipe_sddl: None,
-            external_controller: c.external_controller.clone(),
+            external_controller: c
+                .external_controller
+                .clone()
+                .filter(|addr| !addr.is_empty()),
             external_ui: c.external_ui.clone(),
             external_ui_download_url: c.external_ui_url.clone(),
             secret: c.secret.clone(),

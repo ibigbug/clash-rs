@@ -141,6 +141,10 @@ Options:
   -h, --help                       Print help
 ```
 
+`--controller-ipc` takes precedence over the YAML IPC address at startup and on reload. Without the flag, each configuration supplies its own IPC address. Set `external-controller: ""` to disable the TCP controller while using IPC.
+
+In compatibility mode, ClashRS resolves relative GeoData paths against `-d` (the working directory if omitted). When the configuration omits `mmdb` or `geosite`, it uses `Country.mmdb` or `geosite.dat`, respectively. The same defaults apply on reload.
+
 ## FFI
 
 ### Compile for apple platforms
