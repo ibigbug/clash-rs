@@ -143,6 +143,8 @@ Options:
 
 `--controller-ipc` takes precedence over the YAML IPC address at startup and on reload. Without the flag, each configuration supplies its own IPC address. Set `external-controller: ""` to disable the TCP controller while using IPC.
 
+The REST API reads its CORS policy from `external-controller-cors`. Its `allow-origins` list takes precedence over the legacy top-level `cors-allow-origins`. An empty list allows no browser origin to read a cross-origin response. The same applies when the block is present and both lists are omitted. Set `allow-private-network: false` inside the block to omit `Access-Control-Allow-Private-Network` from preflight responses. The default is `true`. Changes take effect on configuration reload.
+
 In compatibility mode, ClashRS resolves relative GeoData paths against `-d` (the working directory if omitted). When the configuration omits `mmdb` or `geosite`, it uses `Country.mmdb` or `geosite.dat`, respectively. The same defaults apply on reload.
 
 ## FFI

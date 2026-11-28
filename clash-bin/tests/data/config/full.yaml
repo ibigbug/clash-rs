@@ -62,9 +62,11 @@ external-ui: public
 # API authentication secret (strongly recommended when not on 127.0.0.1)
 # secret: "change-me"
 
-# CORS allowed origins for the REST API
-# cors-allow-origins:
-#   - "https://my-dashboard.example.com"
+# CORS policy for the REST API
+# external-controller-cors:
+#   allow-origins:
+#     - "https://my-dashboard.example.com"
+#   allow-private-network: true
 
 # ── Outbound Interface ────────────────────────────────────────────────────────
 # Bind outbound connections to a specific network interface (not yet implemented)

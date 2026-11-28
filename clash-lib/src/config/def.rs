@@ -456,12 +456,9 @@ pub struct Config {
     pub external_ui_url: Option<String>,
     /// external controller secret
     pub secret: Option<String>,
-    /// CORS allowed origins
-    /// # examples
-    /// ```yaml
-    /// cors-allow-origins:
-    ///   - "https://example.com"
-    #[serde(rename = "cors-allow-origins")]
+    /// CORS policy for the external controller.
+    pub external_controller_cors: Option<ExternalControllerCors>,
+    /// Legacy fallback for `external-controller-cors.allow-origins`.
     pub cors_allow_origins: Option<Vec<String>>,
     /// outbound interface name
     /// # Note
@@ -510,6 +507,14 @@ impl TryFrom<PathBuf> for Config {
         let config = content.parse::<Config>()?;
         Ok(config)
     }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct ExternalControllerCors {
+    pub allow_origins: Option<Vec<String>>,
+    #[serde(default = "crate::common::utils::default_bool_true")]
+    pub allow_private_network: bool,
 }
 
 impl FromStr for Config {

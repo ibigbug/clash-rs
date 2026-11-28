@@ -191,7 +191,8 @@ impl FromStr for BindAddress {
     }
 }
 
-#[derive(Serialize, Deserialize, Default, Clone, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, educe::Educe, Clone, PartialEq, Eq)]
+#[educe(Default)]
 pub struct Controller {
     #[cfg(windows)]
     #[serde(skip)]
@@ -202,6 +203,9 @@ pub struct Controller {
     pub external_ui_download_url: Option<String>,
     pub secret: Option<String>,
     pub cors_allow_origins: Option<Vec<String>>,
+    #[serde(default = "crate::common::utils::default_bool_true")]
+    #[educe(Default = true)]
+    pub cors_allow_private_network: bool,
 }
 
 #[derive(Serialize, Deserialize)]

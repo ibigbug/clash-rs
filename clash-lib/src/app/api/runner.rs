@@ -105,7 +105,7 @@ impl Runner for ApiRunner {
         let cors = CorsLayer::new()
             .allow_methods([Method::GET, Method::POST, Method::PUT, Method::PATCH])
             .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE])
-            .allow_private_network(true)
+            .allow_private_network(controller_cfg.cors_allow_private_network)
             .allow_origin(origins);
 
         let app_state = Arc::new(AppState {
