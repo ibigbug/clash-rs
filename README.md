@@ -38,21 +38,7 @@ A custom protocol, rule based network proxy software.
 | `tun` | TUN device for transparent proxying | All platforms |
 | `tproxy` | Transparent proxy (TCP + UDP) | Linux; `tproxy` feature |
 | `redir` | TCP redirect | Linux; `redir` feature |
-| `tunnel` | Routes all traffic to a fixed target | |
-
-Top-level `tunnels` forward TCP and UDP to a fixed target. Set `proxy` to a proxy
-or group name to use that outbound in every mode. Provider nodes are looked up by
-name when traffic arrives. If the named outbound is unavailable, the tunnel drops
-the traffic. Omit `proxy` to use normal routing.
-
-```yaml
-tunnels:
-  - network: [tcp, udp]
-    address: 127.0.0.1:1053
-    target: 192.0.2.53:53
-    proxy: DIRECT
-  - "tcp,127.0.0.1:8443,example.org:443"
-```
+| `tunnel` | Routes all traffic to a fixed target | [Tunnel inbound guide](.github/docs/tunnel/README.md) |
 
 ### Outbounds
 
@@ -69,7 +55,7 @@ tunnels:
 | `wireguard` | UDP (userspace) | `wireguard` feature |
 | `hysteria2` | QUIC · obfs-salamander | |
 | `tuic` | QUIC (bbr / cubic / new_reno) | `tuic` feature |
-| `naive` | HTTP/2 · QUIC | [Naive outbound guide](clash-lib/src/proxy/naive/README.md) |
+| `naive` | HTTP/2 · QUIC | [Naive outbound guide](.github/docs/naive/README.md) |
 | `shadowquic` | QUIC · over-stream | `shadowquic` feature |
 | `ssh` | SSH tunnel | `ssh` feature |
 | `tor` | Onion routing | `onion` feature (`plus` build) |
@@ -154,10 +140,6 @@ Options:
       --compatibility              Enable compatibility mode for mihomo-consistent behavior
   -h, --help                       Print help
 ```
-
-`--controller-ipc` takes precedence over the YAML IPC address at startup and on reload. Without the flag, each configuration supplies its own IPC address. Set `external-controller: ""` to disable the TCP controller while using IPC.
-
-The REST API reads its CORS policy from `external-controller-cors`. Its `allow-origins` list takes precedence over the legacy top-level `cors-allow-origins`. An empty list allows no browser origin to read a cross-origin response. The same applies when the block is present and both lists are omitted. Set `allow-private-network: false` inside the block to omit `Access-Control-Allow-Private-Network` from preflight responses. The default is `true`. Changes take effect on configuration reload.
 
 In compatibility mode, ClashRS resolves relative GeoData paths against `-d` (the working directory if omitted). When the configuration omits `mmdb` or `geosite`, it uses `Country.mmdb` or `geosite.dat`, respectively. The same defaults apply on reload.
 

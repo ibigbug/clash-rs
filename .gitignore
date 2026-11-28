@@ -11,6 +11,7 @@ target/
 rust-project.json
 /build/
 docs
+!/.github/docs/
 .history
 
 # don't check in this real config
