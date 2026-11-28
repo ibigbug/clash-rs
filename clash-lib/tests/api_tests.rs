@@ -109,8 +109,22 @@ async fn test_wildcard_cors_returns_any_origin_header() {
     );
 }
 
+async fn private_network_preflight(
+    port: u16,
+    origin: &str,
+) -> std::io::Result<http::Response<hyper::body::Incoming>> {
+    let url = format!("http://127.0.0.1:{port}/version");
+    let request = hyper::Request::options(&url)
+        .header(http::header::ORIGIN, origin)
+        .header(http::header::ACCESS_CONTROL_REQUEST_METHOD, "GET")
+        .header("access-control-request-private-network", "true")
+        .body(http_body_util::Empty::<Bytes>::new())
+        .unwrap();
+    send_http_request(url.parse().unwrap(), request).await
+}
+
 #[tokio::test(flavor = "current_thread")]
-async fn test_cors_preflight_without_auth_returns_cors_headers() {
+async fn test_cors_preflight_before_and_after_policy_reload() {
     let port_base = alloc_ports(CLIENT_PORT_BLOCK);
     let wd =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data/config/client");
@@ -120,7 +134,7 @@ async fn test_cors_preflight_without_auth_returns_cors_headers() {
     );
     let _clash = ClashInstance::start(
         Options {
-            config: Config::Str(config_str),
+            config: Config::Str(config_str.clone()),
             cwd: Some(wd.to_string_lossy().to_string()),
             rt: None,
             log_file: None,
@@ -132,21 +146,16 @@ async fn test_cors_preflight_without_auth_returns_cors_headers() {
 
     // Preflight OPTIONS request WITHOUT Authorization header
     // This is what browsers send and it must return CORS headers.
-    let version_url = format!("http://127.0.0.1:{}/version", port_base);
-    let req = hyper::Request::builder()
-        .uri(&version_url)
-        .header(http::header::ORIGIN, "https://example.com")
-        .header(http::header::ACCESS_CONTROL_REQUEST_METHOD, "GET")
-        .method(http::method::Method::OPTIONS)
-        .body(http_body_util::Empty::<Bytes>::new())
-        .expect("Failed to build request");
-
-    let res = send_http_request(version_url.parse().unwrap(), req)
+    let res = private_network_preflight(port_base, "https://example.com")
         .await
         .expect("Failed to send OPTIONS preflight request");
 
     // Preflight must succeed, not return 401
     assert_eq!(res.status(), http::StatusCode::OK);
+    assert_eq!(
+        res.headers()["access-control-allow-private-network"],
+        "true"
+    );
 
     // Must include CORS headers so the browser allows the actual request
     assert_eq!(
@@ -174,6 +183,50 @@ async fn test_cors_preflight_without_auth_returns_cors_headers() {
             .map(|v| v.contains("authorization"))
             .unwrap_or(false),
         "preflight response should allow Authorization header"
+    );
+
+    let origin = "https://dashboard.example";
+    let url = format!("http://127.0.0.1:{port_base}/configs");
+    for private_network in [false, true] {
+        let payload = format!(
+            "{config_str}\nexternal-controller-cors:\n  allow-origins: \
+             [{origin}]\n  allow-private-network: {private_network}\n"
+        );
+        let req = hyper::Request::put(&url)
+            .header(http::header::AUTHORIZATION, "Bearer clash-rs")
+            .header(http::header::CONTENT_TYPE, "application/json")
+            .body(serde_json::json!({ "payload": payload }).to_string())
+            .unwrap();
+        let res = send_http_request(url.parse().unwrap(), req).await.unwrap();
+        assert_eq!(res.status(), http::StatusCode::NO_CONTENT);
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Ok(res) = private_network_preflight(port_base, origin).await {
+                    let headers = res.headers();
+                    if headers.get(http::header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                        == Some(&http::HeaderValue::from_static(origin))
+                        && headers.get("access-control-allow-private-network")
+                            == private_network
+                                .then_some(&http::HeaderValue::from_static("true"))
+                    {
+                        assert_eq!(res.status(), http::StatusCode::OK);
+                        break;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("reloaded CORS policy did not take effect");
+    }
+    let denied = private_network_preflight(port_base, "https://example.com")
+        .await
+        .unwrap();
+    assert!(
+        !denied
+            .headers()
+            .contains_key(http::header::ACCESS_CONTROL_ALLOW_ORIGIN)
     );
 }
 
@@ -1955,8 +2008,40 @@ async fn test_proxy_delay_direct() {
 }
 
 // ---------------------------------------------------------------------------
-// GET /group/{name}/delay  – measures latency for a proxy group
+// GET /group and /group/{name}
 // ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_group_list_and_lookup() -> anyhow::Result<()> {
+    let (_clash, port) = start_client_clash();
+    let url = format!("http://127.0.0.1:{port}/group");
+    let response = send_http_request(url.parse()?, auth_get(&url)).await?;
+    assert_eq!(response.status(), http::StatusCode::OK);
+    let json = parse_json(response).await;
+    let groups = json["proxies"]
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("expected group list"))?;
+    assert_eq!(
+        groups.last().map(|g| &g["name"]),
+        Some(&serde_json::json!("GLOBAL"))
+    );
+    let group = groups
+        .iter()
+        .find(|g| g["name"] == "url-test")
+        .ok_or_else(|| anyhow::anyhow!("missing url-test"))?;
+    let lookup = format!("{url}/url-test");
+    let response = send_http_request(lookup.parse()?, auth_get(&lookup)).await?;
+    assert_eq!(response.status(), http::StatusCode::OK);
+    assert_eq!(parse_json(response).await["all"], group["all"]);
+    let plain = format!("{url}/DIRECT");
+    assert_eq!(
+        send_http_request(plain.parse()?, auth_get(&plain))
+            .await?
+            .status(),
+        http::StatusCode::NOT_FOUND
+    );
+    Ok(())
+}
 
 /// Test `GET /group/url-test/delay` using a local mock HTTP server as the
 /// target.  The url-test group has DIRECT as its sole member, which makes a

@@ -13,7 +13,7 @@ use crate::{
 use anyhow::Context;
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
-use futures::{FutureExt, StreamExt, stream::FuturesUnordered};
+use futures::{StreamExt, stream::FuturesUnordered};
 use http_body_util::Empty;
 use hyper::Request;
 use hyper_util::rt::TokioIo;
@@ -119,6 +119,7 @@ struct ProxyState {
 /// ProxyManager is the latency registry.
 #[derive(Clone)]
 pub struct ProxyManager {
+    pub(crate) unified_delay: Arc<AtomicBool>,
     default_interface: Arc<RwLock<Option<OutboundInterface>>>,
     proxy_state: Arc<RwLock<HashMap<String, ProxyState>>>,
     dns_resolver: ThreadSafeDNSResolver,
@@ -155,6 +156,7 @@ impl ProxyManager {
         Self::with_interface(
             dns_resolver,
             fw_mark,
+            false,
             DEFAULT_OUTBOUND_INTERFACE.clone(),
         )
     }
@@ -162,6 +164,7 @@ impl ProxyManager {
     pub(crate) fn with_interface(
         dns_resolver: ThreadSafeDNSResolver,
         fw_mark: Option<SocketMark>,
+        unified_delay: bool,
         default_interface: Arc<RwLock<Option<OutboundInterface>>>,
     ) -> Self {
         let backoff_rounds = std::env::var("CLASH_RS_BACKOFF_ROUNDS")
@@ -175,6 +178,7 @@ impl ProxyManager {
             .filter(|v: &usize| *v > 0)
             .unwrap_or(8);
         Self {
+            unified_delay: Arc::new(AtomicBool::new(unified_delay)),
             dns_resolver,
             default_interface,
             proxy_state: Default::default(),
@@ -933,10 +937,10 @@ impl ProxyManager {
                 .parse::<http::Uri>()
                 .map_err(|e| new_io_error(format!("invalid url: {url}: {e}")))?;
 
-            let host = uri
-                .host()
-                .ok_or(new_io_error(format!("invalid url: {url}: no host found")))?
-                .to_owned();
+            let authority = uri.authority().ok_or_else(|| {
+                new_io_error(format!("invalid url: {url}: no host found"))
+            })?;
+            let host = authority.host().to_owned();
             let port = uri.port_u16().unwrap_or(match uri.scheme_str() {
                 None => 80,
                 Some(s) => match s {
@@ -983,18 +987,30 @@ impl ProxyManager {
                 }
             };
 
-            let req = Request::get(url)
-                .header(hyper::header::HOST, host.as_str())
-                .header("Connection", "Close")
-                .version(hyper::Version::HTTP_11)
-                .body(Empty::<Bytes>::new())
-                .unwrap();
+            let unified = self.unified_delay.load(Ordering::Relaxed);
+            let request = || {
+                let target = uri.path_and_query().map_or("/", |p| p.as_str());
+                let builder = if unified {
+                    Request::head(target)
+                } else {
+                    Request::get(target)
+                };
+                builder
+                    .header(hyper::header::HOST, authority.as_str())
+                    .header(
+                        hyper::header::CONNECTION,
+                        if unified { "keep-alive" } else { "close" },
+                    )
+                    .version(hyper::Version::HTTP_11)
+                    .body(Empty::<Bytes>::new())
+                    .map_err(new_io_error)
+            };
 
             let mut tls_handshake_delay = None;
-            let resp = match uri.scheme() {
+            let mut sender = match uri.scheme() {
                 Some(scheme) if scheme == &http::uri::Scheme::HTTP => {
                     let io = TokioIo::new(stream);
-                    let (mut sender, conn) = tokio::time::timeout(
+                    let (sender, conn) = tokio::time::timeout(
                         timeout,
                         hyper::client::conn::http1::handshake(io),
                     )
@@ -1010,7 +1026,7 @@ impl ProxyManager {
                         }
                     });
 
-                    TimedFuture::new(sender.send_request(req).boxed())
+                    sender
                 }
                 Some(scheme) if scheme == &http::uri::Scheme::HTTPS => {
                     let mut tls_config = rustls::ClientConfig::builder()
@@ -1028,7 +1044,7 @@ impl ProxyManager {
                     let (stream, delay) = tokio::time::timeout(
                         timeout,
                         TimedFuture::new(connector.connect(
-                            host.try_into().expect("must be valid SNI"),
+                            host.try_into().map_err(new_io_error)?,
                             stream,
                         )),
                     )
@@ -1038,7 +1054,7 @@ impl ProxyManager {
 
                     let io = TokioIo::new(stream);
 
-                    let (mut sender, conn) = tokio::time::timeout(
+                    let (sender, conn) = tokio::time::timeout(
                         timeout,
                         hyper::client::conn::http1::handshake(io),
                     )
@@ -1056,7 +1072,7 @@ impl ProxyManager {
 
                     tls_handshake_delay = Some(delay);
 
-                    TimedFuture::new(sender.send_request(req).boxed())
+                    sender
                 }
                 _ => {
                     return Err(new_io_error(format!(
@@ -1065,35 +1081,44 @@ impl ProxyManager {
                 }
             };
 
-            let delay = match tokio::time::timeout(timeout, resp).await {
-                Ok((res, delay)) => match res {
-                    Ok(res) => {
-                        trace!(
-                            delay = ?delay,
-                            status = ?res.status(),
-                            "success"
-                        );
-                        Ok(delay)
-                    }
-                    Err(e) => {
-                        warn!(
-                            e = ?e,
-                            "failed"
-                        );
-                        Err(new_io_error(format!(
-                            "urltest for proxy {name} failed: {e}"
-                        )))
-                    }
-                },
-                Err(_) => {
-                    warn!("timed out");
-                    Err(new_io_error(format!("timeout for {url}").as_str()))
+            let deadline = tokio::time::Instant::now() + timeout;
+            let (first, first_delay) = tokio::time::timeout_at(
+                deadline,
+                TimedFuture::new(Box::pin(sender.send_request(request()?))),
+            )
+            .await
+            .map_err(|_| new_io_error(format!("timeout for {url}")))?;
+            let first = first.map_err(|e| {
+                new_io_error(format!("urltest for proxy {name} failed: {e}"))
+            })?;
+            trace!(status = ?first.status(), delay = ?first_delay, "URL test succeeded");
+            drop(first);
+            let mut delay = first_delay;
+            if unified {
+                // If the server closes after the first response, its successful
+                // measurement still counts.
+                let request_for_second = request()?;
+                let second = async {
+                    sender.ready().await?;
+                    let (reply, duration) = TimedFuture::new(Box::pin(
+                        sender.send_request(request_for_second),
+                    ))
+                    .await;
+                    reply?;
+                    Ok::<_, hyper::Error>(duration)
+                };
+                if let Ok(Ok(second_delay)) =
+                    tokio::time::timeout_at(deadline, second).await
+                {
+                    delay = second_delay;
                 }
-            }?;
-
+            }
+            // Clash API clients reserve a zero delay for a failed probe.
+            let minimum = Duration::from_millis(1);
             Ok((
-                delay,
-                (connect_delay + tls_handshake_delay.unwrap_or_default() + delay),
+                delay.max(minimum),
+                (connect_delay + tls_handshake_delay.unwrap_or_default() + delay)
+                    .max(minimum),
             ))
         };
 
@@ -1268,6 +1293,10 @@ mod tests {
             then.status(204);
         });
         let url = server.url("/generate_204");
+        let warm = server.mock(|when, then| {
+            when.method(httpmock::Method::HEAD).path("/warm");
+            then.status(204);
+        });
 
         let mut mock_resolver = MockClashResolver::new();
         mock_resolver
@@ -1279,6 +1308,19 @@ mod tests {
             remote_content_manager::ProxyManager::new(Arc::new(mock_resolver), None);
 
         let mock_handler = Arc::new(direct::Handler::new(PROXY_DIRECT));
+
+        manager
+            .unified_delay
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let (delay, _) = manager
+            .url_test(mock_handler.clone(), &server.url("/warm"), None)
+            .await
+            .unwrap();
+        assert!(delay >= Duration::from_millis(1));
+        warm.assert_calls(2);
+        manager
+            .unified_delay
+            .store(false, std::sync::atomic::Ordering::Relaxed);
 
         manager
             .url_test(mock_handler.clone(), &url, None)

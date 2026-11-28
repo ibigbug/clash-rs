@@ -95,6 +95,33 @@ pub enum TokioRuntime {
     SingleThread,
 }
 
+/// Process-level settings that also apply to replacement configurations.
+#[derive(Default)]
+pub struct StartupOverrides {
+    pub controller_ipc: Option<String>,
+    #[cfg(windows)]
+    pub controller_pipe_sddl: Option<String>,
+    pub compatibility: bool,
+}
+
+impl StartupOverrides {
+    fn apply(&self, config: &mut InternalConfig) {
+        let general = &mut config.general;
+        if let Some(ipc) = &self.controller_ipc {
+            general.controller.external_controller_ipc = Some(ipc.clone());
+        }
+        #[cfg(windows)]
+        general
+            .controller
+            .pipe_sddl
+            .clone_from(&self.controller_pipe_sddl);
+        if self.compatibility {
+            general.mmdb.get_or_insert_with(|| "Country.mmdb".into());
+            general.geosite.get_or_insert_with(|| "geosite.dat".into());
+        }
+    }
+}
+
 #[allow(clippy::large_enum_variant)]
 pub enum Config {
     Def(ClashConfigDef),
@@ -145,6 +172,13 @@ pub struct GlobalState {
 }
 
 pub fn start_scaffold(opts: Options) -> Result<()> {
+    start_scaffold_with_overrides(opts, StartupOverrides::default())
+}
+
+pub fn start_scaffold_with_overrides(
+    opts: Options,
+    overrides: StartupOverrides,
+) -> Result<()> {
     let rt = match opts.rt.as_ref().unwrap_or(&TokioRuntime::MultiThread) {
         TokioRuntime::MultiThread => tokio::runtime::Builder::new_multi_thread()
             .enable_all()
@@ -179,7 +213,16 @@ pub fn start_scaffold(opts: Options) -> Result<()> {
         token_guard.push(shutdown_token.clone());
     }
     rt.block_on(async {
-        match start(config, cwd, config_path, log_tx, shutdown_token).await {
+        match start_with_overrides(
+            config,
+            cwd,
+            config_path,
+            log_tx,
+            shutdown_token,
+            overrides,
+        )
+        .await
+        {
             Err(e) => {
                 eprintln!("start error: {e}");
                 Err(e)
@@ -275,10 +318,37 @@ pub async fn start(
     log_tx: broadcast::Sender<LogEvent>,
     shutdown_token: tokio_util::sync::CancellationToken,
 ) -> Result<()> {
+    start_with_overrides(
+        config,
+        cwd,
+        config_path,
+        log_tx,
+        shutdown_token,
+        StartupOverrides::default(),
+    )
+    .await
+}
+
+async fn start_with_overrides(
+    mut config: InternalConfig,
+    cwd: String,
+    config_path: Option<String>,
+    log_tx: broadcast::Sender<LogEvent>,
+    shutdown_token: tokio_util::sync::CancellationToken,
+    overrides: StartupOverrides,
+) -> Result<()> {
     setup_default_crypto_provider();
 
     let cwd = PathBuf::from(cwd);
 
+    #[cfg(windows)]
+    let overrides = StartupOverrides {
+        controller_pipe_sddl: overrides
+            .controller_pipe_sddl
+            .or_else(|| config.general.controller.pipe_sddl.take()),
+        ..overrides
+    };
+    overrides.apply(&mut config);
     // things we need to clone before consuming config
     let controller_cfg = config.general.controller.clone();
     let log_level = config.general.log_level;
@@ -332,7 +402,7 @@ pub async fn start(
         // Listen for config reload signal and reload config
         while let Some((config, done)) = reload_rx.recv().await {
             info!("reloading config");
-            let config = match config.try_parse() {
+            let mut config = match config.try_parse() {
                 Ok(c) => c,
                 Err(e) => {
                     error!("failed to reload config: {}", e);
@@ -340,6 +410,7 @@ pub async fn start(
                 }
             };
 
+            overrides.apply(&mut config);
             let new_controller_cfg = config.general.controller.clone();
 
             let new_components =
@@ -560,6 +631,7 @@ async fn create_components(
             ProxyManager::with_interface(
                 dns_resolver.clone(),
                 config.general.routing_mask,
+                config.general.unified_delay,
                 Arc::new(tokio::sync::RwLock::new(default_interface.clone())),
             ),
             outbound_registry.clone(),
@@ -768,10 +840,52 @@ async fn create_components(
 
 #[cfg(test)]
 mod tests {
-    use crate::{Config, Options, shutdown, start_scaffold};
+    use crate::{Config, Options, StartupOverrides, shutdown, start_scaffold};
     use std::{sync::Once, thread, time::Duration};
 
     static INIT: Once = Once::new();
+
+    #[test]
+    fn startup_overrides_respect_each_new_configuration() -> crate::Result<()> {
+        let overrides = StartupOverrides {
+            controller_ipc: Some("from-cli".into()),
+            #[cfg(windows)]
+            controller_pipe_sddl: None,
+            compatibility: true,
+        };
+        let mut custom = Config::Str(
+            "external-controller: ''\nexternal-controller-ipc: from-yaml\nmmdb: \
+             custom.mmdb\ngeosite: custom.dat"
+                .into(),
+        )
+        .try_parse()?;
+        StartupOverrides::default().apply(&mut custom);
+        assert_eq!(
+            custom.general.controller.external_controller_ipc.as_deref(),
+            Some("from-yaml")
+        );
+        assert!(custom.general.controller.external_controller.is_none());
+        overrides.apply(&mut custom);
+        assert_eq!(
+            custom.general.controller.external_controller_ipc.as_deref(),
+            Some("from-cli")
+        );
+        assert_eq!(custom.general.mmdb.as_deref(), Some("custom.mmdb"));
+        assert_eq!(custom.general.geosite.as_deref(), Some("custom.dat"));
+
+        let mut fresh = Config::Str("{}".into()).try_parse()?;
+        StartupOverrides::default().apply(&mut fresh);
+        assert!(fresh.general.controller.external_controller_ipc.is_none());
+        assert!(fresh.general.mmdb.is_none() && fresh.general.geosite.is_none());
+        overrides.apply(&mut fresh);
+        assert_eq!(
+            fresh.general.controller.external_controller_ipc.as_deref(),
+            Some("from-cli")
+        );
+        assert_eq!(fresh.general.mmdb.as_deref(), Some("Country.mmdb"));
+        assert_eq!(fresh.general.geosite.as_deref(), Some("geosite.dat"));
+        Ok(())
+    }
 
     pub fn initialize() {
         INIT.call_once(|| {

@@ -155,6 +155,15 @@ struct Cli {
     )]
     controller_ipc: Option<String>,
 
+    #[cfg(windows)]
+    #[clap(
+        long,
+        env = "LISTEN_NAMEDPIPE_SDDL",
+        hide_env_values = true,
+        help = "Set the security descriptor for the controller named pipe"
+    )]
+    controller_pipe_sddl: Option<String>,
+
     #[clap(
         long,
         help = "Enable compatibility mode, which make behaviors more consistent \
@@ -179,6 +188,11 @@ fn env_truthy(name: &str) -> bool {
         Ok(v) => matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true"),
         Err(_) => false,
     }
+}
+
+#[cfg(windows)]
+fn pipe_sddl_override(sddl: Option<String>) -> Option<String> {
+    sddl.filter(|value| !value.is_empty())
 }
 
 fn main() -> anyhow::Result<()> {
@@ -216,13 +230,9 @@ fn main() -> anyhow::Result<()> {
         exit(0)
     }
 
-    let file = cli
-        .directory
-        .as_ref()
-        .unwrap_or(&std::env::current_dir().unwrap())
-        .join(cli.config)
-        .to_string_lossy()
-        .to_string();
+    let directory =
+        std::path::absolute(cli.directory.as_deref().unwrap_or(Path::new(".")))?;
+    let file = directory.join(cli.config).to_string_lossy().to_string();
 
     if !Path::new(&file).exists() {
         let default_config = "port: 7890";
@@ -284,52 +294,63 @@ fn main() -> anyhow::Result<()> {
         _guard = Some(sentry::init((env!("SENTRY_DSN"), options)));
     }
 
-    let mut config = parse_config()
+    let config = parse_config()
         .inspect_err(|err| eprintln!("Failed to parse configuration: {err}"))?;
 
-    config.general.controller.external_controller_ipc = cli.controller_ipc;
     if cli.compatibility {
         println!(
             "Compatibility mode enabled. This may cause some issues, but it is \
              recommended to enable this if you are using clash verge."
         );
-        if let Some(dir) = &cli.directory {
-            // Canonicalize to an absolute path before changing the process cwd.
-            // If `dir` is relative (e.g. `./clash-bin/tests/data/config`),
-            // calling set_current_dir then passing the same relative string as
-            // `cwd` to start_scaffold would cause paths like
-            // `cwd.join("Country.mmdb")` to be resolved from the *new* process
-            // cwd, doubling the directory segments and producing a path that
-            // doesn't exist (os error 2).
-            let abs = std::fs::canonicalize(dir)?;
-            std::env::set_current_dir(&abs)?;
-        }
-        if config.general.mmdb.is_none() {
-            config.general.mmdb = Some("Country.mmdb".to_string());
-        }
-        if config.general.geosite.is_none() {
-            config.general.geosite = Some("geosite.dat".to_string());
+        if cli.directory.is_some() {
+            std::env::set_current_dir(&directory)?;
         }
     }
 
-    // When compatibility mode called set_current_dir the process cwd is
-    // already correct; pass None so start_scaffold uses "." (= the new cwd)
-    // rather than the original relative cli.directory which would be resolved
-    // from the wrong base.
-    let cwd = if cli.compatibility && cli.directory.is_some() {
-        None
-    } else {
-        cli.directory.map(|x| x.to_string_lossy().to_string())
-    };
-
-    clash::start_scaffold(clash::Options {
-        config: clash::Config::Internal(config),
-        cwd,
-        rt: Some(TokioRuntime::MultiThread),
-        log_file: cli.log_file,
-        config_path: Some(file),
-    })
+    clash::start_scaffold_with_overrides(
+        clash::Options {
+            config: clash::Config::Internal(config),
+            cwd: Some(directory.to_string_lossy().into_owned()),
+            rt: Some(TokioRuntime::MultiThread),
+            log_file: cli.log_file,
+            config_path: Some(file),
+        },
+        clash::StartupOverrides {
+            controller_ipc: cli.controller_ipc,
+            #[cfg(windows)]
+            controller_pipe_sddl: pipe_sddl_override(cli.controller_pipe_sddl),
+            compatibility: cli.compatibility,
+        },
+    )
     .inspect_err(|err| eprintln!("Failed to start clash: {err}"))?;
+    Ok(())
+}
+
+#[cfg(all(windows, test))]
+#[test]
+fn controller_pipe_sddl_accepts_env_and_prefers_cli() -> anyhow::Result<()> {
+    use clap::CommandFactory;
+
+    let key = "LISTEN_NAMEDPIPE_SDDL";
+    let cmd = Cli::command();
+    let option = cmd
+        .get_arguments()
+        .find(|arg| arg.get_id() == "controller_pipe_sddl")
+        .unwrap();
+    assert_eq!(option.get_env(), Some(std::ffi::OsStr::new(key)));
+    assert_eq!(
+        pipe_sddl_override(Cli::try_parse_from(["clash-rs"])?.controller_pipe_sddl),
+        std::env::var(key).ok().filter(|sddl| !sddl.is_empty())
+    );
+    let explicit = "D:(A;;GA;;;SY)";
+    for (value, expected) in [("", None), (explicit, Some(explicit))] {
+        let cli =
+            Cli::try_parse_from(["clash-rs", "--controller-pipe-sddl", value])?;
+        assert_eq!(
+            pipe_sddl_override(cli.controller_pipe_sddl).as_deref(),
+            expected
+        );
+    }
     Ok(())
 }
 

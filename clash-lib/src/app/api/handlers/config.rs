@@ -121,6 +121,10 @@ async fn get_configs(State(state): State<ConfigState>) -> impl IntoResponse {
         mode: Some(run_mode),
         log_level: Some(log_level),
         ipv6: Some(components.dns_resolver.ipv6()),
+        unified_delay: components
+            .outbound_manager
+            .unified_delay()
+            .load(std::sync::atomic::Ordering::Relaxed),
         allow_lan: Some(allow_lan),
         listeners: Some(listeners),
         lan_ips,
@@ -208,15 +212,21 @@ async fn update_configs(
 #[derive(Serialize)]
 #[serde(rename_all = "kebab-case")]
 struct GetConfigResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
     port: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     socks_port: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     redir_port: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     tproxy_port: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     mixed_port: Option<u16>,
     bind_address: Option<String>,
     mode: Option<def::RunMode>,
     log_level: Option<def::LogLevel>,
     ipv6: Option<bool>,
+    unified_delay: bool,
     allow_lan: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     listeners: Option<Vec<InboundEndpoint>>,
@@ -238,6 +248,7 @@ struct PatchConfigRequest {
     mode: Option<def::RunMode>,
     log_level: Option<def::LogLevel>,
     ipv6: Option<bool>,
+    unified_delay: Option<bool>,
     allow_lan: Option<bool>,
 }
 
@@ -306,6 +317,12 @@ async fn patch_configs(
         let _ = inbound_manager.restart().await;
     }
 
+    if let Some(unified) = payload.unified_delay {
+        components
+            .outbound_manager
+            .unified_delay()
+            .store(unified, std::sync::atomic::Ordering::Relaxed);
+    }
     if let Some(ipv6) = payload.ipv6 {
         components.dns_resolver.set_ipv6(ipv6);
     }

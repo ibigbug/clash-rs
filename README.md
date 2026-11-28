@@ -65,12 +65,6 @@ A custom protocol, rule based network proxy software.
 
 - Linux
 - Android ([clash-android](https://github.com/rust-proxy/clash-android))
-  - On Android builds with `tproxy`, an explicit `routing-mark` may set bits 21–23 and 26–30.
-    Clash excludes bits 24 and 25 because Android uses them for cleartext policy in the connection mark.
-    AOSP reserves bits 21–28 for future use. Check their use on the target device,
-    including its firewall and policy routing rules, before assigning them.
-    Bits 29–30 are reserved for vendors. Use them only when assigned to your deployment.
-    A value that sets any other bit (for example, `6666`) prevents the profile from loading.
 - macOS
 - Windows
   - You need to copy the [wintun.dll](https://wintun.net/) file which matches your architecture to the same directory as your executable and run your program as administrator.
@@ -146,6 +140,12 @@ Options:
       --compatibility              Enable compatibility mode for mihomo-consistent behavior
   -h, --help                       Print help
 ```
+
+`--controller-ipc` takes precedence over the YAML IPC address at startup and on reload. Without the flag, each configuration supplies its own IPC address. Set `external-controller: ""` to disable the TCP controller while using IPC.
+
+The REST API reads its CORS policy from `external-controller-cors`. Its `allow-origins` list takes precedence over the legacy top-level `cors-allow-origins`. An empty list allows no browser origin to read a cross-origin response. The same applies when the block is present and both lists are omitted. Set `allow-private-network: false` inside the block to omit `Access-Control-Allow-Private-Network` from preflight responses. The default is `true`. Changes take effect on configuration reload.
+
+In compatibility mode, ClashRS resolves relative GeoData paths against `-d` (the working directory if omitted). When the configuration omits `mmdb` or `geosite`, it uses `Country.mmdb` or `geosite.dat`, respectively. The same defaults apply on reload.
 
 ## FFI
 

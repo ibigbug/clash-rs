@@ -206,6 +206,28 @@ impl OutboundManager {
         self.selector_control.get(name).cloned()
     }
 
+    pub async fn get_groups(&self) -> Vec<AnyOutboundHandler> {
+        // The default provider contains static handlers in profile order.
+        let mut groups = if let Some(provider) =
+            self.get_proxy_provider(RESERVED_PROVIDER_NAME)
+        {
+            provider
+                .proxies()
+                .await
+                .into_iter()
+                .filter(|p| {
+                    p.name() != PROXY_GLOBAL && p.try_as_group_handler().is_some()
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        if let Some(global) = self.get_outbound(PROXY_GLOBAL).await {
+            groups.push(global);
+        }
+        groups
+    }
+
     /// Get all proxies in the manager, excluding those in providers.
     pub async fn get_proxies(&self) -> HashMap<String, Box<dyn Serialize + Send>> {
         let mut r = HashMap::new();
@@ -302,6 +324,10 @@ impl OutboundManager {
         proxy_manager
             .check(outbounds, url, Some(timeout), force)
             .await
+    }
+
+    pub(crate) fn unified_delay(&self) -> &std::sync::atomic::AtomicBool {
+        &self.proxy_manager.unified_delay
     }
 
     pub fn get_proxy_providers(&self) -> HashMap<String, ArcProxyProvider> {
@@ -1095,6 +1121,42 @@ mod tests {
         proxy::mocks::{MockDummyOutboundHandler, MockDummyProxyProvider},
     };
     use std::sync::Arc;
+
+    #[tokio::test]
+    async fn test_get_groups_lists_registered_global_once_in_profile_order() {
+        let names = ["Zulu", PROXY_GLOBAL, "Alpha"];
+        let groups = names
+            .into_iter()
+            .map(|name| {
+                OutboundGroupProtocol::Select(OutboundGroupSelect {
+                    name: name.to_owned(),
+                    proxies: Some(vec![PROXY_DIRECT.to_owned()]),
+                    ..Default::default()
+                })
+            })
+            .collect();
+        let mgr = OutboundManager::new(
+            vec![Arc::new(direct::Handler::new(PROXY_DIRECT))],
+            groups,
+            HashMap::new(),
+            names.map(str::to_owned).into(),
+            Arc::new(MockClashResolver::new()),
+            ThreadSafeCacheFile::new("", false),
+            ".".to_owned(),
+            None,
+            Default::default(),
+        )
+        .await
+        .unwrap();
+
+        let listed = mgr.get_groups().await;
+        assert_eq!(
+            listed.iter().map(|group| group.name()).collect::<Vec<_>>(),
+            ["Zulu", "Alpha", PROXY_GLOBAL]
+        );
+        let global = mgr.get_outbound(PROXY_GLOBAL).await.unwrap();
+        assert!(Arc::ptr_eq(listed.last().unwrap(), &global));
+    }
 
     #[tokio::test]
     async fn test_group_healthcheck_url() {

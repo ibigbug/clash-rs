@@ -86,6 +86,7 @@ pub struct General {
     pub controller: Controller,
     pub mode: RunMode,
     pub log_level: LogLevel,
+    pub unified_delay: bool,
     pub ipv6: bool,
     pub interface: Option<Interface>,
     pub routing_mask: Option<SocketMark>,
@@ -190,14 +191,21 @@ impl FromStr for BindAddress {
     }
 }
 
-#[derive(Serialize, Deserialize, Default, Clone, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, educe::Educe, Clone, PartialEq, Eq)]
+#[educe(Default)]
 pub struct Controller {
+    #[cfg(windows)]
+    #[serde(skip)]
+    pub pipe_sddl: Option<String>,
     pub external_controller: Option<String>,
     pub external_controller_ipc: Option<String>,
     pub external_ui: Option<String>,
     pub external_ui_download_url: Option<String>,
     pub secret: Option<String>,
     pub cors_allow_origins: Option<Vec<String>>,
+    #[serde(default = "crate::common::utils::default_bool_true")]
+    #[educe(Default = true)]
+    pub cors_allow_private_network: bool,
 }
 
 #[derive(Serialize, Deserialize)]

@@ -139,8 +139,9 @@ impl FastClassicalRules {
     }
 }
 
-struct Inner {
-    content: RuleContent,
+pub(super) struct RuleSet {
+    pub(super) content: RuleContent,
+    pub(super) rule_count: u64,
 }
 
 #[async_trait]
@@ -160,14 +161,14 @@ pub trait RuleProvider: Provider {
 pub type ThreadSafeRuleProvider = Arc<dyn RuleProvider + Send + Sync>;
 
 type RuleUpdater =
-    Box<dyn Fn(RuleContent) -> BoxFuture<'static, ()> + Send + Sync + 'static>;
+    Box<dyn Fn(RuleSet) -> BoxFuture<'static, ()> + Send + Sync + 'static>;
 type RuleParser =
-    Box<dyn Fn(&[u8]) -> anyhow::Result<RuleContent> + Send + Sync + 'static>;
+    Box<dyn Fn(&[u8]) -> anyhow::Result<RuleSet> + Send + Sync + 'static>;
 
 pub struct RuleProviderImpl {
     name: String,
     fetcher: Option<Fetcher<RuleUpdater, RuleParser>>,
-    inner: Arc<tokio::sync::RwLock<Inner>>,
+    inner: Arc<tokio::sync::RwLock<RuleSet>>,
     behavior: RuleSetBehavior,
     format: RuleSetFormat,
     inline_rules: Option<Vec<String>>,
@@ -189,7 +190,8 @@ impl RuleProviderImpl {
         geodata: Option<GeoDataLookup>,
         inline_rules: Option<Vec<String>>,
     ) -> Self {
-        let inner = Arc::new(tokio::sync::RwLock::new(Inner {
+        let inner = Arc::new(tokio::sync::RwLock::new(RuleSet {
+            rule_count: 0,
             content: match behavior {
                 RuleSetBehavior::Domain => {
                     RuleContent::Domain(succinct_set::DomainSet::default())
@@ -205,13 +207,13 @@ impl RuleProviderImpl {
 
         let n = name.clone();
         let updater: RuleUpdater =
-            Box::new(move |input: RuleContent| -> BoxFuture<'static, ()> {
+            Box::new(move |input: RuleSet| -> BoxFuture<'static, ()> {
                 let n = n.clone(); // Clone name for the async block
-                let inner: Arc<tokio::sync::RwLock<Inner>> = inner_clone.clone();
+                let inner: Arc<tokio::sync::RwLock<RuleSet>> = inner_clone.clone();
                 Box::pin(async move {
                     let mut inner = inner.write().await;
                     trace!("updated rules for provider: {}", n);
-                    inner.content = input;
+                    *inner = input;
                 })
             });
 
@@ -222,7 +224,7 @@ impl RuleProviderImpl {
         let mmdb_clone = mmdb.clone();
         let geodata_clone = geodata.clone();
         let parser: RuleParser =
-            Box::new(move |input: &[u8]| -> anyhow::Result<RuleContent> {
+            Box::new(move |input: &[u8]| -> anyhow::Result<RuleSet> {
                 match current_format {
                     RuleSetFormat::Yaml => {
                         let scheme: ProviderScheme = serde_yaml::from_slice(input)
@@ -413,7 +415,7 @@ impl Provider for RuleProviderImpl {
             match rules {
                 Ok(content) => {
                     let mut inner = self.inner.write().await;
-                    inner.content = content;
+                    *inner = content;
                 }
                 Err(e) => {
                     return Err(std::io::Error::new(
@@ -460,6 +462,10 @@ impl Provider for RuleProviderImpl {
 
         m.insert("behavior".to_owned(), Box::new(self.behavior().to_string()));
         m.insert("format".to_owned(), Box::new(self.format().to_string()));
+        m.insert(
+            "ruleCount".to_owned(),
+            Box::new(self.inner.read().await.rule_count),
+        );
 
         m
     }
@@ -471,19 +477,22 @@ fn make_rules(
     rules: Vec<String>, // Input is Vec<String> for Yaml/Text
     mmdb: Option<MmdbLookup>,
     geodata: Option<GeoDataLookup>,
-) -> Result<RuleContent, Error> {
-    match behavior {
+) -> Result<RuleSet, Error> {
+    let rule_count = rules.len() as u64;
+    let content = match behavior {
         RuleSetBehavior::Domain => {
             let s = make_domain_rules(rules)?;
-            Ok(RuleContent::Domain(s.into()))
+            RuleContent::Domain(s.into())
         }
-        RuleSetBehavior::Ipcidr => {
-            Ok(RuleContent::Ipcidr(Box::new(make_ip_cidr_rules(rules)?)))
-        }
-        RuleSetBehavior::Classical => Ok(RuleContent::Classical(Box::new(
+        RuleSetBehavior::Ipcidr => return Ok(make_ip_cidr_rules(rules)),
+        RuleSetBehavior::Classical => RuleContent::Classical(Box::new(
             make_classical_rules(rules, mmdb, geodata)?,
-        ))),
-    }
+        )),
+    };
+    Ok(RuleSet {
+        content,
+        rule_count,
+    })
 }
 
 fn make_domain_rules(rules: Vec<String>) -> Result<trie::StringTrie<bool>, Error> {
@@ -494,12 +503,18 @@ fn make_domain_rules(rules: Vec<String>) -> Result<trie::StringTrie<bool>, Error
     Ok(trie)
 }
 
-fn make_ip_cidr_rules(rules: Vec<String>) -> Result<CidrTrie, Error> {
+fn make_ip_cidr_rules(rules: Vec<String>) -> RuleSet {
     let mut trie = CidrTrie::new();
+    let mut rule_count = 0;
     for rule in rules {
-        trie.insert(&rule);
+        if trie.insert(&rule) {
+            rule_count += 1;
+        }
     }
-    Ok(trie)
+    RuleSet {
+        content: RuleContent::Ipcidr(Box::new(trie)),
+        rule_count,
+    }
 }
 
 fn make_classical_rules(
@@ -662,6 +677,8 @@ mod tests {
         );
 
         assert_ok!(provider.initialize().await);
+        let metadata = serde_json::to_value(provider.as_map().await).unwrap();
+        assert_eq!(metadata["ruleCount"], 2);
 
         assert!(provider.search(&Session {
             destination: SocksAddr::Domain("test.google.com".to_owned(), 443),
@@ -756,7 +773,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_ipcidr_provider_uses_resolved_ip() {
+    async fn test_ipcidr_provider_matches_and_counts_valid_rules() {
         let provider = RuleProviderImpl::new(
             "ipcidr-test".to_string(),
             RuleSetBehavior::Ipcidr,
@@ -765,9 +782,17 @@ mod tests {
             None,
             Some(Arc::new(MockMmdbLookupTrait::new())),
             Some(Arc::new(MockGeoDataLookupTrait::new())),
-            Some(vec!["10.0.0.0/8".to_owned(), "0.0.0.0/8".to_owned()]),
+            Some(vec![
+                "10.0.0.0/8".to_owned(),
+                "not-a-cidr".to_owned(),
+                "0.0.0.0/8".to_owned(),
+                "10.0.0.0/8".to_owned(),
+                "2001:db8::/32".to_owned(),
+            ]),
         );
         assert_ok!(provider.initialize().await);
+        let metadata = serde_json::to_value(provider.as_map().await).unwrap();
+        assert_eq!(metadata["ruleCount"], 4);
 
         // IP destination
         assert!(provider.search(&Session {

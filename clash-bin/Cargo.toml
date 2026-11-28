@@ -41,7 +41,7 @@ aws-lc-rs = ["dep:aws-lc-rs", "clash-lib/aws-lc-rs"]
 ring = ["clash-lib/ring"]
 
 [dependencies]
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 anyhow = "1"
 
 clash-lib = { path = "../clash-lib", default-features = false }

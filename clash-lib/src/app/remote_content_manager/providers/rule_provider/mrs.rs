@@ -9,7 +9,9 @@ use tracing::{debug, error, warn};
 
 use crate::{
     app::remote_content_manager::providers::rule_provider::{
-        RuleSetBehavior, cidr_trie::CidrTrie, provider::RuleContent,
+        RuleSetBehavior,
+        cidr_trie::CidrTrie,
+        provider::{RuleContent, RuleSet},
     },
     common::succinct_set::DomainSet,
 };
@@ -49,7 +51,7 @@ impl RuleSetBehavior {
 pub fn rules_mrs_parse(
     buf: &[u8],
     expected_behavior: RuleSetBehavior,
-) -> Result<RuleContent> {
+) -> Result<RuleSet> {
     // 1. Decompress using Zstandard
     let cursor = Cursor::new(buf);
     let mut reader = BufReader::new(
@@ -101,13 +103,17 @@ pub fn rules_mrs_parse(
     }
 
     // --- Payload Parsing ---
-    match actual_behavior {
+    let content = match actual_behavior {
         RuleSetBehavior::Domain => parse_domain_payload(&mut reader),
         RuleSetBehavior::Ipcidr => parse_ipcidr_payload(&mut reader),
         RuleSetBehavior::Classical => {
             bail!("Classical behavior is not supported by MRS format")
         }
-    }
+    }?;
+    Ok(RuleSet {
+        content,
+        rule_count: count as u64,
+    })
 }
 
 // --- Domain Payload Parsing ---
