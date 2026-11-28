@@ -425,56 +425,6 @@ pub async fn ping_pong_udp_test(
     let port = listener.local_addr()?.port();
     info!("target local server started at: {}", listener.local_addr()?);
 
-    async fn destination_fn(
-        mut rx: tokio::sync::oneshot::Receiver<()>,
-        listener: UdpSocket,
-    ) -> anyhow::Result<()> {
-        // Use inbound_stream here
-        let chunk = "world";
-        let mut buf = vec![0; 5];
-
-        info!(
-            "destination_fn(udp) waiting for data on {}",
-            listener.local_addr()?
-        );
-        tracing::trace!("destination_fn start read");
-
-        loop {
-            tokio::select! {
-                data = listener.recv_from(&mut buf) => {
-                    match data {
-                        Ok((len, src) ) => {
-                            info!(
-                                "destination_fn(udp) received {} bytes from {}: {:?}",
-                                len,
-                                src,
-                                &buf[..len]
-                            );
-                            assert_eq!(&buf, b"hello");
-                            info!("destination_fn(udp) sending response to {}", src);
-                            tracing::trace!("destination_fn start write");
-                            let sent = listener.send_to(chunk.as_bytes(), src).await?;
-                            info!("destination_fn(udp) sent {} bytes", sent);
-                            tracing::trace!("destination_fn end");
-                        },
-                        Err(e) => {
-                            info!("Error accepting connection(tcp): {}", e);
-                            continue;
-                        }
-                    }
-                }
-                _ = &mut rx => {
-                    info!("target_local_server_handler(tcp) received shutdown signal, exiting...");
-                    return Ok(());
-                }
-            }
-        }
-    }
-    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
-    let target_local_server_handler: tokio::task::JoinHandle<
-        Result<(), anyhow::Error>,
-    > = tokio::spawn(async move { destination_fn(rx, listener).await });
-
     async fn proxy_fn(
         mut datagram: BoxedInstrumentedDatagram,
         src_addr: SocksAddr,
@@ -592,10 +542,10 @@ pub async fn ping_pong_udp_test(
         ))
     });
 
-    let futs = vec![proxy_task, target_local_server_handler];
-    let res = select_all(futs).await.0?;
-    tx.send(()).ok();
-    res
+    tokio::select! {
+        result = proxy_task => result?,
+        result = super::echo::serve_udp_ping_pong(listener) => result.map_err(Into::into),
+    }
 }
 
 // latency test of the proxy, will reuse the `url_test` ability

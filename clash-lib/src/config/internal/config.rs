@@ -57,8 +57,21 @@ impl Config {
                 )));
             }
         }
-        // Check for duplicate AnyTLS user passwords
         for opts in &self.listeners {
+            if let super::listener::InboundOpts::Tunnel {
+                proxy: Some(name), ..
+            } = opts
+                // Provider membership can change after the configuration loads.
+                && self.proxy_providers.is_empty()
+                && name != super::proxy::PROXY_GLOBAL
+                && !self.proxies.contains_key(name)
+                && !self.proxy_groups.contains_key(name)
+            {
+                return Err(Error::InvalidConfig(format!(
+                    "proxy `{name}` referenced in a tunnel was not found"
+                )));
+            }
+            // Check for duplicate AnyTLS user passwords.
             if let crate::config::internal::listener::InboundOpts::Anytls {
                 common_opts,
                 users,

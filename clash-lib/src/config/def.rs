@@ -494,6 +494,9 @@ pub struct Config {
     /// top-level port shortcuts when both are present.
     pub listeners: Option<Vec<InboundOpts>>,
 
+    /// Fixed-target TCP and UDP port forwards.
+    pub tunnels: Option<Vec<super::tunnel::Tunnel>>,
+
     #[serde(rename = "inbound-providers")]
     /// Remote or file-based inbound listener providers. Keyed by provider name.
     pub inbound_provider: Option<HashMap<String, InboundProviderDef>>,

@@ -11,6 +11,7 @@ use crate::config::{
 /// options.
 pub(super) fn convert(
     raw: Option<Vec<InboundOpts>>,
+    tunnels: Option<Vec<crate::config::tunnel::Tunnel>>,
     c: &def::Config,
 ) -> Result<HashSet<InboundOpts>, crate::Error> {
     let http_port = c.port;
@@ -31,6 +32,31 @@ pub(super) fn convert(
         if all_inbounds.contains(&inbound) {
             warn!("Duplicate inbound listener found: {:?}", inbound);
             continue;
+        }
+        all_inbounds.insert(inbound);
+    }
+
+    let mut tunnel_sockets = HashSet::new();
+    for tunnel in tunnels.unwrap_or_default() {
+        let inbound = tunnel.into_listener(c.routing_mark)?;
+        if let InboundOpts::Tunnel {
+            common_opts,
+            network,
+            ..
+        } = &inbound
+        {
+            for transport in network {
+                if !tunnel_sockets.insert((
+                    common_opts.listen,
+                    common_opts.port,
+                    transport.clone(),
+                )) {
+                    return Err(crate::Error::InvalidConfig(format!(
+                        "duplicate tunnel listener: {transport} on {}:{}",
+                        common_opts.listen.0, common_opts.port
+                    )));
+                }
+            }
         }
         all_inbounds.insert(inbound);
     }

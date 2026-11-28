@@ -3,7 +3,6 @@ use crate::{
         dispatcher::{BoxedInstrumentedDatagram, BoxedInstrumentedStream},
         dns::ThreadSafeDNSResolver,
     },
-    config::internal::proxy::PROXY_REJECT,
     proxy::OutboundHandler,
     session::Session,
 };
@@ -38,7 +37,7 @@ impl DialWithConnector for Handler {}
 #[async_trait]
 impl OutboundHandler for Handler {
     fn name(&self) -> &str {
-        PROXY_REJECT
+        &self.name
     }
 
     fn proto(&self) -> OutboundType {

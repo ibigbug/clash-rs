@@ -60,6 +60,8 @@ pub enum InboundOpts {
         common_opts: CommonInboundOpts,
         network: Vec<String>,
         target: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        proxy: Option<String>,
     },
     #[cfg(feature = "shadowsocks")]
     #[serde(alias = "shadowsocks")]
@@ -175,13 +177,15 @@ impl PartialEq for InboundOpts {
                     common_opts: a,
                     network: na,
                     target: ta,
+                    proxy: pa,
                 },
                 InboundOpts::Tunnel {
                     common_opts: b,
                     network: nb,
                     target: tb,
+                    proxy: pb,
                 },
-            ) => a == b && na == nb && ta == tb,
+            ) => a == b && na == nb && ta == tb && pa == pb,
             #[cfg(feature = "shadowsocks")]
             (
                 InboundOpts::Shadowsocks {
@@ -269,10 +273,12 @@ impl std::hash::Hash for InboundOpts {
                 common_opts,
                 network,
                 target,
+                proxy,
             } => {
                 common_opts.hash(state);
                 network.hash(state);
                 target.hash(state);
+                proxy.hash(state);
             }
             #[cfg(feature = "shadowsocks")]
             InboundOpts::Shadowsocks {

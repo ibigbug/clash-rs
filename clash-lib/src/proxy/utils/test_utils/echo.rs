@@ -2,7 +2,10 @@
 
 use std::time::Duration;
 
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::UdpSocket,
+};
 
 const DEFAULT_ACCEPT_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -100,4 +103,38 @@ impl Drop for TcpEchoServer {
             handle.abort();
         }
     }
+}
+
+pub(super) async fn serve_udp_ping_pong(listener: UdpSocket) -> std::io::Result<()> {
+    let mut buf = vec![0; u16::MAX as usize];
+    loop {
+        let (len, peer) = listener.recv_from(&mut buf).await?;
+        // A reused ephemeral port can still receive unrelated datagrams.
+        if &buf[..len] == b"hello" {
+            listener.send_to(b"world", peer).await?;
+        }
+    }
+}
+
+#[tokio::test]
+async fn udp_ping_pong_ignores_unrelated_datagrams() -> std::io::Result<()> {
+    let listener = UdpSocket::bind("127.0.0.1:0").await?;
+    let addr = listener.local_addr()?;
+    let server = tokio::spawn(serve_udp_ping_pong(listener));
+    let client = UdpSocket::bind("127.0.0.1:0").await?;
+    client.connect(addr).await?;
+    let mut buf = [0; 16];
+    client.send(&[97, 214, 129, 128, 0]).await?;
+    client.send(b"hello!").await?;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), client.recv(&mut buf))
+            .await
+            .is_err()
+    );
+    client.send(b"hello").await?;
+    let n = tokio::time::timeout(Duration::from_secs(3), client.recv(&mut buf))
+        .await??;
+    assert_eq!(&buf[..n], b"world");
+    server.abort();
+    Ok(())
 }

@@ -12,7 +12,6 @@ use crate::{
         dns::ThreadSafeDNSResolver,
     },
     common::errors::map_io_error,
-    config::internal::proxy::PROXY_DIRECT,
     proxy::{
         OutboundHandler,
         direct::datagram::OutboundDatagramImpl,
@@ -54,7 +53,7 @@ impl DialWithConnector for Handler {}
 #[async_trait]
 impl OutboundHandler for Handler {
     fn name(&self) -> &str {
-        PROXY_DIRECT
+        &self.name
     }
 
     fn proto(&self) -> OutboundType {

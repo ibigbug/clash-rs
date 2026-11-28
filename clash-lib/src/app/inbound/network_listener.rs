@@ -178,6 +178,7 @@ fn build_handler(
             common_opts,
             network,
             target,
+            proxy,
         } => TunnelInbound::new(
             (common_opts.listen.0, common_opts.port).into(),
             dispatcher,
@@ -188,7 +189,7 @@ fn build_handler(
         .inspect_err(|x| {
             warn!("tunnel inbound handler failed to create: {x}");
         })
-        .map(|x| Arc::new(x) as _)
+        .map(|x| Arc::new(x.with_proxy(proxy.clone())) as _)
         .ok(),
         #[cfg(feature = "shadowsocks")]
         InboundOpts::Shadowsocks {
