@@ -158,6 +158,8 @@ struct Cli {
     #[cfg(windows)]
     #[clap(
         long,
+        env = "LISTEN_NAMEDPIPE_SDDL",
+        hide_env_values = true,
         help = "Set the security descriptor for the controller named pipe"
     )]
     controller_pipe_sddl: Option<String>,
@@ -341,6 +343,28 @@ fn main() -> anyhow::Result<()> {
         config_path: Some(file),
     })
     .inspect_err(|err| eprintln!("Failed to start clash: {err}"))?;
+    Ok(())
+}
+
+#[cfg(all(windows, test))]
+#[test]
+fn controller_pipe_sddl_accepts_env_and_prefers_cli() -> anyhow::Result<()> {
+    use clap::CommandFactory;
+
+    let key = "LISTEN_NAMEDPIPE_SDDL";
+    let cmd = Cli::command();
+    let option = cmd
+        .get_arguments()
+        .find(|arg| arg.get_id() == "controller_pipe_sddl")
+        .unwrap();
+    assert_eq!(option.get_env(), Some(std::ffi::OsStr::new(key)));
+    assert_eq!(
+        Cli::try_parse_from(["clash-rs"])?.controller_pipe_sddl,
+        std::env::var(key).ok()
+    );
+    let explicit = "D:(A;;GA;;;SY)";
+    let cli = Cli::try_parse_from(["clash-rs", "--controller-pipe-sddl", explicit])?;
+    assert_eq!(cli.controller_pipe_sddl.as_deref(), Some(explicit));
     Ok(())
 }
 
