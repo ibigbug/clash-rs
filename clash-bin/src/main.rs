@@ -190,6 +190,11 @@ fn env_truthy(name: &str) -> bool {
     }
 }
 
+#[cfg(windows)]
+fn pipe_sddl_override(sddl: Option<String>) -> Option<String> {
+    sddl.filter(|value| !value.is_empty())
+}
+
 fn main() -> anyhow::Result<()> {
     #[cfg(feature = "dhat-heap")]
     let _profiler = dhat::Profiler::new_heap();
@@ -313,7 +318,7 @@ fn main() -> anyhow::Result<()> {
         clash::StartupOverrides {
             controller_ipc: cli.controller_ipc,
             #[cfg(windows)]
-            controller_pipe_sddl: cli.controller_pipe_sddl,
+            controller_pipe_sddl: pipe_sddl_override(cli.controller_pipe_sddl),
             compatibility: cli.compatibility,
         },
     )
@@ -334,12 +339,18 @@ fn controller_pipe_sddl_accepts_env_and_prefers_cli() -> anyhow::Result<()> {
         .unwrap();
     assert_eq!(option.get_env(), Some(std::ffi::OsStr::new(key)));
     assert_eq!(
-        Cli::try_parse_from(["clash-rs"])?.controller_pipe_sddl,
-        std::env::var(key).ok()
+        pipe_sddl_override(Cli::try_parse_from(["clash-rs"])?.controller_pipe_sddl),
+        std::env::var(key).ok().filter(|sddl| !sddl.is_empty())
     );
     let explicit = "D:(A;;GA;;;SY)";
-    let cli = Cli::try_parse_from(["clash-rs", "--controller-pipe-sddl", explicit])?;
-    assert_eq!(cli.controller_pipe_sddl.as_deref(), Some(explicit));
+    for (value, expected) in [("", None), (explicit, Some(explicit))] {
+        let cli =
+            Cli::try_parse_from(["clash-rs", "--controller-pipe-sddl", value])?;
+        assert_eq!(
+            pipe_sddl_override(cli.controller_pipe_sddl).as_deref(),
+            expected
+        );
+    }
     Ok(())
 }
 
