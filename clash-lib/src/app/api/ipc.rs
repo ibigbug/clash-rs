@@ -12,14 +12,18 @@ pub async fn serve_ipc(
     use tracing::info;
 
     use crate::app::api::middlewares::websocket_uri_rewrite::rewrite_websocket_uri;
-    info!("Starting API server on NamedPipe {path}");
+    let sddl =
+        std::ffi::CString::new(sddl.unwrap_or("D:(A;;GRGW;;;BU)(A;;GRGW;;;SY)"))
+            .map_err(|_| {
+                crate::Error::InvalidConfig("invalid NUL in pipe SDDL".into())
+            })?;
+    // Validate before accept starts retrying pipe creation errors.
+    SecurityAttributesGuard::new(&sddl)?;
 
+    info!("Starting API server on NamedPipe {path}");
     let listener = NamedPipeListener {
         path: path.to_string(),
-        sddl: std::ffi::CString::new(
-            sddl.unwrap_or("D:(A;;GRGW;;;BU)(A;;GRGW;;;SY)"),
-        )
-        .map_err(|_| crate::Error::Operation("invalid NUL in pipe SDDL".into()))?,
+        sddl,
         first_instance: true,
     };
     let app = MapRequestLayer::new(rewrite_websocket_uri).layer(router);
@@ -111,9 +115,7 @@ impl SecurityAttributesGuard {
                 Some(&mut sd_size),
             )
             .map_err(|e| {
-                crate::Error::Operation(format!(
-                    "Failed to convert SDDL to security descriptor: {e:?}"
-                ))
+                crate::Error::InvalidConfig(format!("invalid pipe SDDL: {e}"))
             })?;
 
             let sa = SECURITY_ATTRIBUTES {
@@ -324,6 +326,23 @@ mod tests {
         let result = serve_ipc(router, "test_path").await;
         assert!(result.is_err());
         assert!(logs_contain("IPC only get supported on Unix and Windows"));
+    }
+
+    #[tokio::test]
+    #[cfg(windows)]
+    async fn test_serve_ipc_windows_rejects_invalid_sddl() {
+        use tokio::time::{Duration, timeout};
+
+        let path = r"\\.\pipe\test_named_pipe_invalid_sddl";
+        for sddl in ["D:(A;;GRGW;;;BU", "D:\0"] {
+            let result = timeout(
+                Duration::from_secs(1),
+                serve_ipc(test_router(), path, Some(sddl)),
+            )
+            .await
+            .expect("invalid SDDL should fail during setup");
+            assert!(matches!(result, Err(crate::Error::InvalidConfig(_))));
+        }
     }
 
     #[tokio::test]
