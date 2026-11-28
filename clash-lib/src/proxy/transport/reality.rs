@@ -12,7 +12,10 @@ use std::{
 
 use crate::proxy::{
     AnyStream,
-    transport::{Transport, VisionOptions, splice_tls::SplicableTlsStream},
+    transport::{
+        Transport, VisionOptions,
+        splice_tls::{RecordChunkIo, SplicableTlsStream},
+    },
 };
 
 fn init_roots() -> Arc<RootCertStore> {
@@ -80,18 +83,19 @@ impl Transport for Client {
     }
 
     /// Establish a Reality TLS connection and return the stream together with
-    /// `VisionOptions` (a pair of `Arc<AtomicBool>` splice flags) that allow
-    /// the upper `VisionStream` to signal this layer when XTLS-splice mode is
-    /// triggered.
+    /// `VisionOptions` (an `Arc<AtomicBool>` splice flag) that allow the upper
+    /// `VisionStream` to signal this layer when the server switches its
+    /// downlink to raw copy.
     ///
     /// ## Layer stack
     ///
     /// ```text
-    ///  VisionStream          (owns VisionOptions – writes the flags)
+    ///  VisionStream          (owns VisionOptions – writes the flag)
     ///    └─ VlessStream      (VLESS framing)
-    ///        └─ SplicableTlsStream  (reads the flags; bypasses TLS when set)
+    ///        └─ SplicableTlsStream  (reads the flag; reads raw when set)
     ///            └─ Reality TLS
-    ///                └─ TCP
+    ///                └─ RecordChunkIo   (one TLS record per read until the flag)
+    ///                    └─ TCP
     /// ```
     ///
     /// ## Handshake / splice sequence
@@ -101,42 +105,35 @@ impl Transport for Client {
     ///    |                                          |
     ///    |---------- Reality TLS handshake -------->|
     ///    |<--------- Reality TLS handshake ---------|
-    ///    |   (all traffic above is Reality-TLS encrypted)
+    ///    |   (all traffic below is Reality-TLS encrypted on the wire)
     ///    |                                          |
-    ///    |========== Vision framing mode ===========|
-    ///    |--[UUID][CMD=0x00][inner TLS ClientHello]->|  Vision-framed inner TLS
+    ///    |====== Vision framing (both directions) ==|
+    ///    |--[UUID][CMD=0x00][inner TLS ClientHello]->|
     ///    |<-[UUID][CMD=0x00][inner TLS ServerHello]--|
-    ///    |<-[CMD=0x02][inner TLS AppData]------------|  server triggers splice
-    ///    |--[CMD=0x02][inner TLS AppData]----------->|  client triggers splice
+    ///    |<-[CMD=0x00][inner TLS records]-----------|
     ///    |                                          |
-    ///    |  (both sides received CMD_DIRECT)        |
+    ///    |  server recognises inner TLS 1.3         |
     ///    |                                          |
-    ///    |========== Splice mode (raw TCP) ==========|
-    ///    |--[raw inner-TLS AppData]----------------->|  no outer TLS encryption
-    ///    |<-[raw inner-TLS AppData]------------------|
-    /// ```
+    ///    |<--[CMD=0x02][inner TLS AppData]----------|  server leaves TLS
+    ///    |      (everything after this is RAW)      |
+    ///    |<==[raw inner-TLS records]================|  no outer TLS on downlink
+    ///    |                                          |
+    ///    |==[CMD=0x00 frames, inside Reality TLS]==>|  uplink stays framed
+    ///    ```
     ///
-    /// On `CMD_PADDING_DIRECT` (0x02):
-    /// - `VisionStream` sets `read_flag` / `write_flag` to `true`.
-    /// - `SplicableTlsStream` detects the flags and bypasses Reality TLS,
-    ///   reading/writing raw bytes directly on the TCP socket.
+    /// The client never sends `CMD_PADDING_DIRECT`: its uplink stays framed
+    /// inside Reality TLS, and so does the server's uplink reader.
     async fn proxy_stream_spliced(
         &self,
         stream: AnyStream,
     ) -> io::Result<(AnyStream, Option<VisionOptions>)> {
         let read_flag = Arc::new(AtomicBool::new(false));
-        let write_flag = Arc::new(AtomicBool::new(false));
-        let tls_stream = self.connect_tls(stream).await?;
-        let splittable = SplicableTlsStream::new(
-            tls_stream,
-            Arc::clone(&read_flag),
-            Arc::clone(&write_flag),
-        );
-        let opts = VisionOptions {
-            read_flag,
-            write_flag,
-        };
-        Ok((Box::new(splittable), Some(opts)))
+        let chunked: AnyStream =
+            Box::new(RecordChunkIo::new(stream, Arc::clone(&read_flag)));
+        let tls_stream = self.connect_tls(chunked).await?;
+        let splicable = SplicableTlsStream::new(tls_stream, Arc::clone(&read_flag));
+        let opts = VisionOptions { read_flag };
+        Ok((Box::new(splicable), Some(opts)))
     }
 }
 

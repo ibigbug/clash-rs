@@ -36,7 +36,7 @@ pub trait Transport: Send + Sync {
     ) -> std::io::Result<super::AnyStream>;
 
     /// Like `proxy_stream`, but additionally returns a `VisionOptions` for
-    /// transports that support XTLS-splice (Reality).  The default
+    /// transports that support XTLS-splice (TLS and Reality).  The default
     /// implementation delegates to `proxy_stream` and returns `None`,
     /// meaning no splice is available.
     async fn proxy_stream_spliced(
@@ -99,6 +99,7 @@ impl TransportLayer {
         stream: super::AnyStream,
     ) -> std::io::Result<(super::AnyStream, Option<VisionOptions>)> {
         match self {
+            Self::Tls(t) => Transport::proxy_stream_spliced(t, stream).await,
             Self::Reality(t) => Transport::proxy_stream_spliced(t, stream).await,
             other => Ok((other.wrap(stream).await?, None)),
         }

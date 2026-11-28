@@ -80,15 +80,25 @@ impl Handler {
             s
         };
 
+        // An Xray server rejects UDP on the Vision flow outright
+        // (`proxy/vless/inbound/inbound.go`: "xtls-rprx-vision doesn't support
+        // UDP"), so datagram sessions carry no flow and no Vision framing.
+        let use_vision =
+            !is_udp && self.opts.flow.as_deref() == Some("xtls-rprx-vision");
+
         let vless_stream = VlessStream::new(
             s,
             &self.opts.uuid,
             &sess.destination,
             is_udp,
-            self.opts.flow.clone(),
+            if use_vision {
+                self.opts.flow.clone()
+            } else {
+                None
+            },
         )?;
 
-        if self.opts.flow.as_deref() == Some("xtls-rprx-vision") {
+        if use_vision {
             Ok(Box::new(VisionStream::new(
                 Box::new(vless_stream),
                 self.opts.uuid.clone(),
