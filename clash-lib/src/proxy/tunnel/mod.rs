@@ -29,6 +29,7 @@ pub struct TunnelInbound {
     network: Vec<String>,
     target: SocksAddr,
     fw_mark: Option<SocketMark>,
+    proxy: Option<String>,
 }
 
 impl Drop for TunnelInbound {
@@ -51,7 +52,13 @@ impl TunnelInbound {
             network,
             target: SocksAddr::from_str(&target)?,
             fw_mark,
+            proxy: None,
         })
+    }
+
+    pub(crate) fn with_proxy(mut self, proxy: Option<String>) -> Self {
+        self.proxy = proxy;
+        self
     }
 }
 
@@ -66,7 +73,7 @@ impl InboundHandlerTrait for TunnelInbound {
     }
 
     async fn listen_tcp(&self) -> std::io::Result<()> {
-        if !self.network.contains(&"tcp".to_string()) {
+        if !self.handle_tcp() {
             return Ok(());
         }
         info!(
@@ -100,14 +107,17 @@ impl InboundHandlerTrait for TunnelInbound {
                 ..Default::default()
             };
 
+            let proxy = self.proxy.clone();
             tokio::spawn(async move {
-                dispatcher.dispatch_stream(sess, Box::new(socket)).await;
+                dispatcher
+                    .dispatch_stream_to(sess, Box::new(socket), proxy.as_deref())
+                    .await;
             });
         }
     }
 
     async fn listen_udp(&self) -> std::io::Result<()> {
-        if !self.network.contains(&"udp".to_string()) {
+        if !self.handle_udp() {
             return Ok(());
         }
         let socket = UdpSocket::bind(self.listen).await?;
@@ -120,13 +130,13 @@ impl InboundHandlerTrait for TunnelInbound {
             network: Network::Udp,
             typ: Type::Tunnel,
             destination: self.target.clone(),
+            so_mark: self.fw_mark,
             ..Default::default()
         };
         let inbound = UdpSession::new(socket, self.target.clone());
 
-        _ = self
-            .dispatcher
-            .dispatch_datagram(sess, Box::new(inbound))
+        self.dispatcher
+            .datagram_session(sess, Box::new(inbound), self.proxy.clone())
             .await;
         Ok(())
     }
@@ -155,16 +165,10 @@ impl Sink<UdpPacket> for UdpSession {
     type Error = io::Error;
 
     fn poll_ready(
-        mut self: Pin<&mut Self>,
-        _cx: &mut Context<'_>,
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
     ) -> Poll<Result<(), Self::Error>> {
-        let this = self.deref_mut();
-        // "Back pressure" mechanism, new data is allowed to be written only
-        // when the buffer is empty
-        match this.send_buf {
-            Some(_) => Poll::Pending,
-            None => Poll::Ready(Ok(())),
-        }
+        self.poll_flush(cx)
     }
 
     fn start_send(
@@ -199,22 +203,10 @@ impl Sink<UdpPacket> for UdpSession {
         cx: &mut Context<'_>,
     ) -> Poll<Result<(), Self::Error>> {
         let this = self.deref_mut();
-        let socket = &this.socket;
-        let send_buf = &this.send_buf;
-        if let Some((data, dst_addr)) = send_buf {
-            return match socket.try_send_to(data, *dst_addr) {
-                Ok(_) => {
-                    this.send_buf.take();
-                    Poll::Ready(Ok(()))
-                }
-                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
-                    // Register Waker to wake up when the socket is writable
-                    socket.poll_send_ready(cx)
-                }
-                Err(e) => Poll::Ready(Err(e)),
-            };
+        if let Some((data, addr)) = &this.send_buf {
+            std::task::ready!(this.socket.poll_send_to(cx, data, *addr))?;
+            this.send_buf = None;
         }
-        // No data needs flush
         Poll::Ready(Ok(()))
     }
 
@@ -237,8 +229,6 @@ impl Stream for UdpSession {
         let socket = &this.socket;
         this.read_buf.resize(this.read_buf.capacity(), 0);
         let mut buf = ReadBuf::new(&mut this.read_buf);
-        dbg!(buf.initialized().len());
-        buf.clear();
         match socket.poll_recv_from(cx, &mut buf) {
             Poll::Ready(Ok(src_addr)) => {
                 let data = buf.filled().to_vec();

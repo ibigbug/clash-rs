@@ -1,7 +1,9 @@
 use crate::{
     app::{
-        dns::ClashResolver, net::get_interface_by_name,
-        outbound::manager::ThreadSafeOutboundManager, router::ArcRouter,
+        dns::ClashResolver,
+        net::get_interface_by_name,
+        outbound::manager::ThreadSafeOutboundManager,
+        router::{ArcRouter, RuleEntry},
     },
     common::io::copy_bidirectional,
     config::{
@@ -9,7 +11,7 @@ use crate::{
         internal::proxy::{PROXY_DIRECT, PROXY_GLOBAL},
     },
     proxy::{
-        AnyInboundDatagram, ProxyStream,
+        AnyInboundDatagram, AnyOutboundHandler, ProxyStream,
         datagram::{UdpPacket, is_sink_closed},
         utils::ToCanonical,
     },
@@ -81,10 +83,15 @@ impl Dispatcher {
     }
 
     #[instrument(skip(self, sess, lhs))]
-    pub async fn dispatch_stream(
+    pub async fn dispatch_stream(&self, sess: Session, lhs: Box<dyn ProxyStream>) {
+        self.dispatch_stream_to(sess, lhs, None).await;
+    }
+
+    pub(crate) async fn dispatch_stream_to(
         &self,
         mut sess: Session,
         mut lhs: Box<dyn ProxyStream>,
+        proxy: Option<&str>,
     ) {
         let dest: SocksAddr =
             match reverse_lookup(&self.resolver, &sess.destination).await {
@@ -98,33 +105,16 @@ impl Dispatcher {
         sess.destination = dest.clone();
 
         let mode = *self.mode.read().await;
-        let (outbound_name, rule) = match mode {
-            RunMode::Global => (PROXY_GLOBAL, None),
-            RunMode::Rule => self.router.match_route(&mut sess).await,
-            RunMode::Direct => (PROXY_DIRECT, None),
-        };
-
-        if let Some(interface) = rule.and_then(|rule| rule.interface()) {
-            match get_interface_by_name(interface) {
-                Some(iface) => sess.iface = Some(iface),
-                None => warn!(
-                    "rule-selected interface `{}` was not found; using the default \
-                     interface",
-                    interface
-                ),
-            }
-        }
-        let outbound_name = outbound_name.to_string();
-
-        debug!("dispatching {} to {}[{}]", sess, outbound_name, mode);
-
-        let mgr = self.outbound_manager.clone();
-        let handler = match mgr.get_outbound(&outbound_name).await {
-            Some(h) => h,
-            None => {
-                debug!("unknown rule: {}, fallback to direct", outbound_name);
-                mgr.get_outbound(PROXY_DIRECT).await.unwrap()
-            }
+        let Some((outbound_name, handler, rule)) = select_outbound(
+            &mut sess,
+            mode,
+            &self.router,
+            &self.outbound_manager,
+            proxy,
+        )
+        .await
+        else {
+            return;
         };
 
         match handler
@@ -238,6 +228,26 @@ impl Dispatcher {
         sess: Session,
         udp_inbound: AnyInboundDatagram,
     ) -> tokio::sync::oneshot::Sender<u8> {
+        let forwarding = self.datagram_session(sess, udp_inbound, None);
+        let (close_sender, close_receiver) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            tokio::pin!(forwarding);
+            tokio::select! {
+                () = &mut forwarding => {},
+                signal = close_receiver => {
+                    if signal.is_err() { forwarding.await; }
+                }
+            }
+        });
+        close_sender
+    }
+
+    pub(crate) fn datagram_session(
+        &self,
+        sess: Session,
+        udp_inbound: AnyInboundDatagram,
+        proxy: Option<String>,
+    ) -> impl Future<Output = ()> + Send + use<> {
         let outbound_handle_guard = TimeoutUdpSessionManager::new();
 
         let router = self.router.clone();
@@ -268,9 +278,8 @@ impl Dispatcher {
         let (remote_receiver_w, mut remote_receiver_r) =
             tokio::sync::mpsc::channel(256);
 
-        let s = sess.clone();
-        let ss = sess.clone();
-        let t1 = tokio::spawn(async move {
+        let reply_session = sess.clone();
+        let forward = async move {
             while let Some(mut packet) = local_r.next().await {
                 let mut sess = sess.clone();
 
@@ -309,39 +318,18 @@ impl Dispatcher {
 
                 let mode = *mode.read().await;
 
-                let (outbound_name, rule) = match mode {
-                    RunMode::Global => (PROXY_GLOBAL, None),
-                    RunMode::Rule => router.match_route(&mut sess).await,
-                    RunMode::Direct => (PROXY_DIRECT, None),
+                let Some((outbound_name, handler, rule)) = select_outbound(
+                    &mut sess,
+                    mode,
+                    &router,
+                    &outbound_manager,
+                    proxy.as_deref(),
+                )
+                .await
+                else {
+                    continue;
                 };
-
-                if let Some(interface) = rule.and_then(|rule| rule.interface()) {
-                    match get_interface_by_name(interface) {
-                        Some(iface) => sess.iface = Some(iface),
-                        None => warn!(
-                            "rule-selected interface `{}` was not found; using the \
-                             default interface",
-                            interface
-                        ),
-                    }
-                }
-                let outbound_name = outbound_name.to_string();
-
-                debug!("dispatching {} to {}[{}]", sess, outbound_name, mode);
-
                 let remote_receiver_w = remote_receiver_w.clone();
-
-                let mgr = outbound_manager.clone();
-                let handler = match mgr.get_outbound(&outbound_name).await {
-                    Some(h) => h,
-                    None => {
-                        debug!(
-                            "unknown rule: {}, fallback to direct",
-                            outbound_name
-                        );
-                        mgr.get_outbound(PROXY_DIRECT).await.unwrap()
-                    }
-                };
 
                 let outbound_name =
                     if let Some(group) = handler.try_as_group_handler() {
@@ -432,16 +420,18 @@ impl Dispatcher {
                 };
             }
 
-            trace!("UDP session local -> remote finished for {}", ss);
-        });
+            trace!("UDP session local -> remote finished for {}", sess);
+        };
 
-        let ss = s.clone();
-        let t2 = tokio::spawn(async move {
+        let replies = async move {
             while let Some(packet) = remote_receiver_r.recv().await {
                 match local_w.send(packet).await {
                     Ok(_) => {}
                     Err(err) if is_sink_closed(&err) => {
-                        warn!("local udp sink closed for {}: {}", ss, err);
+                        warn!(
+                            "local udp sink closed for {}: {}",
+                            reply_session, err
+                        );
                         break;
                     }
                     Err(err) => {
@@ -449,23 +439,55 @@ impl Dispatcher {
                     }
                 }
             }
-            trace!("UDP session remote -> local finished for {}", ss);
-        });
-
-        let (close_sender, close_receiver) = tokio::sync::oneshot::channel::<u8>();
-
-        tokio::spawn(async move {
-            if close_receiver.await.is_ok() {
-                trace!("UDP close signal for {} received", s);
-                t1.abort();
-                t2.abort();
-            } else {
-                error!("UDP close signal dropped!");
-            }
-        });
-
-        close_sender
+            trace!("UDP session remote -> local finished for {}", reply_session);
+        };
+        async move {
+            tokio::join!(forward, replies);
+        }
     }
+}
+
+async fn select_outbound<'a>(
+    sess: &mut Session,
+    mode: RunMode,
+    router: &'a ArcRouter,
+    mgr: &ThreadSafeOutboundManager,
+    proxy: Option<&str>,
+) -> Option<(String, AnyOutboundHandler, Option<&'a RuleEntry>)> {
+    let (outbound_name, rule) = match (proxy, mode) {
+        (Some(name), _) => (name, None),
+        (None, RunMode::Global) => (PROXY_GLOBAL, None),
+        (None, RunMode::Rule) => router.match_route(sess).await,
+        (None, RunMode::Direct) => (PROXY_DIRECT, None),
+    };
+
+    if let Some(interface) = rule.and_then(|rule| rule.interface()) {
+        match get_interface_by_name(interface) {
+            Some(iface) => sess.iface = Some(iface),
+            None => warn!(
+                "rule-selected interface `{}` was not found; using the default \
+                 interface",
+                interface
+            ),
+        }
+    }
+    let outbound_name = outbound_name.to_string();
+
+    debug!("dispatching {} to {}[{}]", sess, outbound_name, mode);
+
+    let handler = match mgr.get_outbound(&outbound_name).await {
+        Some(h) => h,
+        None if proxy.is_some() => {
+            warn!("tunnel proxy {outbound_name} is unavailable");
+            return None;
+        }
+        None => {
+            debug!("unknown rule: {}, fallback to direct", outbound_name);
+            mgr.get_outbound(PROXY_DIRECT).await?
+        }
+    };
+
+    Some((outbound_name, handler, rule))
 }
 
 // helper function to resolve the destination address

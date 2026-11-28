@@ -127,7 +127,7 @@ pub(super) fn convert(mut c: def::Config) -> Result<config::Config, crate::Error
                 (name, provider)
             })
             .collect(),
-        listeners: listener::convert(c.listeners.take(), &c)?,
+        listeners: listener::convert(c.listeners.take(), c.tunnels.take(), &c)?,
         inbound_providers: c
             .inbound_provider
             .take()
