@@ -191,6 +191,32 @@ tunnels:
     };
     reload(api, &with_provider("rule", "provider-node")).await;
     forwards(pinned).await;
+    // Keep the source port and tunnel alive across a provider-only update.
+    let client = UdpSocket::bind((LOCAL, 0)).await.unwrap();
+    client.connect((LOCAL, pinned)).await.unwrap();
+    let mut reply = [0; 32];
+    client.send(b"before").await.unwrap();
+    let n = timeout(Duration::from_secs(3), client.recv(&mut reply))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(&reply[..n], b"before");
+    std::fs::write(
+        dir.path().join("nodes.yaml"),
+        "proxies: [{name: provider-node, type: reject}]",
+    )
+    .unwrap();
+    let uri = format!("http://{LOCAL}:{api}/providers/proxies/nodes");
+    let req = hyper::Request::put(&uri).body(String::new()).unwrap();
+    let res = send_http_request(uri.parse().unwrap(), req).await.unwrap();
+    assert_eq!(res.status(), http::StatusCode::ACCEPTED);
+    client.send(b"after").await.unwrap();
+    assert!(
+        timeout(Duration::from_millis(400), client.recv(&mut reply))
+            .await
+            .is_err(),
+        "first packet after provider replacement still used the direct association"
+    );
     reload(api, &with_provider("direct", "removed-node")).await;
     rejects(pinned).await;
     reload(api, &base).await;

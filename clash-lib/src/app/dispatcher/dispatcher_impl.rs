@@ -11,7 +11,7 @@ use crate::{
         internal::proxy::{PROXY_DIRECT, PROXY_GLOBAL},
     },
     proxy::{
-        AnyInboundDatagram, AnyOutboundHandler, ProxyStream,
+        AnyInboundDatagram, AnyOutboundHandler, OutboundHandler, ProxyStream,
         datagram::{UdpPacket, is_sink_closed},
         utils::ToCanonical,
     },
@@ -22,7 +22,7 @@ use std::{
     collections::HashMap,
     fmt::{Debug, Formatter},
     net::SocketAddr,
-    sync::Arc,
+    sync::{Arc, Weak},
     time::{Duration, Instant},
 };
 use tokio::{io::AsyncWriteExt, sync::RwLock, task::JoinHandle};
@@ -331,26 +331,21 @@ impl Dispatcher {
                 };
                 let remote_receiver_w = remote_receiver_w.clone();
 
-                let outbound_name =
+                let active_proxy =
                     if let Some(group) = handler.try_as_group_handler() {
-                        group
-                            .get_active_proxy()
-                            .await
-                            .map(|x| x.name().to_owned())
-                            .unwrap_or(outbound_name)
+                        group.get_active_proxy().await
                     } else {
-                        outbound_name
+                        None
                     };
+                let key = OutboundHandleKey {
+                    outbound_name,
+                    src_addr: packet.src_addr.clone().must_into_socket_addr(),
+                };
+                let handlers =
+                    UdpSessionHandlers::new(&handler, active_proxy.as_ref());
 
                 match outbound_handle_guard
-                    .get_outbound_sender_mut(
-                        &outbound_name,
-                        packet.src_addr.clone().must_into_socket_addr(), /* this is only
-                                                                          * expected to be
-                                                                          * socket addr as it's
-                                                                          * from local
-                                                                          * udp */
-                    )
+                    .get_outbound_sender_mut(&key, &handlers)
                     .await
                 {
                     None => {
@@ -391,12 +386,7 @@ impl Dispatcher {
                         ));
 
                         outbound_handle_guard
-                            .insert(
-                                &outbound_name,
-                                packet.src_addr.clone().must_into_socket_addr(),
-                                rw_handle,
-                                remote_sender.clone(),
-                            )
+                            .insert(key, handlers, rw_handle, remote_sender.clone())
                             .await;
 
                         match remote_sender.send((packet, dest)).await {
@@ -406,17 +396,14 @@ impl Dispatcher {
                             }
                         };
                     }
-                    Some(sender) => {
-                        match sender.send((packet, dest)).await {
-                            // TODO: need to reset when GLOBAL select is changed
-                            Ok(_) => {
-                                debug!("reusing {} sent to remote", sess);
-                            }
-                            Err(err) => {
-                                error!("failed to send packet to remote: {}", err);
-                            }
+                    Some(sender) => match sender.send((packet, dest)).await {
+                        Ok(_) => {
+                            debug!("reusing {} sent to remote", sess);
                         }
-                    }
+                        Err(err) => {
+                            error!("failed to send packet to remote: {}", err);
+                        }
+                    },
                 };
             }
 
@@ -714,22 +701,22 @@ impl TimeoutUdpSessionManager {
 
     async fn insert(
         &self,
-        outbound_name: &str,
-        src_addr: SocketAddr,
+        key: OutboundHandleKey,
+        handlers: UdpSessionHandlers,
         rw_handle: JoinHandle<()>,
         sender: OutboundPacketSender,
     ) {
         let mut map = self.map.write().await;
-        map.insert(outbound_name, src_addr, rw_handle, sender);
+        map.insert(key, handlers, rw_handle, sender);
     }
 
     async fn get_outbound_sender_mut(
         &self,
-        outbound_name: &str,
-        src_addr: SocketAddr,
+        key: &OutboundHandleKey,
+        handlers: &UdpSessionHandlers,
     ) -> Option<OutboundPacketSender> {
         let mut map = self.map.write().await;
-        map.get_outbound_sender_mut(outbound_name, src_addr)
+        map.get_outbound_sender_mut(key, handlers)
     }
 }
 
@@ -741,7 +728,37 @@ struct OutboundHandleKey {
     src_addr: SocketAddr,
 }
 
+// A provider refresh can replace an outbound or a group's active member under
+// the same name. Weak references identify those instances without keeping them
+// alive.
+struct UdpSessionHandlers {
+    outbound: Weak<dyn OutboundHandler>,
+    active_proxy: Option<Weak<dyn OutboundHandler>>,
+}
+
+impl UdpSessionHandlers {
+    fn new(
+        outbound: &AnyOutboundHandler,
+        active_proxy: Option<&AnyOutboundHandler>,
+    ) -> Self {
+        Self {
+            outbound: Arc::downgrade(outbound),
+            active_proxy: active_proxy.map(Arc::downgrade),
+        }
+    }
+
+    fn matches(&self, other: &Self) -> bool {
+        self.outbound.ptr_eq(&other.outbound)
+            && match (&self.active_proxy, &other.active_proxy) {
+                (Some(a), Some(b)) => a.ptr_eq(b),
+                (None, None) => true,
+                _ => false,
+            }
+    }
+}
+
 struct OutboundHandleVal {
+    handlers: UdpSessionHandlers,
     /// Handles both local→remote and remote→local, owns orig_map.
     rw_handle: JoinHandle<()>,
     sender: OutboundPacketSender,
@@ -757,17 +774,15 @@ impl OutboundHandleMap {
 
     fn insert(
         &mut self,
-        outbound_name: &str,
-        src_addr: SocketAddr,
+        key: OutboundHandleKey,
+        handlers: UdpSessionHandlers,
         rw_handle: JoinHandle<()>,
         sender: OutboundPacketSender,
     ) {
         self.0.insert(
-            OutboundHandleKey {
-                outbound_name: outbound_name.to_string(),
-                src_addr,
-            },
+            key,
             OutboundHandleVal {
+                handlers,
                 rw_handle,
                 sender,
                 last_active: Instant::now(),
@@ -777,37 +792,19 @@ impl OutboundHandleMap {
 
     fn get_outbound_sender_mut(
         &mut self,
-        outbound_name: &str,
-        src_addr: SocketAddr,
+        key: &OutboundHandleKey,
+        handlers: &UdpSessionHandlers,
     ) -> Option<OutboundPacketSender> {
-        let key = OutboundHandleKey {
-            outbound_name: outbound_name.to_owned(),
-            src_addr,
-        };
-        // A closed sender means its `rw_handle` task ended and dropped the
-        // receiver (e.g. the outbound datagram stream ended after a proxy
-        // reconnect). Reusing it would silently drop every packet and, because
-        // the lookup refreshes `last_active`, the timeout cleaner would never
-        // evict it. Drop the dead session so the caller rebuilds the
-        // association on the live connection.
-        if self.0.get(&key).is_some_and(|val| val.sender.is_closed()) {
-            if let Some(dead) = self.0.remove(&key) {
-                dead.rw_handle.abort();
-            }
-            trace!(
-                "evicting closed outbound udp session {:?}",
-                (outbound_name, src_addr)
-            );
-            return None;
-        }
-        self.0.get_mut(&key).map(|val| {
-            trace!(
-                "updating last access time for outbound {:?}",
-                (outbound_name, src_addr)
-            );
+        let val = self.0.get_mut(key)?;
+        if !val.sender.is_closed() && val.handlers.matches(handlers) {
+            trace!("updating last access time for outbound {key:?}");
             val.last_active = Instant::now();
-            val.sender.clone()
-        })
+            return Some(val.sender.clone());
+        }
+        trace!("evicting stale outbound udp session {key:?}");
+        val.rw_handle.abort();
+        self.0.remove(key);
+        None
     }
 }
 
@@ -831,33 +828,59 @@ mod tests {
         "127.0.0.1:40000".parse().unwrap()
     }
 
+    fn udp_key() -> OutboundHandleKey {
+        OutboundHandleKey {
+            outbound_name: "proxy".to_owned(),
+            src_addr: src(),
+        }
+    }
+
+    fn outbound(name: &str) -> AnyOutboundHandler {
+        Arc::new(crate::proxy::direct::Handler::new(name))
+    }
+
     #[tokio::test]
     async fn closed_udp_session_is_evicted_for_reconnect() {
         let mut map = OutboundHandleMap::new();
         let (tx, rx) = tokio::sync::mpsc::channel::<(UdpPacket, SocksAddr)>(4);
         let handle = tokio::spawn(async {});
-        map.insert("proxy", src(), handle, tx);
+        let handler = outbound("proxy");
+        let route = || UdpSessionHandlers::new(&handler, None);
+        map.insert(udp_key(), route(), handle, tx);
 
         // Receiver alive: the cached sender is reused.
-        assert!(map.get_outbound_sender_mut("proxy", src()).is_some());
+        assert!(map.get_outbound_sender_mut(&udp_key(), &route()).is_some());
 
         // Receiver dropped (its rw_handle ended): the entry is evicted so the
         // caller rebuilds the association instead of writing to a dead channel.
         drop(rx);
-        assert!(map.get_outbound_sender_mut("proxy", src()).is_none());
+        assert!(map.get_outbound_sender_mut(&udp_key(), &route()).is_none());
         // The entry is removed, not merely skipped.
         assert!(map.0.is_empty());
     }
 
     #[tokio::test]
-    async fn live_udp_session_is_retained() {
+    async fn live_udp_session_tracks_the_active_group_member() {
         let mut map = OutboundHandleMap::new();
         let (tx, _rx) = tokio::sync::mpsc::channel::<(UdpPacket, SocksAddr)>(4);
         let handle = tokio::spawn(async {});
-        map.insert("proxy", src(), handle, tx);
+        let group = outbound("group");
+        let member = outbound("proxy");
+        let route = |member: &AnyOutboundHandler| {
+            UdpSessionHandlers::new(&group, Some(member))
+        };
+        map.insert(udp_key(), route(&member), handle, tx);
 
-        assert!(map.get_outbound_sender_mut("proxy", src()).is_some());
-        assert_eq!(map.0.len(), 1);
+        assert!(
+            map.get_outbound_sender_mut(&udp_key(), &route(&member))
+                .is_some()
+        );
+        let replacement = outbound("proxy");
+        assert!(
+            map.get_outbound_sender_mut(&udp_key(), &route(&replacement))
+                .is_none()
+        );
+        assert!(map.0.is_empty());
     }
 
     /// Sink that fails every send with `err` and counts close calls.
