@@ -484,9 +484,7 @@ fn make_rules(
             let s = make_domain_rules(rules)?;
             RuleContent::Domain(s.into())
         }
-        RuleSetBehavior::Ipcidr => {
-            RuleContent::Ipcidr(Box::new(make_ip_cidr_rules(rules)?))
-        }
+        RuleSetBehavior::Ipcidr => return Ok(make_ip_cidr_rules(rules)),
         RuleSetBehavior::Classical => RuleContent::Classical(Box::new(
             make_classical_rules(rules, mmdb, geodata)?,
         )),
@@ -505,12 +503,18 @@ fn make_domain_rules(rules: Vec<String>) -> Result<trie::StringTrie<bool>, Error
     Ok(trie)
 }
 
-fn make_ip_cidr_rules(rules: Vec<String>) -> Result<CidrTrie, Error> {
+fn make_ip_cidr_rules(rules: Vec<String>) -> RuleSet {
     let mut trie = CidrTrie::new();
+    let mut rule_count = 0;
     for rule in rules {
-        trie.insert(&rule);
+        if trie.insert(&rule) {
+            rule_count += 1;
+        }
     }
-    Ok(trie)
+    RuleSet {
+        content: RuleContent::Ipcidr(Box::new(trie)),
+        rule_count,
+    }
 }
 
 fn make_classical_rules(
@@ -769,7 +773,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_ipcidr_provider_uses_resolved_ip() {
+    async fn test_ipcidr_provider_matches_and_counts_valid_rules() {
         let provider = RuleProviderImpl::new(
             "ipcidr-test".to_string(),
             RuleSetBehavior::Ipcidr,
@@ -778,9 +782,17 @@ mod tests {
             None,
             Some(Arc::new(MockMmdbLookupTrait::new())),
             Some(Arc::new(MockGeoDataLookupTrait::new())),
-            Some(vec!["10.0.0.0/8".to_owned(), "0.0.0.0/8".to_owned()]),
+            Some(vec![
+                "10.0.0.0/8".to_owned(),
+                "not-a-cidr".to_owned(),
+                "0.0.0.0/8".to_owned(),
+                "10.0.0.0/8".to_owned(),
+                "2001:db8::/32".to_owned(),
+            ]),
         );
         assert_ok!(provider.initialize().await);
+        let metadata = serde_json::to_value(provider.as_map().await).unwrap();
+        assert_eq!(metadata["ruleCount"], 4);
 
         // IP destination
         assert!(provider.search(&Session {
